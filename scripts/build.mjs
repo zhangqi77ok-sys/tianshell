@@ -15,11 +15,11 @@ export async function build(options = { quiet: false }) {
   };
   await esbuild.build({
     ...shared,
-    entryPoints: [path.join(root, 'src/main/main.ts')],
+    entryPoints: [path.join(root, 'src/web/server.ts')],
     platform: 'node',
     format: 'esm',
-    outfile: path.join(dist, 'main.js'),
-    external: ['electron', 'ssh2'],
+    outfile: path.join(dist, 'server.js'),
+    external: ['ssh2'],
   });
   await esbuild.build({
     ...shared,
@@ -28,14 +28,6 @@ export async function build(options = { quiet: false }) {
     format: 'esm',
     outfile: path.join(dist, 'mcp.js'),
     external: ['ssh2'],
-  });
-  await esbuild.build({
-    ...shared,
-    entryPoints: [path.join(root, 'src/main/preload.ts')],
-    platform: 'node',
-    format: 'cjs',
-    outfile: path.join(dist, 'preload.cjs'),
-    external: ['electron'],
   });
   await esbuild.build({
     ...shared,
