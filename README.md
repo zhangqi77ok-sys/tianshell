@@ -1,62 +1,51 @@
 # TianShell
 
-一个带界面的 SSH 客户端，里面嵌了一个 MCP 服务。你可以像平时一样连上服务器敲命令，也可以让支持 MCP 的助手按已保存的主机去执行命令。
+一个**纯 Node.js（零 Electron）**的跨平台全功能 SSH/SFTP 协同工作台，内置标准 **MCP (Model Context Protocol)** 服务。既可在浏览器/独立应用窗中作为桌面工作台管理多台服务器，也可直接由支持 MCP 的 AI 助手（TianCode / Cursor / Claude Desktop）通过 `stdio` 协同排查与运维。
 
-作者是 zq（[zhangqi77ok-sys](https://github.com/zhangqi77ok-sys)）。这是一个还在长大的工具，不是功能清单的演示页。
+作者是 zq（[zhangqi77ok-sys](https://github.com/zhangqi77ok-sys)）。
 
-## 现在能做什么
+## 核心特性
 
-- 添加、修改、删除 SSH 主机（别名、地址、端口、用户名）
-- 用密码或 OpenSSH/PEM 私钥登录
-- 打开一个交互式终端，用完可以断开
-- 凭据用 AES-256-GCM 加密后留在本机
-- 通过 MCP 列出主机、在主机上执行一条命令、查看这次 MCP 进程里的会话
+- **纯 Node.js 22 轻量架构（已彻底脱离 Electron）**：
+  - 安装与冷启动极快（`dist/server.js` + `dist/mcp.js`），不再打包 Chromium/Electron。
+  - 凭据使用 **AES-256-GCM** 加密存储；Windows 下通过系统原生 **DPAPI (`CurrentUser`, `TS1D` 封装)** 保护 `vault.key`，POSIX 下按 `0600` 权限保护。
+- **主机分组、标签与 ProxyJump 多跳跳板机**：
+  - 左侧支持自定义分组、关键词/标签搜索过滤、密码与 OpenSSH/PEM 私钥认证、TOFU 主机密钥指纹记忆与清除。
+  - 主机可配置 `jumpHostId` 跳板机链路（内置循环依赖检测），通过多跳 `forwardOut` 直达内网节点。
+- **多标签终端 & 本机 Shell & 广播输入**：
+  - 同时开启多台 SSH 终端与本机 Shell（Windows PowerShell / POSIX `$SHELL`）标签页，互不关闭。
+  - 支持终端内 `Ctrl+F` 搜索、拖拽调整上下分屏比例、勾选「广播输入」将命令/快捷片段同步下发到所有已打开终端。
+- **完整 SFTP 文件管理与在线文本编辑**：
+  - 支持目录浏览、面包屑导航、显示隐藏文件、新建目录、重命名、权限修改 (`chmod`)、递归删除。
+  - 支持文件**拖拽上传**、流式下载、底部实时传输队列进度与取消；双击文本/配置文件可弹出等宽编辑器直接修改并写回远端。
+- **服务器实时 Bento 监控仪表盘**：
+  - 定时低开销采集主机 CPU %、内存 & Swap 占用、网络上下行速率（RX/TX B/s）、LoadAvg、磁盘分区及 Top CPU 进程榜（高负载自动告警变色）。
+- **SSH 端口转发与 SOCKS5 动态代理**：
+  - 支持 `-L`（本地转发）、`-R`（远程反向转发）及内置 RFC 1928 **-D 动态 SOCKS5 代理**，规则持久化且一键启停。
+- **快捷命令库与暗/亮双主题**：
+  - 内置常用 Linux 诊断命令卡片并支持自定义分类 CRUD、暗/亮双主题、终端字号与采样周期持久化配置。
 
-文件面板现在只是占位。浏览目录、上传、下载还没做。桌面里同一时间只开一个终端。
+## 环境与运行
 
-## 环境
-
-需要 Node.js 22 或更高版本。Windows 10 及以上可以直接用。macOS 和常见的桌面 Linux 也可以，只要 Electron 能起来。
-
-## 运行
+需要 **Node.js 22 或更高版本**。
 
 ```bash
 npm install
 npm start
 ```
 
-`npm start` 会先编译，再打开窗口。改完代码后重新执行一次即可。
+`npm start` 会自动编译构建并启动本地工作台（绑定 `127.0.0.1` + 一次性会话 Token 鉴权）并打开浏览器访问。仅构筑不拉起浏览器可执行 `node dist/server.js --no-open`。
 
-第一次连接某台主机时，会记住它的主机密钥指纹。以后指纹变了会拒绝连接。如果是你自己换过密钥，编辑这台主机，勾选「清除已记住的主机指纹」，保存后再连。
-
-## 数据放在哪
-
-默认目录：
-
-- Windows：`%APPDATA%\tianshell`
-- macOS：`~/Library/Application Support/tianshell`
-- Linux：`~/.config/tianshell`
-
-里面主要是 `hosts.json` 和 `vault.key`。密码和私钥在 `hosts.json` 里是密文。`vault.key` 是解开它们的钥匙。旁边的 `app` 文件夹是 Electron 自己的缓存，删掉不影响已保存的主机。
-
-系统密钥环可用时（Windows 的 DPAPI、macOS 钥匙串、带 libsecret 的 Linux），钥匙会再包一层，只放给当前用户。密钥环不可用时，钥匙文件会以仅当前用户可读的方式写在数据目录里。能读到你整个用户目录的程序，仍然有机会解开它。不要把这两个文件交给别人，也不要提交到 git。
-
-想换目录可以设置 `TIANSHELL_HOME`。桌面程序和 MCP 要指向同一个目录，助手才看得到你保存的主机。
-
-## 测试
+## 测试与类型检查
 
 ```bash
-npm test
 npm run typecheck
+npm test
 ```
 
-测试覆盖加密、主机库存取、MCP 工具，以及在本机临时拉起的 SSH 服务上执行命令和打开终端。不会连接外网。
+## MCP 服务接入（纯 Node stdio）
 
-## MCP
-
-TianShell 的 MCP 走 stdio。先在桌面里把主机加好，再让助手调用工具。
-
-在 Cursor 里可以这样写（路径改成你自己的）：
+在支持 MCP 的客户端（如 TianCode / Cursor）中添加：
 
 ```json
 {
@@ -70,46 +59,30 @@ TianShell 的 MCP 走 stdio。先在桌面里把主机加好，再让助手调�
 }
 ```
 
-仓库里执行 `node scripts/mcp.mjs` 也一样。它会先编译，再用 Electron 启动 MCP，这样和桌面程序使用同一套钥匙。日志在 stderr，stdout 只留给协议消息。
+如需独立数据目录，可传入 `"env": { "TIANSHELL_HOME": "D:\\data\\tianshell" }`。日志统一输出至 `stderr`，`stdout` 仅保留 JSON-RPC 2.0 协议帧。
 
-如果数据目录不是默认位置，加上环境变量：
-
-```json
-"env": {
-  "TIANSHELL_HOME": "D:\\secrets\\tianshell"
-}
-```
-
-### 工具
+### 已暴露 MCP 工具列表
 
 | 工具 | 作用 |
-| --- | --- |
-| `list_hosts` | 列出已保存的主机，不含密码和私钥 |
-| `run_command` | 连上某台主机，执行一条命令，返回输出和退出码 |
-| `session_status` | 查看这个 MCP 进程里的命令会话 |
+| :--- | :--- |
+| `list_hosts` | 列出已保存主机、分组与跳板机关联（不含密码与私钥） |
+| `run_command` | 连上目标主机（支持 `ProxyJump`）执行命令，返回输出与退出码 |
+| `session_status` | 查看本 MCP 进程内的命令执行会话记录 |
+| `sftp_list` | 列出远端 POSIX 目录内容与权限 |
+| `sftp_read` | 只读读取远端 UTF-8 文本/配置文件（上限 256KB） |
+| `sftp_write` | 将 UTF-8 文本写回远端文件（上限 512KB） |
+| `system_metrics` | 采样并返回目标主机 CPU / 内存 / Swap / 磁盘 / 负载 / Top 进程 |
 
-`run_command` 的参数是 `host`（id 或别名）、`command`，以及可选的 `timeout_seconds`（默认 30，最长 120）。命令会在远程机器上真实执行，请只把它接到你信任的助手上。输出太长会被截断。
-
-桌面里打开的交互终端，和 MCP 的命令会话是分开的。MCP 看不到你正在敲的那一个窗口。两边打通留到后面再做。
-
-## 目录
+## 目录结构
 
 ```text
-src/core      主机库、加密、会话记录
-src/ssh       SSH 连接和命令执行
-src/mcp       MCP 工具
-src/main      Electron 主进程
-src/renderer  界面
-test          单元测试
+src/core      分组主机库 (HostStore)、DPAPI 适配器 (TS1D)、AES-GCM 仓库、快照/隧道/设置仓库
+src/ssh       SSH 连接/ProxyJump 链路、SFTP 流式操作、系统监控采样、L/R/SOCKS5 隧道、本机终端
+src/mcp       纯 Node MCP 工具注册与 stdio CLI 入口
+src/web       纯 Node HTTP REST API、原生 RFC 6455 WebSocket Hub 与服务入口
+src/renderer  四区复刻工作台前端 UI (xterm.js + SFTP/监控/隧道/多标签控制)
+test          单元与真实本地 SSH/SFTP/WebSocket/MCP 集成测试
 ```
-
-## 后面想做的
-
-- SFTP：列目录、上传、下载
-- 多标签终端
-- 跳板机
-- 让 MCP 看见当前桌面会话
-- 安装包，先照顾 Windows
 
 ## 许可
 
