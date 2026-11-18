@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import path from 'node:path';
-import type { HostDraft, PublicHost, ResolvedHost } from '../shared/types.js';
+import type { AuthType, HostDraft, HostGroup, PublicHost, ResolvedHost } from '../shared/types.js';
+import { atomicWriteJson, readJsonOrDefault } from './stores.js';
 import { open, seal } from './vault.js';
 
 interface StoredHost {
@@ -10,10 +9,14 @@ interface StoredHost {
   host: string;
   port: number;
   username: string;
-  authType: 'password' | 'privateKey';
+  authType: AuthType;
   secret: string;
   passphrase: string | null;
   fingerprint: string | null;
+  groupId?: string | null;
+  jumpHostId?: string | null;
+  tags?: string[];
+  notes?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -21,6 +24,7 @@ interface StoredHost {
 interface HostFile {
   version: 1;
   hosts: StoredHost[];
+  groups?: HostGroup[];
 }
 
 export class HostStoreError extends Error {
@@ -40,6 +44,35 @@ export class HostStore {
     return this.read()
       .hosts.map(toPublic)
       .sort((a, b) => a.alias.localeCompare(b.alias, 'zh-CN'));
+  }
+
+  listGroups(): HostGroup[] {
+    return [...(this.read().groups ?? [])].sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, 'zh-CN'));
+  }
+
+  saveGroup(draft: { id?: string; name: string; parentId?: string | null; order?: number }): HostGroup {
+    const name = requireText(draft.name, '分组名称', 48);
+    const data = this.read();
+    const groups = [...(data.groups ?? [])];
+    const group: HostGroup = {
+      id: draft.id?.trim() || randomUUID(),
+      name,
+      parentId: draft.parentId ?? null,
+      order: typeof draft.order === 'number' ? draft.order : groups.length,
+    };
+    const idx = groups.findIndex((g) => g.id === group.id);
+    if (idx >= 0) groups[idx] = group;
+    else groups.push(group);
+    atomicWriteJson(this.filePath, { version: 1, hosts: data.hosts, groups });
+    return group;
+  }
+
+  deleteGroup(id: string): void {
+    const data = this.read();
+    const groups = (data.groups ?? []).filter((g) => g.id !== id);
+    if (groups.length === (data.groups ?? []).length) throw new HostStoreError('找不到这个分组');
+    const hosts = data.hosts.map((h) => (h.groupId === id ? { ...h, groupId: null } : h));
+    atomicWriteJson(this.filePath, { version: 1, hosts, groups });
   }
 
   resolve(idOrAlias: string): ResolvedHost | null {
@@ -69,17 +102,20 @@ export class HostStore {
       throw new HostStoreError(`已经有别名叫「${next.alias}」的主机了`);
     }
     const hosts = existing ? data.hosts.map((host) => (host.id === next.id ? next : host)) : [...data.hosts, next];
-    this.write({ version: 1, hosts });
+    assertNoJumpCycles(hosts);
+    atomicWriteJson(this.filePath, { version: 1, hosts, groups: data.groups });
     return toPublic(next);
   }
 
   delete(id: string): void {
     const data = this.read();
-    const hosts = data.hosts.filter((host) => host.id !== id);
+    const hosts = data.hosts
+      .filter((host) => host.id !== id)
+      .map((host) => (host.jumpHostId === id ? { ...host, jumpHostId: null } : host));
     if (hosts.length === data.hosts.length) {
       throw new HostStoreError('找不到这台主机');
     }
-    this.write({ version: 1, hosts });
+    atomicWriteJson(this.filePath, { version: 1, hosts, groups: data.groups });
   }
 
   rememberFingerprint(id: string, fingerprint: string): boolean {
@@ -89,7 +125,7 @@ export class HostStore {
     if (!host.fingerprint) {
       host.fingerprint = fingerprint;
       host.updatedAt = new Date().toISOString();
-      this.write(data);
+      atomicWriteJson(this.filePath, data);
       return true;
     }
     return host.fingerprint === fingerprint;
@@ -109,19 +145,7 @@ export class HostStore {
       throw new HostStoreError('认证方式只能是密码或私钥');
     }
 
-    const rawSecret = draft.secret ?? '';
-    let secret: string;
-    if (rawSecret.trim()) {
-      if (draft.authType === 'privateKey' && !rawSecret.includes('PRIVATE KEY')) {
-        throw new HostStoreError('私钥需要是 OpenSSH 或 PEM 格式（内容里要有 PRIVATE KEY）');
-      }
-      secret = seal(this.key, rawSecret);
-    } else if (existing && existing.authType === draft.authType) {
-      secret = existing.secret;
-    } else {
-      throw new HostStoreError(draft.authType === 'password' ? '请填写密码' : '请填写私钥');
-    }
-
+    const secret = this.resolveSecret(draft, existing);
     let passphrase: string | null = null;
     if (draft.authType === 'privateKey') {
       if (draft.clearPassphrase) passphrase = null;
@@ -140,16 +164,33 @@ export class HostStore {
       secret,
       passphrase,
       fingerprint: draft.clearFingerprint ? null : (existing?.fingerprint ?? null),
+      groupId: draft.groupId === undefined ? (existing?.groupId ?? null) : draft.groupId,
+      jumpHostId: draft.jumpHostId === undefined ? (existing?.jumpHostId ?? null) : draft.jumpHostId,
+      tags: draft.tags ? draft.tags.map((t) => t.trim()).filter(Boolean) : existing?.tags,
+      notes: draft.notes === undefined ? existing?.notes : draft.notes.trim(),
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     };
   }
 
+  private resolveSecret(draft: HostDraft, existing: StoredHost | undefined): string {
+    const rawSecret = draft.secret ?? '';
+    if (rawSecret.trim()) {
+      if (draft.authType === 'privateKey' && !rawSecret.includes('PRIVATE KEY')) {
+        throw new HostStoreError('私钥需要是 OpenSSH 或 PEM 格式（内容里要有 PRIVATE KEY）');
+      }
+      return seal(this.key, rawSecret);
+    }
+    if (existing && existing.authType === draft.authType) {
+      return existing.secret;
+    }
+    throw new HostStoreError(draft.authType === 'password' ? '请填写密码' : '请填写私钥');
+  }
+
   private read(): HostFile {
-    if (!existsSync(this.filePath)) return { version: 1, hosts: [] };
     let parsed: unknown;
     try {
-      parsed = JSON.parse(readFileSync(this.filePath, 'utf8'));
+      parsed = readJsonOrDefault<HostFile>(this.filePath, { version: 1, hosts: [] }, 'hosts.json');
     } catch {
       throw new HostStoreError('hosts.json 无法读取，已停止以免覆盖你的数据');
     }
@@ -158,16 +199,17 @@ export class HostStore {
     }
     return parsed;
   }
+}
 
-  private write(data: HostFile): void {
-    mkdirSync(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
-    const tmp = `${this.filePath}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
-    renameSync(tmp, this.filePath);
-    try {
-      chmodSync(this.filePath, 0o600);
-    } catch {
-      // 同上，Windows 的权限模型和 chmod 不完全对应。
+function assertNoJumpCycles(hosts: StoredHost[]): void {
+  const byId = new Map(hosts.map((h) => [h.id, h]));
+  for (const host of hosts) {
+    const visited = new Set<string>([host.id]);
+    let cur = host.jumpHostId ?? null;
+    while (cur) {
+      if (visited.has(cur)) throw new HostStoreError('跳板机引用存在循环依赖，请检查跳板机设置');
+      visited.add(cur);
+      cur = byId.get(cur)?.jumpHostId ?? null;
     }
   }
 }
@@ -189,6 +231,10 @@ function toPublic(host: StoredHost): PublicHost {
     authType: host.authType,
     hasPassphrase: Boolean(host.passphrase),
     fingerprint: host.fingerprint,
+    groupId: host.groupId ?? null,
+    jumpHostId: host.jumpHostId ?? null,
+    tags: host.tags,
+    notes: host.notes,
     createdAt: host.createdAt,
     updatedAt: host.updatedAt,
   };
