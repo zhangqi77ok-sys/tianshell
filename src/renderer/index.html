@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TianShell</title>
+    <link rel="stylesheet" href="./renderer.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <svg class="mark" viewBox="0 0 36 36" aria-hidden="true">
+            <rect x="1.5" y="1.5" width="33" height="33" rx="9" fill="#24303a" stroke="#3d4b57" />
+            <path d="M11 13l5 5-5 5" fill="none" stroke="#3dbea5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M19 23h8" fill="none" stroke="#e3a008" stroke-width="2" stroke-linecap="round" />
+          </svg>
+          <div>
+            <div class="brand-name">TianShell</div>
+            <div class="brand-sub">自带 MCP 的 SSH 客户端</div>
+          </div>
+        </div>
+        <div class="side-tools">
+          <input id="filter" type="search" placeholder="筛选主机" autocomplete="off" />
+          <button id="add-host" class="primary" type="button">添加主机</button>
+        </div>
+        <ul id="host-list" class="host-list"></ul>
+        <p id="data-dir" class="data-dir"></p>
+      </aside>
+      <section class="workspace">
+        <header class="topbar">
+          <div class="conn">
+            <span id="status-dot" class="dot"></span>
+            <div>
+              <div id="status-title">未连接</div>
+              <div id="status-sub">从左边选一台主机</div>
+            </div>
+          </div>
+          <div class="top-actions">
+            <button id="connect" class="primary" type="button" disabled>连接</button>
+            <button id="disconnect" type="button" disabled>断开</button>
+          </div>
+        </header>
+        <div class="tabs" role="tablist">
+          <button class="tab active" type="button" data-tab="term" role="tab">终端</button>
+          <button class="tab" type="button" data-tab="sftp" role="tab">文件</button>
+        </div>
+        <section id="panel-term" class="panel">
+          <div id="terminal"></div>
+        </section>
+        <section id="panel-sftp" class="panel hidden">
+          <div class="stub">
+            <h2>文件传输还在后面</h2>
+            <p>这一版先把终端和 MCP 做稳。浏览目录、上传和下载会排进后续版本，这里先不假装能用。</p>
+          </div>
+        </section>
+      </section>
+    </div>
+    <div id="toast" class="toast" role="status"></div>
+
+    <dialog id="host-dialog">
+      <form id="host-form">
+        <header class="dialog-head">
+          <h2 id="dialog-title">添加主机</h2>
+          <p>密码和私钥会加密后留在这台电脑上。</p>
+        </header>
+        <div class="grid">
+          <label class="wide">别名<input id="field-alias" required maxlength="64" /></label>
+          <label>主机<input id="field-host" required spellcheck="false" /></label>
+          <label>端口<input id="field-port" type="number" min="1" max="65535" value="22" required /></label>
+          <label class="wide">用户名<input id="field-user" required spellcheck="false" /></label>
+        </div>
+        <fieldset>
+          <legend>认证</legend>
+          <label class="radio"><input type="radio" name="auth" value="password" checked />密码</label>
+          <label class="radio"><input type="radio" name="auth" value="privateKey" />私钥</label>
+        </fieldset>
+        <label id="password-field">密码<input id="field-password" type="password" autocomplete="off" /></label>
+        <div id="key-field" class="hidden">
+          <div class="key-row">
+            <span>私钥（OpenSSH 或 PEM）</span>
+            <button id="pick-key" type="button">选择文件</button>
+          </div>
+          <textarea id="field-key" spellcheck="false" placeholder="粘贴私钥，或从文件读入"></textarea>
+          <label>私钥口令（没有就留空）<input id="field-passphrase" type="password" autocomplete="off" /></label>
+          <label class="check hidden" id="clear-passphrase-row">
+            <input id="field-clear-passphrase" type="checkbox" />清除已保存的口令
+          </label>
+        </div>
+        <p id="secret-hint" class="hint"></p>
+        <p id="fingerprint-line" class="hint hidden"></p>
+        <label class="check hidden" id="clear-fp-row">
+          <input id="field-clear-fp" type="checkbox" />清除已记住的主机指纹
+        </label>
+        <p id="form-error" class="form-error"></p>
+        <div class="dialog-actions">
+          <button type="button" id="cancel-host">取消</button>
+          <button type="submit" class="primary">保存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="confirm-dialog">
+      <form method="dialog">
+        <p id="confirm-text"></p>
+        <div class="dialog-actions">
+          <button value="cancel">取消</button>
+          <button value="ok" class="danger">删除</button>
+        </div>
+      </form>
+    </dialog>
+    <script src="./renderer.js"></script>
+  </body>
+</html>
