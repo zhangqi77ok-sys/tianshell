@@ -4,6 +4,7 @@ import type { ClientChannel, ConnectConfig } from 'ssh2';
 
 const require = createRequire(import.meta.url);
 const { Client: SshClient } = require('ssh2') as typeof import('ssh2');
+type SshClientInstance = InstanceType<typeof SshClient>;
 
 const OUTPUT_LIMIT = 200_000;
 
@@ -16,12 +17,28 @@ export interface SshTarget {
   passphrase?: string;
 }
 
+export interface JumpHop {
+  target: SshTarget;
+  acceptHostKey: (fingerprint: string) => boolean;
+}
+
+export interface ConnectedSsh {
+  client: SshClientInstance;
+  dispose: () => void;
+}
+
 export interface ExecResult {
   stdout: string;
   stderr: string;
   exitCode: number | null;
   timedOut: boolean;
   truncated: boolean;
+}
+
+export interface ShellSession {
+  write(data: string): void;
+  resize(cols: number, rows: number): void;
+  close(): void;
 }
 
 export class HostKeyMismatchError extends Error {
@@ -85,148 +102,171 @@ export function buildConnectConfig(
   return { config, mismatch: () => mismatch };
 }
 
-export function execCommand(
-  target: SshTarget,
-  command: string,
-  timeoutMs: number,
-  acceptHostKey: (fingerprint: string) => boolean,
-): Promise<ExecResult> {
+function connectSingleHop(hop: JumpHop, sock?: ClientChannel): Promise<SshClientInstance> {
   return new Promise((resolve, reject) => {
-    const { config, mismatch } = buildConnectConfig(target, acceptHostKey);
+    const { config, mismatch } = buildConnectConfig(hop.target, hop.acceptHostKey);
+    if (sock) config.sock = sock;
     const client = new SshClient();
     let settled = false;
-    let stdout = '';
-    let stderr = '';
-    let truncated = false;
-
-    const finish = (result: ExecResult | Error) => {
+    const fail = (err: unknown) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
       client.end();
-      if (result instanceof Error) reject(result);
-      else resolve(result);
+      const fp = mismatch();
+      reject(fp ? new HostKeyMismatchError(fp) : err instanceof Error ? err : new Error(String(err)));
     };
-
-    const timer = setTimeout(() => {
-      const out = truncateOutput(stdout);
-      const err = truncateOutput(stderr);
-      finish({
-        stdout: out.text,
-        stderr: err.text,
-        exitCode: null,
-        timedOut: true,
-        truncated: truncated || out.truncated || err.truncated,
-      });
-    }, timeoutMs);
-
-    client.on('ready', () => {
-      client.exec(command, (error, stream) => {
-        if (error || !stream) {
-          finish(error ?? new Error('没有拿到命令通道'));
-          return;
-        }
-        stream.on('data', (chunk: Buffer) => {
-          stdout = appendCapped(stdout, chunk.toString('utf8'));
-          if (stdout.length >= OUTPUT_LIMIT) truncated = true;
-        });
-        stream.stderr.on('data', (chunk: Buffer) => {
-          stderr = appendCapped(stderr, chunk.toString('utf8'));
-          if (stderr.length >= OUTPUT_LIMIT) truncated = true;
-        });
-        stream.on('close', (code: number | null) => {
-          const out = truncateOutput(stdout);
-          const errText = truncateOutput(stderr);
-          finish({
-            stdout: out.text,
-            stderr: errText.text,
-            exitCode: typeof code === 'number' ? code : null,
-            timedOut: false,
-            truncated: truncated || out.truncated || errText.truncated,
-          });
-        });
-      });
+    client.once('ready', () => {
+      if (settled) return;
+      settled = true;
+      resolve(client);
     });
-
-    client.on('error', (error: Error) => {
-      const fingerprint = mismatch();
-      finish(fingerprint ? new HostKeyMismatchError(fingerprint) : error);
-    });
-
+    client.once('error', fail);
     client.connect(config);
   });
 }
 
-export interface ShellSession {
-  write(data: string): void;
-  resize(cols: number, rows: number): void;
-  close(): void;
+function openJumpStream(client: SshClientInstance, nextHost: SshTarget): Promise<ClientChannel> {
+  return new Promise((resolve, reject) => {
+    client.forwardOut('127.0.0.1', 0, nextHost.host, nextHost.port, (err, stream) => {
+      if (err) reject(err);
+      else resolve(stream);
+    });
+  });
 }
 
-export function openShell(options: {
+/**
+ * Connect directly or through ordered ProxyJump bastion hops, cleaning upstream clients on failure.
+ */
+export async function connectWithJumps(hops: JumpHop[]): Promise<ConnectedSsh> {
+  if (!hops.length) throw new Error('至少需要一个 SSH 连接目标');
+  const clients: SshClientInstance[] = [];
+  const dispose = () => {
+    for (const c of [...clients].reverse()) {
+      try {
+        c.end();
+      } catch {
+        // Ignore teardown errors on already-closed sockets.
+      }
+    }
+  };
+  try {
+    let current = await connectSingleHop(hops[0]);
+    clients.push(current);
+    for (let i = 1; i < hops.length; i += 1) {
+      const stream = await openJumpStream(current, hops[i].target);
+      current = await connectSingleHop(hops[i], stream);
+      clients.push(current);
+    }
+    return { client: current, dispose };
+  } catch (err) {
+    dispose();
+    throw err;
+  }
+}
+
+export function execOnClient(client: SshClientInstance, command: string, timeoutMs: number): Promise<ExecResult> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let stdout = '';
+    let stderr = '';
+    let truncated = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve({ stdout, stderr, exitCode: null, timedOut: true, truncated });
+    }, timeoutMs);
+
+    client.exec(command, (error, channel) => {
+      if (error) {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          reject(error);
+        }
+        return;
+      }
+      channel.on('data', (chunk: Buffer) => {
+        const next = appendCapped(stdout, chunk.toString('utf8'));
+        if (next.length < stdout.length + chunk.length) truncated = true;
+        stdout = next;
+      });
+      channel.stderr.on('data', (chunk: Buffer) => {
+        const next = appendCapped(stderr, chunk.toString('utf8'));
+        if (next.length < stderr.length + chunk.length) truncated = true;
+        stderr = next;
+      });
+      channel.on('close', (code: number | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const out = truncateOutput(stdout);
+        const errText = truncateOutput(stderr);
+        resolve({
+          stdout: out.text,
+          stderr: errText.text,
+          exitCode: typeof code === 'number' ? code : null,
+          timedOut: false,
+          truncated: truncated || out.truncated || errText.truncated,
+        });
+      });
+    });
+  });
+}
+
+export async function execCommand(
+  target: SshTarget,
+  command: string,
+  timeoutMs: number,
+  acceptHostKey: (fingerprint: string) => boolean,
+  jumps: JumpHop[] = [],
+): Promise<ExecResult> {
+  const conn = await connectWithJumps([...jumps, { target, acceptHostKey }]);
+  try {
+    return await execOnClient(conn.client, command, timeoutMs);
+  } finally {
+    conn.dispose();
+  }
+}
+
+export async function openShell(options: {
   target: SshTarget;
   cols: number;
   rows: number;
   acceptHostKey: (fingerprint: string) => boolean;
   onData: (data: Buffer) => void;
   onClose: () => void;
+  jumps?: JumpHop[];
 }): Promise<ShellSession> {
   const cols = clampSize(options.cols, 80);
   const rows = clampSize(options.rows, 24);
-  return new Promise((resolve, reject) => {
-    const { config, mismatch } = buildConnectConfig(options.target, options.acceptHostKey);
-    const client = new SshClient();
-    let settled = false;
-
-    const fail = (error: unknown) => {
-      if (settled) return;
-      settled = true;
-      client.end();
-      const fingerprint = mismatch();
-      reject(fingerprint ? new HostKeyMismatchError(fingerprint) : error instanceof Error ? error : new Error(String(error)));
-    };
-
-    client.on('ready', () => {
-      client.shell({ term: 'xterm-256color', cols, rows }, (error, channel) => {
+  const conn = await connectWithJumps([...(options.jumps ?? []), { target: options.target, acceptHostKey: options.acceptHostKey }]);
+  try {
+    return await new Promise<ShellSession>((resolve, reject) => {
+      conn.client.shell({ term: 'xterm-256color', cols, rows }, (error, channel) => {
         if (error || !channel) {
-          fail(error ?? new Error('没有拿到终端通道'));
+          reject(error ?? new Error('没有拿到终端通道'));
           return;
         }
         channel.on('data', (chunk: Buffer) => options.onData(chunk));
         channel.stderr.on('data', (chunk: Buffer) => options.onData(chunk));
         channel.on('close', () => {
-          client.end();
+          conn.dispose();
           options.onClose();
         });
-        if (settled) {
-          channel.close();
-          return;
-        }
-        settled = true;
-        resolve(bindChannel(client, channel));
+        resolve({
+          write: (data: string) => channel.write(data),
+          resize: (c: number, r: number) => channel.setWindow(clampSize(r, 24), clampSize(c, 80), 0, 0),
+          close: () => {
+            channel.close();
+            conn.dispose();
+          },
+        });
       });
     });
-
-    client.on('error', (error: Error) => {
-      if (!settled) fail(error);
-    });
-    client.connect(config);
-  });
-}
-
-function bindChannel(client: InstanceType<typeof SshClient>, channel: ClientChannel): ShellSession {
-  return {
-    write(data: string) {
-      channel.write(data);
-    },
-    resize(cols: number, rows: number) {
-      channel.setWindow(clampSize(rows, 24), clampSize(cols, 80), 0, 0);
-    },
-    close() {
-      channel.close();
-      client.end();
-    },
-  };
+  } catch (err) {
+    conn.dispose();
+    throw err;
+  }
 }
 
 function appendCapped(current: string, chunk: string): string {
