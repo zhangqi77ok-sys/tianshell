@@ -4,8 +4,10 @@ import path from 'node:path';
 
 const RAW_MAGIC = Buffer.from('TS1R');
 const SAFE_MAGIC = Buffer.from('TS1S');
+const DPAPI_MAGIC = Buffer.from('TS1D');
 
 export interface SafeStorage {
+  readonly magic?: string;
   isEncryptionAvailable(): boolean;
   encryptString(plain: string): Buffer;
   decryptString(encrypted: Buffer): string;
@@ -28,7 +30,17 @@ export function loadOrCreateKey(filePath: string, safe: SafeStorage | null): Buf
 }
 
 function encodeSafeKey(key: Buffer, safe: SafeStorage): Buffer {
-  return Buffer.concat([SAFE_MAGIC, safe.encryptString(key.toString('hex'))]);
+  const magic = Buffer.from(safe.magic ?? 'TS1S', 'utf8');
+  if (magic.length !== 4) {
+    throw new Error('不支持的密钥封装标识');
+  }
+  return Buffer.concat([magic, safe.encryptString(key.toString('hex'))]);
+}
+
+function decodeHexKey(hex: string): Buffer {
+  const key = Buffer.from(hex.trim(), 'hex');
+  if (key.length !== 32) throw new Error('钥匙文件已损坏');
+  return key;
 }
 
 function decodeKeyFile(buf: Buffer, safe: SafeStorage | null): Buffer {
@@ -38,13 +50,20 @@ function decodeKeyFile(buf: Buffer, safe: SafeStorage | null): Buffer {
     if (key.length !== 32) throw new Error('钥匙文件已损坏');
     return Buffer.from(key);
   }
-  if (magic.equals(SAFE_MAGIC)) {
-    if (!safe?.isEncryptionAvailable()) {
-      throw new Error('钥匙放在系统密钥环里，当前进程解不开。请用 node scripts/mcp.mjs 启动 MCP。');
+  if (magic.equals(DPAPI_MAGIC)) {
+    if (!safe || safe.magic !== 'TS1D' || !safe.isEncryptionAvailable()) {
+      throw new Error('钥匙由 Windows DPAPI 系统密钥环保护，当前环境无法解开。');
     }
-    const key = Buffer.from(safe.decryptString(buf.subarray(4)), 'hex');
-    if (key.length !== 32) throw new Error('钥匙文件已损坏');
-    return key;
+    return decodeHexKey(safe.decryptString(buf.subarray(4)));
+  }
+  if (magic.equals(SAFE_MAGIC)) {
+    if (safe?.magic === 'TS1D') {
+      throw new Error('钥匙由旧版 Electron 系统密钥环 (TS1S) 加密，纯 Node 模式无法解开；请迁移或清除旧 vault.key / hosts.json。');
+    }
+    if (!safe?.isEncryptionAvailable()) {
+      throw new Error('钥匙放在系统密钥环里，当前进程解不开。');
+    }
+    return decodeHexKey(safe.decryptString(buf.subarray(4)));
   }
   throw new Error('无法识别的钥匙文件');
 }
