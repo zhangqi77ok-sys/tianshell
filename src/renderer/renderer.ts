@@ -100,6 +100,8 @@ function createTermInstance(info: ConnectInfo): void {
     fontFamily: '"Cascadia Code", "JetBrains Mono", Consolas, monospace',
     fontSize,
     cursorBlink: true,
+    // 本地管道终端开启换行归位；远端 SSH PTY 保留原始控制流以免影响 TUI 应用
+    convertEol: info.kind === 'local',
     scrollback: 5000,
     theme: { background: '#0b0e12', foreground: '#eae4d8', cursor: '#e3a008' },
   });
