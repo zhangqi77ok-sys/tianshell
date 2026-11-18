@@ -1,53 +1,47 @@
 import { spawn } from 'node:child_process';
-import { createRequire } from 'node:module';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from './build.mjs';
 
-const require = createRequire(import.meta.url);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const mcpEntry = path.join(root, 'dist', 'mcp.js');
 
-await build();
-
-const electronPath = require('electron');
-const env = { ...process.env };
-delete env.ELECTRON_RUN_AS_NODE;
-
-const child = spawn(electronPath, [path.join(root, 'dist', 'main.js'), '--mcp'], {
-  stdio: ['inherit', 'pipe', 'inherit'],
-  windowsHide: true,
-  env,
-});
-
-let buffer = '';
-
-function forward(line) {
-  const trimmed = line.trim();
-  if (!trimmed) return;
-  if (trimmed.startsWith('{') || trimmed.startsWith('[')) process.stdout.write(`${line}\n`);
-  else process.stderr.write(`${line}\n`);
+function latestMtimeMs(dir) {
+  let latest = 0;
+  for (const item of readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, item.name);
+    if (item.isDirectory()) {
+      latest = Math.max(latest, latestMtimeMs(full));
+    } else if (item.isFile()) {
+      latest = Math.max(latest, statSync(full).mtimeMs);
+    }
+  }
+  return latest;
 }
 
-child.stdout.on('data', (chunk) => {
-  buffer += chunk.toString('utf8');
-  let newline = buffer.indexOf('\n');
-  while (newline !== -1) {
-    forward(buffer.slice(0, newline));
-    buffer = buffer.slice(newline + 1);
-    newline = buffer.indexOf('\n');
-  }
+if (!existsSync(mcpEntry) || latestMtimeMs(path.join(root, 'src')) > statSync(mcpEntry).mtimeMs) {
+  await build({ quiet: true });
+}
+
+const child = spawn(process.execPath, [mcpEntry], {
+  cwd: root,
+  env: process.env,
+  stdio: 'inherit',
+  windowsHide: true,
 });
 
-child.on('exit', (code, signal) => {
-  if (buffer.trim()) forward(buffer.replace(/\n$/, ''));
-  if (signal) {
-    process.kill(process.pid, signal);
-    return;
-  }
-  process.exit(code ?? 1);
+const forwardSignal = (sig) => {
+  if (child.exitCode === null) child.kill(sig);
+};
+process.on('SIGINT', () => forwardSignal('SIGINT'));
+process.on('SIGTERM', () => forwardSignal('SIGTERM'));
+
+child.on('close', (code) => {
+  process.exitCode = code ?? 1;
 });
 
 child.on('error', (error) => {
   console.error(error.message);
-  process.exit(1);
+  process.exitCode = 1;
 });

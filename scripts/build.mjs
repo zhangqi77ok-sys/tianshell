@@ -5,13 +5,13 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-export async function build() {
+export async function build(options = { quiet: false }) {
   const dist = path.join(root, 'dist');
   mkdirSync(dist, { recursive: true });
   const shared = {
     bundle: true,
     sourcemap: true,
-    logLevel: 'info',
+    logLevel: options.quiet ? 'warning' : 'info',
   };
   await esbuild.build({
     ...shared,
@@ -20,6 +20,14 @@ export async function build() {
     format: 'esm',
     outfile: path.join(dist, 'main.js'),
     external: ['electron', 'ssh2'],
+  });
+  await esbuild.build({
+    ...shared,
+    entryPoints: [path.join(root, 'src/mcp/cli.ts')],
+    platform: 'node',
+    format: 'esm',
+    outfile: path.join(dist, 'mcp.js'),
+    external: ['ssh2'],
   });
   await esbuild.build({
     ...shared,
