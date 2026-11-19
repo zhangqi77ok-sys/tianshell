@@ -10,10 +10,10 @@ use ssh2::Session;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 use crate::history::{CommandHistory, HistoryDraft};
-use crate::monitor::{metrics_from_samples, PROBE_COMMAND};
+use crate::monitor::{poll_probe, ProbeHistory, PROBE_COMMAND};
 use crate::pty::LocalShellSession;
 use crate::screen::{note_cd, parse_end_marker, transcript_before_marker, LineAssembler, Screen, ShellKind};
-use crate::shared_ssh::{emit_data, SharedSsh};
+use crate::shared_ssh::{emit_data, PtySsh, SideSsh};
 use crate::ssh::{connect_chain, exec_command, truncate_output};
 use crate::state::lock;
 use crate::store::HostStore;
@@ -31,9 +31,16 @@ pub struct ConnectInfo {
 }
 
 #[derive(Clone)]
+struct RemoteTab {
+    pty: PtySsh,
+    side: SideSsh,
+    probes: Arc<Mutex<Option<ProbeHistory>>>,
+}
+
+#[derive(Clone)]
 enum TabIo {
     Local(Arc<Mutex<LocalShellSession>>),
-    Remote(SharedSsh),
+    Remote(RemoteTab),
 }
 
 struct Tab {
@@ -208,35 +215,41 @@ impl SessionHub {
             crate::ssh::resolve_targets(&guard, host_id)?
         };
         let leaf = chain.last().cloned().ok_or_else(|| "跳板机链为空".to_string())?;
-        let (session, learned) = connect_chain(&chain).map_err(|err| err.to_string())?;
-        {
-            let mut guard = lock(hosts);
-            for (id, fingerprint) in &learned {
-                if !fingerprint.is_empty() {
-                    let _ = guard.remember_fingerprint(id, fingerprint);
-                }
-            }
-        }
-        session.set_blocking(true);
-        let mut channel = session.channel_session().map_err(|err| err.to_string())?;
+        // Shell and SFTP/metrics log in with the same chain on two libssh2
+        // sessions. A probe or transfer cannot sit on the PTY actor. The
+        // password is dropped when `connect_chain` returns.
+        let chain_side = chain.clone();
+        let side_handshake = std::thread::Builder::new()
+            .name("ssh-side-handshake".into())
+            .spawn(move || connect_chain(&chain_side))
+            .map_err(|err| format!("无法启动监控连接: {err}"))?;
+        let pty_result = connect_chain(&chain);
+        let side_joined = side_handshake.join();
+        let (pty_session, learned) = pty_result.map_err(|err| err.to_string())?;
+        let side_result = side_joined.map_err(|_| "监控和 SFTP 连接在握手时中断".to_string())?;
+        let (side_session, learned_side) = side_result.map_err(|err| {
+            format!("监控和 SFTP 连接失败: {err}。这一步和终端分开登录；失败时不会打开只有一半功能的标签。")
+        })?;
+        remember_fingerprints(hosts, &learned);
+        remember_fingerprints(hosts, &learned_side);
+
         let cols = clamp_dim(cols, 80);
         let rows = clamp_dim(rows, 24);
-        channel
-            .request_pty("xterm-256color", None, Some((cols, rows, 0, 0)))
-            .map_err(|err| format!("无法打开远程终端: {err}"))?;
-        channel.shell().map_err(|err| format!("无法启动远程 Shell: {err}"))?;
+        let channel = open_shell(&pty_session, cols, rows)?;
 
         let id = Uuid::new_v4().to_string();
         self.register_mind(&id, ShellKind::Posix, None, "ssh", &leaf.alias, Some(leaf.id.clone()));
         let stop = Arc::new(AtomicBool::new(false));
-        let shared = SharedSsh::spawn(session, channel, self.events.clone(), id.clone(), stop.clone());
+        let pty = PtySsh::spawn(pty_session, channel, self.events.clone(), id.clone(), stop.clone());
+        let side = SideSsh::spawn(side_session, id.clone());
+        let probes = Arc::new(Mutex::new(None));
+        let remote = RemoteTab { pty, side: side.clone(), probes: probes.clone() };
 
-        let metrics = shared.clone();
         let metrics_id = id.clone();
         let metrics_stop = stop.clone();
         let metrics_events = self.events.clone();
         let interval = self.interval.clone();
-        std::thread::spawn(move || metrics_loop(metrics, metrics_events, metrics_stop, interval, metrics_id));
+        std::thread::spawn(move || metrics_loop(side, probes, metrics_events, metrics_stop, interval, metrics_id));
 
         let info = ConnectInfo {
             session_id: id.clone(),
@@ -251,7 +264,7 @@ impl SessionHub {
             Tab {
                 info: info.clone(),
                 host_id: Some(leaf.id),
-                io: TabIo::Remote(shared),
+                io: TabIo::Remote(remote),
                 stop,
             },
         );
@@ -280,7 +293,10 @@ impl SessionHub {
             TabIo::Local(session) => {
                 let _ = lock(&session).kill();
             }
-            TabIo::Remote(ssh) => ssh.close(),
+            TabIo::Remote(remote) => {
+                remote.pty.close();
+                remote.side.close();
+            }
         }
     }
 
@@ -328,7 +344,7 @@ impl SessionHub {
             tabs.get(session_id).map(|tab| tab.io.clone())
         };
         match io {
-            Some(TabIo::Remote(ssh)) => ssh.resize(clamp_dim(cols, 80), clamp_dim(rows, 24)),
+            Some(TabIo::Remote(remote)) => remote.pty.resize(clamp_dim(cols, 80), clamp_dim(rows, 24)),
             Some(TabIo::Local(session)) => {
                 let _ = lock(&session).resize(clamp_dim(cols, 80), clamp_dim(rows, 24));
             }
@@ -619,7 +635,7 @@ impl SessionHub {
         };
         let ok = match io {
             TabIo::Local(session) => lock(&session).write(data.as_bytes()).is_ok(),
-            TabIo::Remote(ssh) => ssh.write(data.as_bytes()),
+            TabIo::Remote(remote) => remote.pty.write(data.as_bytes()),
         };
         if ok {
             Ok(())
@@ -660,24 +676,27 @@ impl SessionHub {
         }
     }
 
+    /// SFTP listings and transfers for this tab. `PtySsh` has no `call`, so this cannot enter the shell actor.
     pub fn with_ssh<T: Send + 'static>(
         &self,
         session_id: &str,
         op: impl FnOnce(&Session) -> Result<T, String> + Send + 'static,
     ) -> Result<T, String> {
-        let ssh = self.remote(session_id)?;
-        ssh.call(op)?
+        self.remote(session_id)?.side.call(op)?
     }
 
     pub fn sample_metrics(&self, session_id: &str) -> Result<crate::monitor::ServerMetrics, String> {
-        sample_shared(&self.remote(session_id)?)
+        let remote = self.remote(session_id)?;
+        let side = remote.side.clone();
+        let mut previous = lock(&remote.probes);
+        poll_probe(&mut previous, Instant::now(), || exec_probe(&side))
     }
 
-    fn remote(&self, session_id: &str) -> Result<SharedSsh, String> {
+    fn remote(&self, session_id: &str) -> Result<RemoteTab, String> {
         let tabs = lock(&self.tabs);
         let tab = tabs.get(session_id).ok_or_else(|| "找不到这个会话".to_string())?;
         match &tab.io {
-            TabIo::Remote(ssh) => Ok(ssh.clone()),
+            TabIo::Remote(remote) => Ok(remote.clone()),
             TabIo::Local(_) => Err("会话未连接到 SSH 主机".into()),
         }
     }
@@ -776,23 +795,66 @@ fn apply_terminal_output(
     }
 }
 
-fn sample_shared(ssh: &SharedSsh) -> Result<crate::monitor::ServerMetrics, String> {
-    let started = Instant::now();
-    let first = ssh.call(|session| exec_command(session, PROBE_COMMAND).map(|item| item.stdout).map_err(|err| err.to_string()))??;
-    std::thread::sleep(Duration::from_millis(200));
-    let second = ssh.call(|session| exec_command(session, PROBE_COMMAND).map(|item| item.stdout).map_err(|err| err.to_string()))??;
-    Ok(metrics_from_samples(&first, &second, started.elapsed().as_secs_f64()))
+fn remember_fingerprints(hosts: &Arc<Mutex<HostStore>>, learned: &[(String, String)]) {
+    let mut guard = lock(hosts);
+    for (id, fingerprint) in learned {
+        if !fingerprint.is_empty() {
+            let _ = guard.remember_fingerprint(id, fingerprint);
+        }
+    }
+}
+
+fn open_shell(session: &Session, cols: u32, rows: u32) -> Result<ssh2::Channel, String> {
+    session.set_blocking(true);
+    let mut channel = session.channel_session().map_err(|err| err.to_string())?;
+    channel
+        .request_pty("xterm-256color", None, Some((cols, rows, 0, 0)))
+        .map_err(|err| format!("无法打开远程终端: {err}"))?;
+    channel.shell().map_err(|err| format!("无法启动远程 Shell: {err}"))?;
+    Ok(channel)
+}
+
+/// One probe on the side session. A stuck `df` or `ps` gives up after 5s so the
+/// next SFTP job can run. The shell actor never sees it. The timeout is cleared
+/// before the call returns, so a later transfer is not cut off at 5 seconds.
+fn exec_probe(ssh: &SideSsh) -> Result<String, String> {
+    ssh.call(|session| {
+        let _reset = ResetTimeout::arm(session, 5_000);
+        exec_command(session, PROBE_COMMAND).map(|item| item.stdout).map_err(|err| err.to_string())
+    })?
+}
+
+struct ResetTimeout<'a>(&'a Session);
+
+impl<'a> ResetTimeout<'a> {
+    fn arm(session: &'a Session, timeout_ms: u32) -> Self {
+        session.set_timeout(timeout_ms);
+        Self(session)
+    }
+}
+
+impl Drop for ResetTimeout<'_> {
+    fn drop(&mut self) {
+        self.0.set_timeout(0);
+    }
 }
 
 fn metrics_loop(
-    ssh: SharedSsh,
+    ssh: SideSsh,
+    probes: Arc<Mutex<Option<ProbeHistory>>>,
     events: broadcast::Sender<String>,
     stop: Arc<AtomicBool>,
     interval: Arc<AtomicU64>,
     session_id: String,
 ) {
+    // These 200ms steps only notice tab close. They are not a second probe
+    // and they do not run on the PTY thread.
     while !stop.load(Ordering::Relaxed) {
-        if let Ok(metrics) = sample_shared(&ssh) {
+        let sample = {
+            let mut previous = lock(&probes);
+            poll_probe(&mut previous, Instant::now(), || exec_probe(&ssh))
+        };
+        if let Ok(metrics) = sample {
             if let Ok(value) = serde_json::to_value(&metrics) {
                 let _ = events.send(
                     json!({"type": "metrics:update", "sessionId": session_id, "metrics": value}).to_string(),
