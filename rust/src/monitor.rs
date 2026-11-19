@@ -190,6 +190,33 @@ pub fn sample_remote_metrics(sess: &Session) -> Result<ServerMetrics, SshError> 
     Ok(metrics_from_samples(&first.stdout, &second.stdout, started.elapsed().as_secs_f64()))
 }
 
+#[derive(Clone)]
+pub(crate) struct ProbeHistory {
+    pub raw: String,
+    pub at: Instant,
+}
+
+/// Fold one probe into the previous sample. `exec` is `FnOnce`, so a caller
+/// cannot run the remote script twice, and this function does not sleep.
+/// CPU percent and interface rates stay at zero until a previous sample exists;
+/// the gap is the time since that sample, not a fixed 200ms.
+pub(crate) fn poll_probe(
+    previous: &mut Option<ProbeHistory>,
+    now: Instant,
+    exec: impl FnOnce() -> Result<String, String>,
+) -> Result<ServerMetrics, String> {
+    let raw = exec()?;
+    let metrics = match previous {
+        Some(prev) => {
+            let elapsed = now.saturating_duration_since(prev.at).as_secs_f64();
+            metrics_from_samples(&prev.raw, &raw, elapsed)
+        }
+        None => parse_metrics_sample(&raw),
+    };
+    *previous = Some(ProbeHistory { raw, at: now });
+    Ok(metrics)
+}
+
 pub fn metrics_from_samples(first_raw: &str, second_raw: &str, elapsed_secs: f64) -> ServerMetrics {
     let dt = elapsed_secs.max(0.05);
     let mut metrics = parse_metrics_sample(second_raw);
@@ -250,4 +277,91 @@ fn sum_net(lines: &[&str]) -> (u64, u64) {
         }
     }
     (rx, tx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE_A: &str = "\
+__HOST__
+host-a
+__UPTIME__
+10.0 0
+__LOAD__
+0.10 0.20 0.30 1/2 3
+__CPU__
+cpu 100 0 0 400 0 0 0 0
+__MEM__
+MemTotal: 1000 kB
+MemAvailable: 400 kB
+SwapTotal: 100 kB
+SwapFree: 100 kB
+__NET__
+eth0: 1000 0 0 0 0 0 0 0 500 0 0 0 0 0 0 0
+__DF__
+Filesystem 1K-blocks Used Available Use% Mounted on
+/dev/sda1 1000 100 900 10% /
+__PS__
+PID USER %CPU %MEM COMMAND
+1 root 0.1 0.1 init
+";
+
+    const SAMPLE_B: &str = "\
+__HOST__
+host-a
+__UPTIME__
+11.0 0
+__LOAD__
+0.40 0.20 0.30 1/2 3
+__CPU__
+cpu 180 0 0 420 0 0 0 0
+__MEM__
+MemTotal: 1000 kB
+MemAvailable: 400 kB
+SwapTotal: 100 kB
+SwapFree: 100 kB
+__NET__
+eth0: 3000 0 0 0 0 0 0 0 2500 0 0 0 0 0 0 0
+__DF__
+Filesystem 1K-blocks Used Available Use% Mounted on
+/dev/sda1 1000 100 900 10% /
+__PS__
+PID USER %CPU %MEM COMMAND
+1 root 0.1 0.1 init
+";
+
+    #[test]
+    fn one_probe_per_sample_uses_previous_gap_and_does_not_sleep() {
+        let started = Instant::now();
+        let mut calls = 0;
+        let mut previous = None;
+        let t0 = Instant::now();
+        let first = poll_probe(&mut previous, t0, || {
+            calls += 1;
+            Ok(SAMPLE_A.to_string())
+        })
+        .expect("first probe");
+        assert_eq!(calls, 1);
+        assert_eq!(first.cpu_percent, 0.0);
+        assert_eq!(first.net.rx_bytes_per_sec, 0.0);
+        assert_eq!(first.net.tx_bytes_per_sec, 0.0);
+        assert_eq!(first.hostname, "host-a");
+        assert_eq!(first.mem_total_kb, 1000);
+        assert_eq!(first.mem_used_kb, 600);
+        assert_eq!(first.disks.len(), 1);
+        assert_eq!(first.disks[0].mount, "/");
+        assert_eq!(first.processes.len(), 1);
+
+        let second = poll_probe(&mut previous, t0 + Duration::from_secs(1), || {
+            calls += 1;
+            Ok(SAMPLE_B.to_string())
+        })
+        .expect("second probe");
+        assert_eq!(calls, 2, "each interactive sample runs the probe once");
+        assert!((second.cpu_percent - 80.0).abs() < 0.05, "cpu {}", second.cpu_percent);
+        assert!((second.net.rx_bytes_per_sec - 2000.0).abs() < 0.05, "rx {}", second.net.rx_bytes_per_sec);
+        assert!((second.net.tx_bytes_per_sec - 2000.0).abs() < 0.05, "tx {}", second.net.tx_bytes_per_sec);
+        assert!(started.elapsed() < Duration::from_millis(50), "probe fold slept: {:?}", started.elapsed());
+    }
 }

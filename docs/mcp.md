@@ -253,7 +253,7 @@ TianShell 是会话和记忆，不是一个用完就丢掉的 SSH 客户端。�
 
 ### 文件
 
-`sftp_list`、`sftp_mkdir`、`sftp_read`、`sftp_write`、`sftp_download`、`sftp_upload` 都另开一条 SSH。它们不进入交互终端那条 libssh2 线程，所以列目录或传文件不会把按键排到采样和 SFTP 后面。等终端线程不再被文件和监控堵住，这些工具才应该改成复用同一次登录。
+`sftp_list`、`sftp_mkdir`、`sftp_read`、`sftp_write`、`sftp_download`、`sftp_upload` 都另开一条 SSH。它们不进入交互终端那条 libssh2 线程。工作台标签里的目录刷新、传输和监控走该标签的第二条连接，同样不进终端线程。MCP 的文件工具这次仍各自登录，不改成复用标签上的连接。
 
 | 工具 | 参数 | 限制 |
 | --- | --- | --- |
@@ -264,7 +264,7 @@ TianShell 是会话和记忆，不是一个用完就丢掉的 SSH 客户端。�
 | `sftp_download` | `host`，`path`，可选 `max_bytes` | 返回 base64，最大 256KB。拒绝私钥 |
 | `sftp_upload` | `host`，`path`，`content_base64` | 解码后上限 512KB。拒绝私钥。响应里不回显内容 |
 
-`system_metrics` 也是另开一条连接做一次采样（CPU、内存、Swap、磁盘、网卡、Top 进程）。界面标签上的监控是另一条采样，不从 MCP 这边挤进终端线程。
+`system_metrics` 也是另开一条连接做一次采样（CPU、内存、Swap、磁盘、网卡、Top 进程），CPU 和网卡速率仍用两次采样夹大约 200ms。界面标签上的监控走该标签的第二条 SSH：每次只跑一遍探针，用上一拍的差值算 CPU 和网卡速率，不在终端线程上等待。
 
 ### 清单，不含机密
 
@@ -293,6 +293,7 @@ TianShell 是会话和记忆，不是一个用完就丢掉的 SSH 客户端。�
 - 编码工具打进已打开标签的命令，会出现在用户正在看的终端里。
 - 右侧「命令历史」可以浏览这些记录，点一条会送进当前终端。左下角「连接 MCP」仍可复制 Cursor / Claude Code 配置。
 - 启动日志只打印界面和 MCP 地址，不打印令牌。
+- 一个 SSH 标签在界面上仍是一个会话。终端独占一条 SSH 连接；工作台里的 SFTP 和监控共用另一条不另开标签的连接。关掉标签时两条一起拆掉。
 - 不要让 Node 版 `npm start` 和这个 Rust 进程同时写同一个 `TIANSHELL_HOME`。
 
 ## For MCP client authors
@@ -313,6 +314,6 @@ stdio binary: `tianshell-mcp --attach` proxies to the running workbench. Without
 
 Typical loop: `list_hosts` → `list_terminal_sessions` or `open_terminal` → `read_terminal` → `run_command` (or `write_terminal`) → `sftp_read` → `search_history`. `run_command` types into a matching open tab unless `new_session` is true or no tab matches. On a tab, stdout and stderr are merged and `exitCode` comes from a POSIX `$?` trailer (PowerShell `$LASTEXITCODE` for the local Windows console). `fish` and `csh` do not parse that trailer.
 
-`start_command`, `poll_command`, and `cancel_command` run on an open tab so a long job does not block the client. File tools (`sftp_list`, `sftp_read`, `sftp_write`, `sftp_download`, `sftp_upload`, `sftp_mkdir`) open their own SSH login and do not queue keystrokes on the interactive thread. Private keys, passwords, passphrases, and the MCP token are omitted from tool results and from `command-history.json`.
+`start_command`, `poll_command`, and `cancel_command` run on an open tab so a long job does not block the client. An interactive tab keeps the shell on its own SSH session. The workbench SFTP pane and the metrics probe use a second silent login, so a listing, a transfer, or a probe does not block typing. MCP file tools (`sftp_list`, `sftp_read`, `sftp_write`, `sftp_download`, `sftp_upload`, `sftp_mkdir`) still open their own SSH login. Private keys, passwords, passphrases, and the MCP token are omitted from tool results and from `command-history.json`.
 
 Interactive history stores the line TianShell submitted. On Windows ConPTY, line editing that happens only inside the console host is not reconstructed. Host notes (`set_host_note`) and project bindings (`list_bindings`) are shared memory for ports, service names, and which local directory belongs on which remote path. Creating a host that needs a password or private key stays in the workbench UI.
