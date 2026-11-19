@@ -731,11 +731,10 @@ impl SessionHub {
             if mind.conceal.armed() && !quiet.is_empty() {
                 mind.screen.scrub_probe(&quiet);
             }
-            let (mut filtered, follow) = mind.conceal.push(bytes);
+            let (filtered, follow) = mind.conceal.push(bytes);
             let finish = observe_job(&mut mind);
-            if mind.job.as_ref().map(|job| job.done).unwrap_or(false) {
-                filtered.extend(mind.conceal.finish());
-            }
+            // Stay armed after the marker. PowerShell redraws the typed probe
+            // after the command has already finished; disarming here paints it.
             let view = snapshot(session_id, &mind).filter(|view| view.done);
             (filtered, follow, finish, view)
         };

@@ -618,14 +618,29 @@ impl ProbeConceal {
         self.follow_sent
     }
 
-    /// Flush anything still held and stop filtering.
+    /// Stop filtering. A probe line still in the buffer is dropped, not drawn.
     pub fn finish(&mut self) -> Vec<u8> {
         if !self.armed {
             return Vec::new();
         }
+        self.strip_complete();
+        if let Some(pos) = self.earliest_probe() {
+            self.buf.truncate(pos);
+        }
         self.armed = false;
         self.follow_sent = false;
         std::mem::take(&mut self.buf)
+    }
+
+    fn earliest_probe(&self) -> Option<usize> {
+        let mut found = find_subslice(&self.buf, &self.marker);
+        if !self.quiet.is_empty() {
+            found = earlier(found, find_subslice(&self.buf, &self.quiet));
+        }
+        for needle in &self.line_needles {
+            found = earlier(found, find_subslice(&self.buf, needle));
+        }
+        found
     }
 
     pub fn push(&mut self, data: &[u8]) -> (Vec<u8>, Option<String>) {
@@ -712,6 +727,15 @@ impl ProbeConceal {
 impl Default for ProbeConceal {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn earlier(left: Option<usize>, right: Option<usize>) -> Option<usize> {
+    match (left, right) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
     }
 }
 
@@ -916,6 +940,28 @@ mod tests {
             text.trim_end().ends_with('$') || text.contains("$ "),
             "{text}"
         );
+    }
+
+    #[test]
+    fn powershell_redraw_after_the_marker_stays_hidden() {
+        let nonce = "59e148db";
+        let shell = ShellKind::PowerShell;
+        let mut conceal = ProbeConceal::new();
+        conceal.arm(nonce, &shell.trailer(nonce), None, &shell.line_needles());
+        let first = format!("tianshell-probe-ok\r\n__TS_END_{nonce}__ ec=0 cwd=C:\\Users\\runneradmin\r\nPS C:\\Users\\runneradmin> ");
+        let (visible, _) = conceal.push(first.as_bytes());
+        assert!(conceal.armed(), "the redraw arrives after the command has finished");
+        let redraw = format!(
+            "\u{1b}[92m$global:__ts_ec \u{1b}[90m= if \u{1b}[36m\"__TS_END_{nonce}__ ec=\u{1b}[m__TS_END_{nonce}__ ec=0 cwd=C:\\Users\\runneradmin\r\nPS C:\\Users\\runneradmin> "
+        );
+        let (again, _) = conceal.push(redraw.as_bytes());
+        let mut shown = visible;
+        shown.extend(again);
+        let text = String::from_utf8_lossy(&shown);
+        assert!(text.contains("tianshell-probe-ok"), "{text:?}");
+        assert!(!text.contains("__TS_END_"), "{text:?}");
+        assert!(!text.contains("__ts_ec"), "{text:?}");
+        assert!(text.contains("PS C:\\Users\\runneradmin>"), "{text:?}");
     }
 
     #[test]
