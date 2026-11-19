@@ -11,3 +11,4 @@ hosts.json
 vault.key
 *.tmp
 .tianshell/
+target/
