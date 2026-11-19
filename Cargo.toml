@@ -13,6 +13,10 @@ path = "rust/src/lib.rs"
 name = "tianshell-mcp"
 path = "rust/src/bin/mcp.rs"
 
+[[bin]]
+name = "tianshell"
+path = "rust/src/bin/app.rs"
+
 [[test]]
 name = "vault_store_test"
 path = "rust/tests/vault_store_test.rs"
@@ -32,6 +36,8 @@ base64 = "0.22"
 thiserror = "2.0"
 tokio = { version = "1.40", features = ["full"] }
 ssh2 = "0.9"
+wry = "0.47"
+tao = "0.30"
 
 [dev-dependencies]
 tempfile = "3.12"
