@@ -29,6 +29,13 @@ export class HostTreeController {
     const q = (document.getElementById('filter') as HTMLInputElement).value.trim().toLowerCase();
     const tree = document.getElementById('host-tree') as HTMLElement;
     tree.textContent = '';
+    if (!q && this.hosts.length === 0 && this.groups.length === 0) {
+      const note = document.createElement('p');
+      note.className = 'tree-empty';
+      note.textContent = '还没有主机。用「+ 主机」添加，列表会跟着变。';
+      tree.appendChild(note);
+      return;
+    }
     const filtered = this.hosts.filter(
       (h) => !q || h.alias.toLowerCase().includes(q) || h.host.includes(q) || (h.tags ?? []).some((t) => t.toLowerCase().includes(q)),
     );

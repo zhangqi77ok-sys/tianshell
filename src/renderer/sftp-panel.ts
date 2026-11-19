@@ -22,6 +22,7 @@ export function formatBytes(bytes: number): string {
 export class SftpController {
   private currentDir = '/';
   private showHidden = false;
+  private lastSig = '';
   private readonly transfers = new Map<string, TransferTask>();
   private editingPath: string | null = null;
 
@@ -38,6 +39,9 @@ export class SftpController {
 
   constructor(private readonly deps: SftpControllerDeps) {
     this.bindEvents();
+    window.setInterval(() => {
+      if (this.deps.getActiveSshId()) void this.load(this.currentDir, true);
+    }, 3000);
   }
 
   setShowHidden(flag: boolean): void {
@@ -46,30 +50,37 @@ export class SftpController {
   }
 
   syncSession(): void {
+    this.lastSig = '';
     const active = Boolean(this.deps.getActiveSshId());
     for (const id of ['sftp-up', 'sftp-home', 'sftp-path', 'sftp-go', 'sftp-mkdir', 'sftp-upload', 'sftp-refresh']) {
       const el = document.getElementById(id) as HTMLButtonElement | HTMLInputElement;
       el.disabled = !active;
     }
     if (active) {
-      void this.load(this.currentDir);
+      void this.load(this.currentDir, true);
     } else {
+      this.lastSig = '';
       this.tableEl.classList.add('hidden');
       this.emptyEl.classList.remove('hidden');
+      this.emptyEl.textContent = '空闲。连上 SSH 会话后，这里显示该会话的当前目录。';
       this.bodyEl.textContent = '';
     }
   }
 
-  async load(dirPath: string): Promise<void> {
+  async load(dirPath: string, quiet = false): Promise<void> {
     const sid = this.deps.getActiveSshId();
     if (!sid) return;
     try {
       const list = await webApi.sftpList(sid, dirPath);
       this.currentDir = dirPath || '/';
       this.pathInput.value = this.currentDir;
-      this.renderEntries(list.filter((e) => this.showHidden || !e.name.startsWith('.')));
+      const visible = list.filter((e) => this.showHidden || !e.name.startsWith('.'));
+      const sig = `${this.currentDir}|${visible.map((e) => `${e.path}:${e.size}:${e.mtimeMs}:${e.mode}`).join('|')}`;
+      if (sig === this.lastSig) return;
+      this.lastSig = sig;
+      this.renderEntries(visible);
     } catch (err) {
-      this.deps.toast(err instanceof Error ? err.message : 'SFTP 读取失败');
+      if (!quiet) this.deps.toast(err instanceof Error ? err.message : 'SFTP 读取失败');
     }
   }
 

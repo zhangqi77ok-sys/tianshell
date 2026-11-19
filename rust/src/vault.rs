@@ -10,6 +10,7 @@ use thiserror::Error;
 const VAULT_VERSION: &str = "v1";
 const TS1D_HEADER: &[u8; 4] = b"TS1D";
 const TS1S_HEADER: &[u8; 4] = b"TS1S";
+const TS1R_HEADER: &[u8; 4] = b"TS1R";
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
 const KEY_LEN: usize = 32;
@@ -160,6 +161,7 @@ fn decode_key_bytes(decrypted: &[u8]) -> Result<[u8; KEY_LEN], VaultError> {
     Err(VaultError::CorruptedKeyFile)
 }
 
+#[cfg(windows)]
 fn hex_encode(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -174,6 +176,14 @@ pub fn load_or_create_master_key(key_path: &Path) -> Result<[u8; KEY_LEN], Vault
         if raw.starts_with(TS1S_HEADER) {
             return Err(VaultError::LegacyElectronKey);
         }
+        if raw.starts_with(TS1R_HEADER) {
+            if raw.len() != TS1R_HEADER.len() + KEY_LEN {
+                return Err(VaultError::CorruptedKeyFile);
+            }
+            let mut key = [0u8; KEY_LEN];
+            key.copy_from_slice(&raw[TS1R_HEADER.len()..]);
+            return Ok(key);
+        }
         if !raw.starts_with(TS1D_HEADER) || raw.len() <= TS1D_HEADER.len() {
             return Err(VaultError::CorruptedKeyFile);
         }
@@ -186,12 +196,27 @@ pub fn load_or_create_master_key(key_path: &Path) -> Result<[u8; KEY_LEN], Vault
     }
     let mut key = [0u8; KEY_LEN];
     rand::thread_rng().fill_bytes(&mut key);
-    let hex_key = hex_encode(&key);
-    let protected = dpapi_protect(hex_key.as_bytes())?;
-    let mut file_bytes = Vec::with_capacity(TS1D_HEADER.len() + protected.len());
-    file_bytes.extend_from_slice(TS1D_HEADER);
-    file_bytes.extend_from_slice(&protected);
-    fs::write(key_path, file_bytes)?;
+    #[cfg(windows)]
+    {
+        let hex_key = hex_encode(&key);
+        let protected = dpapi_protect(hex_key.as_bytes())?;
+        let mut file_bytes = Vec::with_capacity(TS1D_HEADER.len() + protected.len());
+        file_bytes.extend_from_slice(TS1D_HEADER);
+        file_bytes.extend_from_slice(&protected);
+        fs::write(key_path, file_bytes)?;
+    }
+    #[cfg(not(windows))]
+    {
+        let mut file_bytes = Vec::with_capacity(TS1R_HEADER.len() + KEY_LEN);
+        file_bytes.extend_from_slice(TS1R_HEADER);
+        file_bytes.extend_from_slice(&key);
+        fs::write(key_path, &file_bytes)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(key_path, fs::Permissions::from_mode(0o600));
+    }
     Ok(key)
 }
 

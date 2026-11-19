@@ -14,12 +14,37 @@ interface TabState {
   fit: FitAddon;
   slot: HTMLDivElement;
   metrics: ServerMetrics | null;
+  closed: boolean;
 }
+
+const TERM_FONT = 'Consolas, "Cascadia Mono", "Courier New", monospace';
+const TERM_THEME = {
+  background: '#0c0c0c',
+  foreground: '#cccccc',
+  cursor: '#f2f2f2',
+  cursorAccent: '#0c0c0c',
+  selectionBackground: '#264f78',
+  black: '#0c0c0c',
+  red: '#c50f1f',
+  green: '#13a10e',
+  yellow: '#c19c00',
+  blue: '#3b78ff',
+  magenta: '#bc3fbc',
+  cyan: '#11a8cd',
+  white: '#cccccc',
+  brightBlack: '#767676',
+  brightRed: '#e74856',
+  brightGreen: '#16c60c',
+  brightYellow: '#f9f1a5',
+  brightBlue: '#3b78ff',
+  brightMagenta: '#b4009e',
+  brightCyan: '#61d6d6',
+  brightWhite: '#f2f2f2',
+};
 
 let activeId: string | null = null;
 let fontSize = 14;
 const tabs = new Map<string, TabState>();
-const ws = connectWs(handleWsEvent);
 const toastEl = document.getElementById('toast') as HTMLElement;
 
 function showToast(msg: string): void {
@@ -49,7 +74,7 @@ function promptText(title: string, defaultVal = ''): Promise<string | null> {
 const sftpCtrl = new SftpController({
   getActiveSshId: () => {
     const tab = activeId ? tabs.get(activeId) : null;
-    return tab && tab.info.kind === 'ssh' ? tab.info.sessionId : null;
+    return tab && !tab.closed && tab.info.kind === 'ssh' ? tab.info.sessionId : null;
   },
   toast: showToast,
   promptText,
@@ -71,18 +96,32 @@ function handleWsEvent(msg: Record<string, unknown>): void {
   const type = String(msg.type || '');
   if (type === 'term:data' && typeof msg.sessionId === 'string' && typeof msg.data === 'string') {
     const tab = tabs.get(msg.sessionId);
-    if (tab) tab.term.write(Uint8Array.from(atob(msg.data), (c) => c.charCodeAt(0)));
-  } else if (type === 'term:closed' && typeof msg.sessionId === 'string') {
-    tabs.get(msg.sessionId)?.term.writeln('\r\n\x1b[33m[会话已断开]\x1b[0m');
+    if (tab && !tab.closed) tab.term.write(Uint8Array.from(atob(msg.data), (c) => c.charCodeAt(0)));
+  } else if ((type === 'term:closed' || type === 'session:closed') && typeof msg.sessionId === 'string') {
+    markClosed(msg.sessionId);
+  } else if (type === 'session:opened' && msg.session && typeof msg.session === 'object') {
+    const info = msg.session as ConnectInfo;
+    if (info.sessionId) createTermInstance(info);
   } else if (type === 'metrics:update' && typeof msg.sessionId === 'string') {
     const tab = tabs.get(msg.sessionId);
-    if (!tab) return;
+    if (!tab || tab.closed) return;
     tab.metrics = msg.metrics as ServerMetrics;
-    if (activeId === msg.sessionId) monCtrl.renderMetrics(tab.metrics);
+    if (activeId === msg.sessionId) showMetricsFor(tab);
+  } else if (type === 'catalog:changed') {
+    void refreshLive(String(msg.kind || 'disk'));
   } else if (type === 'transfer:progress') {
     sftpCtrl.onTransferProgress(msg.task as TransferTask);
   }
 }
+
+async function refreshLive(kind: string): Promise<void> {
+  if (kind === 'snippets' || kind === 'disk') await monCtrl.refreshSnippets();
+  if (kind === 'settings' || kind === 'disk') await applySettings();
+  if (kind === 'tunnels' || kind === 'disk') monCtrl.refreshTunnelsIfOpen();
+  if (kind === 'hosts' || kind === 'disk' || kind === '') await treeCtrl.refresh();
+}
+
+const ws = connectWs(handleWsEvent, () => { void refreshLive('disk'); });
 
 function sendInput(data: string): void {
   if (!activeId || ws.readyState !== WebSocket.OPEN) return;
@@ -91,26 +130,89 @@ function sendInput(data: string): void {
 }
 
 function createTermInstance(info: ConnectInfo): void {
+  if (tabs.has(info.sessionId)) {
+    selectTab(info.sessionId);
+    return;
+  }
   const stage = document.getElementById('terminal-stage') as HTMLElement;
   const slot = document.createElement('div');
   slot.className = 'term-slot hidden';
   stage.appendChild(slot);
 
   const term = new Terminal({
-    fontFamily: '"Cascadia Code", "JetBrains Mono", Consolas, monospace',
+    fontFamily: TERM_FONT,
     fontSize,
+    fontWeight: 400,
+    fontWeightBold: 600,
+    lineHeight: 1.15,
+    letterSpacing: 0,
     cursorBlink: true,
-    // 本地管道终端开启换行归位；远端 SSH PTY 保留原始控制流以免影响 TUI 应用
+    cursorStyle: 'bar',
+    cursorWidth: 2,
+    // 本地管道终端开启换行归位；远端 SSH PTY 自己发 CR，不能再转换以免打乱网格
     convertEol: info.kind === 'local',
-    scrollback: 5000,
-    theme: { background: '#0b0e12', foreground: '#eae4d8', cursor: '#e3a008' },
+    scrollback: 8000,
+    theme: TERM_THEME,
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
   term.open(slot);
   term.onData((data) => sendInput(data));
-  tabs.set(info.sessionId, { info, term, fit, slot, metrics: null });
+  tabs.set(info.sessionId, { info, term, fit, slot, metrics: null, closed: false });
   selectTab(info.sessionId);
+}
+
+function fitTab(tab: TabState): void {
+  if (tab.slot.classList.contains('hidden')) return;
+  tab.fit.fit();
+  const { cols, rows } = tab.term;
+  if (!tab.closed && cols > 1 && rows > 1 && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'term:resize', sessionId: tab.info.sessionId, cols, rows }));
+  }
+}
+
+function measureGrid(): { cols: number; rows: number } {
+  const stage = document.getElementById('terminal-stage');
+  if (!stage) return { cols: 100, rows: 28 };
+  const slot = document.createElement('div');
+  slot.className = 'term-slot';
+  stage.appendChild(slot);
+  const term = new Terminal({
+    fontFamily: TERM_FONT,
+    fontSize,
+    lineHeight: 1.15,
+    letterSpacing: 0,
+    theme: TERM_THEME,
+  });
+  const fit = new FitAddon();
+  term.loadAddon(fit);
+  term.open(slot);
+  fit.fit();
+  const cols = term.cols > 1 ? term.cols : 100;
+  const rows = term.rows > 1 ? term.rows : 28;
+  term.dispose();
+  slot.remove();
+  return { cols, rows };
+}
+
+function showMetricsFor(tab: TabState | undefined): void {
+  if (!tab || tab.closed || tab.info.kind !== 'ssh') {
+    monCtrl.renderMetrics(null, 'idle');
+    return;
+  }
+  monCtrl.renderMetrics(tab.metrics, tab.metrics ? 'live' : 'sampling');
+}
+
+function markClosed(sessionId: string): void {
+  const tab = tabs.get(sessionId);
+  if (!tab || tab.closed) return;
+  tab.closed = true;
+  tab.term.writeln('\r\n\x1b[33m[会话已断开]\x1b[0m');
+  if (activeId === sessionId) {
+    showMetricsFor(tab);
+    sftpCtrl.syncSession();
+  }
+  renderTabs();
 }
 
 function selectTab(sessionId: string | null): void {
@@ -120,13 +222,12 @@ function selectTab(sessionId: string | null): void {
     const isAct = id === activeId;
     tab.slot.classList.toggle('hidden', !isAct);
     if (isAct) {
-      tab.fit.fit();
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'term:resize', sessionId: id, cols: tab.term.cols, rows: tab.term.rows }));
+      fitTab(tab);
       tab.term.focus();
-      monCtrl.renderMetrics(tab.metrics);
+      showMetricsFor(tab);
     }
   }
-  if (!activeId) monCtrl.renderMetrics(null);
+  if (!activeId) monCtrl.renderMetrics(null, 'idle');
   renderTabs();
   sftpCtrl.syncSession();
 }
@@ -136,11 +237,11 @@ function renderTabs(): void {
   bar.textContent = '';
   for (const [id, tab] of tabs) {
     const chip = document.createElement('div');
-    chip.className = `tab-chip${id === activeId ? ' active' : ''}`;
+    chip.className = `tab-chip${id === activeId ? ' active' : ''}${tab.closed ? ' closed' : ''}`;
     const dot = document.createElement('span');
     dot.className = 'tab-dot';
     const label = document.createElement('span');
-    label.textContent = tab.info.kind === 'local' ? '💻 本机终端' : tab.info.alias;
+    label.textContent = tab.info.kind === 'local' ? '本机' : tab.info.alias;
     const closeBtn = document.createElement('button');
     closeBtn.type = 'button';
     closeBtn.textContent = '×';
@@ -164,7 +265,10 @@ async function closeTab(sessionId: string): Promise<void> {
 
 async function openSshTab(hostId: string): Promise<void> {
   try {
-    createTermInstance(await webApi.openSession({ kind: 'ssh', hostId, cols: 100, rows: 30 }));
+    const grid = measureGrid();
+    createTermInstance(await webApi.openSession({ kind: 'ssh', hostId, cols: grid.cols, rows: grid.rows }));
+    const tab = activeId ? tabs.get(activeId) : undefined;
+    if (tab) requestAnimationFrame(() => fitTab(tab));
   } catch (err) {
     showToast(err instanceof Error ? err.message : '连接失败');
   }
@@ -190,7 +294,10 @@ function findInActiveTerm(needle: string, forward = false): void {
 }
 
 function bindGlobalUi(): void {
-  document.getElementById('open-local')?.addEventListener('click', async () => createTermInstance(await webApi.openSession({ kind: 'local' })));
+  document.getElementById('open-local')?.addEventListener('click', async () => {
+    const grid = measureGrid();
+    createTermInstance(await webApi.openSession({ kind: 'local', cols: grid.cols, rows: grid.rows }));
+  });
   document.getElementById('open-tunnels')?.addEventListener('click', () => void monCtrl.openTunnelModal());
   document.getElementById('inspector-toggle')?.addEventListener('click', () => document.getElementById('inspector')?.classList.toggle('hidden'));
   document.getElementById('theme-toggle')?.addEventListener('click', async () => {
@@ -214,9 +321,12 @@ function bindGlobalUi(): void {
     const startY = down.clientY;
     const startH = termPane.getBoundingClientRect().height;
     const onMove = (mv: MouseEvent) => {
-      const nextH = Math.max(120, Math.min(wrap.getBoundingClientRect().height - 120, startH + (mv.clientY - startY)));
+      const nextH = Math.max(160, Math.min(wrap.getBoundingClientRect().height - 140, startH + (mv.clientY - startY)));
       termPane.style.flex = `0 0 ${nextH}px`;
-      if (activeId) tabs.get(activeId)?.fit.fit();
+      sftpPane.style.flex = '1 1 auto';
+      sftpPane.style.maxHeight = 'none';
+      const tab = activeId ? tabs.get(activeId) : undefined;
+      if (tab) fitTab(tab);
     };
     const onUp = () => {
       window.removeEventListener('mousemove', onMove);
@@ -254,20 +364,44 @@ window.addEventListener('keydown', (e) => {
 });
 
 window.addEventListener('resize', () => {
-  const tab = activeId ? tabs.get(activeId) : null;
-  if (tab) {
-    tab.fit.fit();
-    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'term:resize', sessionId: activeId, cols: tab.term.cols, rows: tab.term.rows }));
-  }
+  const tab = activeId ? tabs.get(activeId) : undefined;
+  if (tab) fitTab(tab);
+});
+const stage = document.getElementById('terminal-stage');
+if (stage && 'ResizeObserver' in window) {
+  const observer = new ResizeObserver(() => {
+    const tab = activeId ? tabs.get(activeId) : undefined;
+    if (tab) fitTab(tab);
+  });
+  observer.observe(stage);
+}
+void document.fonts?.ready.then(() => {
+  const tab = activeId ? tabs.get(activeId) : undefined;
+  if (tab) fitTab(tab);
 });
 
-async function boot(): Promise<void> {
-  bindGlobalUi();
+async function applySettings(): Promise<void> {
   const s = await webApi.getSettings();
   fontSize = s.fontSize;
   document.documentElement.setAttribute('data-theme', s.theme);
   sftpCtrl.setShowHidden(s.showHiddenFiles);
-  await Promise.all([treeCtrl.refresh(), monCtrl.refreshSnippets()]);
+  const theme = document.getElementById('set-theme') as HTMLSelectElement | null;
+  const font = document.getElementById('set-font') as HTMLInputElement | null;
+  const interval = document.getElementById('set-interval') as HTMLInputElement | null;
+  const hidden = document.getElementById('set-hidden') as HTMLInputElement | null;
+  if (theme) theme.value = s.theme;
+  if (font) font.value = String(s.fontSize);
+  if (interval) interval.value = String(s.monitorIntervalMs);
+  if (hidden) hidden.checked = s.showHiddenFiles;
+  for (const tab of tabs.values()) {
+    tab.term.options.fontSize = fontSize;
+    tab.fit.fit();
+  }
+}
+
+async function boot(): Promise<void> {
+  bindGlobalUi();
+  await refreshLive('disk');
 }
 
 void boot();

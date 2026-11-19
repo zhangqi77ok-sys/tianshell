@@ -101,15 +101,41 @@ export const webApi = {
     apiRequest<boolean>(`/api/transfers/${encodeURIComponent(tid)}/cancel`, { method: 'POST' }),
 };
 
-export function connectWs(onEvent: (msg: Record<string, unknown>) => void): WebSocket {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(`${proto}//${location.host}/ws?token=${encodeURIComponent(resolveClientToken())}`);
-  ws.addEventListener('message', (ev) => {
-    try {
-      onEvent(JSON.parse(String(ev.data)) as Record<string, unknown>);
-    } catch {
-      // Ignore malformed server events.
-    }
-  });
-  return ws;
+export interface LiveSocket {
+  send(data: string): void;
+  readonly readyState: number;
+}
+
+export function connectWs(onEvent: (msg: Record<string, unknown>) => void, onOpen?: () => void): LiveSocket {
+  let socket: WebSocket | null = null;
+  let attempt = 0;
+  const open = () => {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${proto}//${location.host}/ws?token=${encodeURIComponent(resolveClientToken())}`);
+    socket = ws;
+    ws.addEventListener('open', () => {
+      attempt = 0;
+      onOpen?.();
+    });
+    ws.addEventListener('message', (ev) => {
+      try {
+        onEvent(JSON.parse(String(ev.data)) as Record<string, unknown>);
+      } catch {
+        // Ignore malformed server events.
+      }
+    });
+    ws.addEventListener('close', () => {
+      attempt += 1;
+      window.setTimeout(open, Math.min(4000, 400 * attempt));
+    });
+  };
+  open();
+  return {
+    send(data: string) {
+      if (socket && socket.readyState === WebSocket.OPEN) socket.send(data);
+    },
+    get readyState() {
+      return socket?.readyState ?? WebSocket.CLOSED;
+    },
+  };
 }

@@ -1,9 +1,9 @@
 [package]
 name = "tianshell"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["zq (zhangqi77ok-sys)"]
-description = "TianShell: 纯 Rust 全功能 SSH/SFTP/监控/隧道桌面工作台与零 Electron MCP 服务"
+description = "TianShell Rust workbench and MCP server. Serves the web UI and starts Streamable HTTP MCP on 127.0.0.1."
 
 [lib]
 name = "tianshell_core"
@@ -25,6 +25,14 @@ path = "rust/tests/vault_store_test.rs"
 name = "pty_monitor_test"
 path = "rust/tests/pty_monitor_test.rs"
 
+[[test]]
+name = "workbench_mcp_test"
+path = "rust/tests/workbench_mcp_test.rs"
+
+[features]
+default = []
+desktop = ["dep:wry", "dep:tao"]
+
 [dependencies]
 aes-gcm = "0.10"
 serde = { version = "1.0", features = ["derive"] }
@@ -36,8 +44,14 @@ base64 = "0.22"
 thiserror = "2.0"
 tokio = { version = "1.40", features = ["full"] }
 ssh2 = "0.9"
-wry = "0.47"
-tao = "0.30"
+sha2 = "0.10"
+axum = { version = "0.7.9", features = ["ws", "macros"] }
+futures-util = "0.3"
+tokio-stream = "0.1"
+bytes = "1"
+ctrlc = "3.4"
+wry = { version = "0.47", optional = true }
+tao = { version = "0.30", optional = true }
 
 [dev-dependencies]
 tempfile = "3.12"

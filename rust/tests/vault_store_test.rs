@@ -13,6 +13,11 @@ fn test_vault_key_and_crypto() {
 
     let key2 = load_or_create_master_key(&key_file).unwrap();
     assert_eq!(key1, key2);
+    #[cfg(not(windows))]
+    {
+        let bytes = std::fs::read(&key_file).unwrap();
+        assert!(bytes.starts_with(b"TS1R"), "POSIX vault.key should use the Node TS1R raw format");
+    }
 
     let secret = "super-secret-password-123!";
     let sealed = seal(&key1, secret).unwrap();
@@ -42,13 +47,13 @@ fn test_host_store_crud_and_cycle() {
             port: 22,
             username: "root".to_string(),
             auth_type: AuthType::Password,
-            secret: Some(store.seal_secret("pw1").unwrap()),
+            secret: store.seal_secret("pw1").unwrap(),
             passphrase: None,
-            group: None,
+            group_id: None,
             jump_host_id: None,
             tags: vec!["jump".to_string()],
-            note: None,
-            known_fingerprint: None,
+            notes: None,
+            fingerprint: None,
             created_at: String::new(),
             updated_at: String::new(),
         })
@@ -63,13 +68,13 @@ fn test_host_store_crud_and_cycle() {
             port: 22,
             username: "pg".to_string(),
             auth_type: AuthType::Password,
-            secret: Some(store.seal_secret("pw2").unwrap()),
+            secret: store.seal_secret("pw2").unwrap(),
             passphrase: None,
-            group: None,
+            group_id: None,
             jump_host_id: Some(h1.id.clone()),
             tags: vec![],
-            note: None,
-            known_fingerprint: None,
+            notes: None,
+            fingerprint: None,
             created_at: String::new(),
             updated_at: String::new(),
         })
@@ -100,6 +105,7 @@ fn test_snippet_and_settings_store() {
             name: "Check disk".to_string(),
             category: "disk".to_string(),
             command: "df -h".to_string(),
+            description: None,
             created_at: String::new(),
         })
         .unwrap();
@@ -113,7 +119,50 @@ fn test_snippet_and_settings_store() {
             monitor_interval_ms: 1000,
             theme: "light".to_string(),
             font_size: 16,
+            show_hidden_files: false,
         })
         .unwrap();
     assert_eq!(settings.get().theme, "light");
+}
+
+#[test]
+fn loads_node_hosts_json_without_leaking_secrets() {
+    let dir = tempdir().unwrap();
+    let key = load_or_create_master_key(&dir.path().join("vault.key")).unwrap();
+    let sealed = seal(&key, "s3cret").unwrap();
+    let hosts_file = dir.path().join("hosts.json");
+    std::fs::write(
+        &hosts_file,
+        format!(
+            r#"{{
+  "version": 1,
+  "hosts": [{{
+    "id": "h1",
+    "alias": "box",
+    "host": "10.0.0.8",
+    "port": 22,
+    "username": "root",
+    "authType": "password",
+    "secret": "{sealed}",
+    "passphrase": null,
+    "fingerprint": null,
+    "groupId": null,
+    "jumpHostId": null,
+    "tags": ["lab"],
+    "notes": "from node",
+    "createdAt": "2020-01-01T00:00:00.000Z",
+    "updatedAt": "2020-01-01T00:00:00.000Z"
+  }}],
+  "groups": [{{"id": "g1", "name": "研发", "parentId": null, "order": 1}}]
+}}"#
+        ),
+    )
+    .unwrap();
+    let store = HostStore::load(&hosts_file, key).unwrap();
+    assert_eq!(store.open_secret(&store.list()[0].secret).unwrap(), "s3cret");
+    let public = serde_json::to_string(&store.list_public()).unwrap();
+    assert!(public.contains("box"));
+    assert!(!public.contains("s3cret"));
+    assert!(!public.contains(&sealed));
+    assert_eq!(store.list_groups_sorted()[0].name, "研发");
 }

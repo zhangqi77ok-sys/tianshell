@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -36,6 +36,7 @@ impl CrLfNormalizer {
 pub struct NormalizedReader<R: Read> {
     inner: R,
     normalizer: CrLfNormalizer,
+    pending: Vec<u8>,
 }
 
 impl<R: Read> NormalizedReader<R> {
@@ -43,27 +44,43 @@ impl<R: Read> NormalizedReader<R> {
         Self {
             inner,
             normalizer: CrLfNormalizer::new(),
+            pending: Vec::new(),
         }
     }
 }
 
 impl<R: Read> Read for NormalizedReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if !self.pending.is_empty() {
+            let n = buf.len().min(self.pending.len());
+            buf[..n].copy_from_slice(&self.pending[..n]);
+            self.pending.drain(..n);
+            return Ok(n);
+        }
         let mut tmp = vec![0u8; buf.len().max(512)];
         let n = self.inner.read(&mut tmp)?;
         if n == 0 {
             return Ok(0);
         }
         let norm = self.normalizer.normalize(&tmp[..n]);
-        let copy_len = norm.len().min(buf.len());
-        buf[..copy_len].copy_from_slice(&norm[..copy_len]);
-        Ok(copy_len)
+        if norm.len() <= buf.len() {
+            buf[..norm.len()].copy_from_slice(&norm);
+            Ok(norm.len())
+        } else {
+            buf.copy_from_slice(&norm[..buf.len()]);
+            self.pending.extend_from_slice(&norm[buf.len()..]);
+            Ok(buf.len())
+        }
     }
 }
 
 pub struct LocalShellSession {
     child: Child,
     stdin: ChildStdin,
+    stderr: Option<ChildStderr>,
 }
 
 impl LocalShellSession {
@@ -99,9 +116,14 @@ impl LocalShellSession {
             std::io::Error::new(std::io::ErrorKind::BrokenPipe, "无法连接终端 stdout")
         })?;
 
+        let stderr = child.stderr.take();
         let reader = NormalizedReader::new(stdout);
-        let session = Self { child, stdin };
+        let session = Self { child, stdin, stderr };
         Ok((session, reader))
+    }
+
+    pub fn take_stderr(&mut self) -> Option<ChildStderr> {
+        self.stderr.take()
     }
 
     pub fn write(&mut self, data: &[u8]) -> Result<(), PtyError> {

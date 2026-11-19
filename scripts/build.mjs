@@ -35,8 +35,15 @@ export async function build(options = { quiet: false }) {
     platform: 'browser',
     format: 'iife',
     outfile: path.join(dist, 'renderer.js'),
+    sourcemap: false,
+    loader: { '.css': 'css' },
   });
   copyFileSync(path.join(root, 'src/renderer/index.html'), path.join(dist, 'index.html'));
+  const ui = path.join(root, 'ui');
+  mkdirSync(ui, { recursive: true });
+  copyFileSync(path.join(dist, 'index.html'), path.join(ui, 'index.html'));
+  copyFileSync(path.join(dist, 'renderer.js'), path.join(ui, 'renderer.js'));
+  copyFileSync(path.join(dist, 'renderer.css'), path.join(ui, 'renderer.css'));
 }
 
 const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
