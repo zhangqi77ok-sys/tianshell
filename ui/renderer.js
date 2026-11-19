@@ -6191,7 +6191,8 @@ WARNING: This link could potentially be dangerous`)) {
       { method: "POST", body: file }
     ),
     cancelTransfer: (tid) => apiRequest(`/api/transfers/${encodeURIComponent(tid)}/cancel`, { method: "POST" }),
-    mcpInfo: () => apiRequest("/api/mcp")
+    mcpInfo: () => apiRequest("/api/mcp"),
+    installCursor: () => apiRequest("/api/mcp/cursor", { method: "POST" })
   };
   function connectWs(onEvent, onOpen) {
     let socket = null;
@@ -6330,9 +6331,35 @@ WARNING: This link could potentially be dangerous`)) {
       document.getElementById("field-notes").value = host?.notes ?? "";
       document.getElementById("field-password").value = "";
       document.getElementById("field-key").value = "";
+      document.getElementById("field-passphrase").value = "";
+      document.getElementById("field-clear-fp").checked = false;
       document.getElementById("form-error").textContent = "";
       document.getElementById("clear-fp-row")?.classList.toggle("hidden", !host?.fingerprint);
+      this.setAuth(host?.authType === "privateKey" ? "privateKey" : "password");
+      this.sealHostFields(dlg);
       dlg.showModal();
+      const focused = document.activeElement;
+      if (focused instanceof HTMLElement && focused !== dlg) focused.blur();
+      dlg.focus();
+    }
+    setAuth(mode) {
+      document.querySelectorAll('input[name="auth"]').forEach((radio) => {
+        radio.checked = radio.value === mode;
+      });
+      const isKey = mode === "privateKey";
+      document.getElementById("password-field")?.classList.toggle("hidden", isKey);
+      document.getElementById("key-field")?.classList.toggle("hidden", !isKey);
+      const hint = document.getElementById("auth-hint");
+      if (!hint) return;
+      if (!this.editingHost) hint.textContent = "";
+      else if (this.editingHost.authType === mode) hint.textContent = isKey ? "\u7559\u7A7A\u5219\u4FDD\u7559\u539F\u79C1\u94A5" : "\u7559\u7A7A\u5219\u4FDD\u7559\u539F\u5BC6\u7801";
+      else hint.textContent = isKey ? "\u6539\u6210\u79C1\u94A5\u540E\u5FC5\u987B\u586B\u5199\u79C1\u94A5" : "\u6539\u6210\u5BC6\u7801\u540E\u5FC5\u987B\u586B\u5199\u5BC6\u7801";
+    }
+    sealHostFields(dlg) {
+      dlg.querySelectorAll("input, textarea").forEach((field) => {
+        if (field.type === "radio" || field.type === "checkbox" || field.type === "file" || field.type === "hidden") return;
+        field.readOnly = true;
+      });
     }
     fillSelect(id, defaultLabel, opts) {
       const sel = document.getElementById(id);
@@ -6352,6 +6379,21 @@ WARNING: This link could potentially be dangerous`)) {
       document.getElementById("filter")?.addEventListener("input", () => this.render());
       document.getElementById("add-host")?.addEventListener("click", () => this.openModal(null));
       document.getElementById("cancel-host")?.addEventListener("click", () => document.getElementById("host-dialog").close());
+      const hostDlg = document.getElementById("host-dialog");
+      hostDlg?.addEventListener("pointerdown", (event) => {
+        const target = event.target;
+        if (!(target instanceof Element)) return;
+        const field = target.closest("input, textarea");
+        if (!(field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement)) return;
+        if (field.type === "radio" || field.type === "checkbox" || field.type === "file") return;
+        field.readOnly = false;
+      });
+      hostDlg?.addEventListener("keydown", (event) => {
+        const target = event.target;
+        if ((target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) && target.readOnly) {
+          event.preventDefault();
+        }
+      });
       document.getElementById("add-group")?.addEventListener("click", async () => {
         const name = await this.deps.promptText("\u8F93\u5165\u65B0\u5206\u7EC4\u540D\u79F0");
         if (name) {
@@ -6361,8 +6403,7 @@ WARNING: This link could potentially be dangerous`)) {
       });
       document.querySelectorAll('input[name="auth"]').forEach((r) => r.addEventListener("change", () => {
         const isKey = document.querySelector('input[name="auth"]:checked').value === "privateKey";
-        document.getElementById("password-field")?.classList.toggle("hidden", isKey);
-        document.getElementById("key-field")?.classList.toggle("hidden", !isKey);
+        this.setAuth(isKey ? "privateKey" : "password");
       }));
       const pickFile = document.getElementById("pick-key-file");
       pickFile?.addEventListener("change", async () => {
@@ -7018,8 +7059,20 @@ WARNING: This link could potentially be dangerous`)) {
   });
   function sendInput(data) {
     if (!activeId || ws.readyState !== WebSocket.OPEN) return;
-    const broadcast = document.getElementById("broadcast-toggle").checked;
-    ws.send(JSON.stringify(broadcast ? { type: "term:broadcast", sessionIds: Array.from(tabs.keys()), data } : { type: "term:input", sessionId: activeId, data }));
+    const enabled = document.getElementById("broadcast-toggle")?.checked === true;
+    if (!enabled) {
+      ws.send(JSON.stringify({ type: "term:input", sessionId: activeId, data }));
+      return;
+    }
+    const ids = /* @__PURE__ */ new Set([activeId]);
+    for (const [id, tab] of tabs) {
+      if (tab.broadcastSelected && !tab.closed) ids.add(id);
+    }
+    if (ids.size === 1) {
+      ws.send(JSON.stringify({ type: "term:input", sessionId: activeId, data }));
+      return;
+    }
+    ws.send(JSON.stringify({ type: "term:broadcast", sessionIds: Array.from(ids), data }));
   }
   function createTermInstance(info) {
     if (tabs.has(info.sessionId)) {
@@ -7049,7 +7102,7 @@ WARNING: This link could potentially be dangerous`)) {
     term.loadAddon(fit);
     term.open(slot);
     term.onData((data) => sendInput(data));
-    tabs.set(info.sessionId, { info, term, fit, slot, metrics: null, closed: false });
+    tabs.set(info.sessionId, { info, term, fit, slot, metrics: null, closed: false, broadcastSelected: false });
     selectTab(info.sessionId);
   }
   function fitTab(tab) {
@@ -7127,6 +7180,15 @@ WARNING: This link could potentially be dangerous`)) {
       dot.className = "tab-dot";
       const label = document.createElement("span");
       label.textContent = tab.info.kind === "local" ? "\u672C\u673A" : tab.info.alias;
+      const cast = document.createElement("input");
+      cast.type = "checkbox";
+      cast.className = "tab-cast";
+      cast.title = "\u628A\u8FD9\u4E2A\u7EC8\u7AEF\u52A0\u5165\u5E7F\u64AD";
+      cast.checked = tab.broadcastSelected;
+      cast.addEventListener("click", (e) => e.stopPropagation());
+      cast.addEventListener("change", () => {
+        tab.broadcastSelected = cast.checked;
+      });
       const closeBtn = document.createElement("button");
       closeBtn.type = "button";
       closeBtn.textContent = "\xD7";
@@ -7135,7 +7197,7 @@ WARNING: This link could potentially be dangerous`)) {
         e.stopPropagation();
         void closeTab(id);
       });
-      chip.append(dot, label, closeBtn);
+      chip.append(dot, label, cast, closeBtn);
       chip.addEventListener("click", () => selectTab(id));
       bar.appendChild(chip);
     }
@@ -7149,14 +7211,32 @@ WARNING: This link could potentially be dangerous`)) {
     tabs.delete(sessionId);
     selectTab(Array.from(tabs.keys()).pop() ?? null);
   }
+  function setConnectStatus(text, failed = false) {
+    const el = document.getElementById("connect-status");
+    if (!el) return;
+    el.textContent = text;
+    el.classList.toggle("hidden", text.length === 0);
+    el.classList.toggle("error", failed);
+  }
+  var connectGeneration = 0;
   async function openSshTab(hostId) {
+    const generation = ++connectGeneration;
+    const host = treeCtrl.hosts.find((item) => item.id === hostId);
+    const jump = host?.jumpHostId ? treeCtrl.hosts.find((item) => item.id === host.jumpHostId) : void 0;
+    if (host && jump) setConnectStatus(`\u6B63\u5728\u7ECF\u8DF3\u677F\u673A\u300C${jump.alias}\u300D\u8FDE\u63A5\u300C${host.alias}\u300D\u2026`);
     try {
       const grid = measureGrid();
-      createTermInstance(await webApi.openSession({ kind: "ssh", hostId, cols: grid.cols, rows: grid.rows }));
+      const info = await webApi.openSession({ kind: "ssh", hostId, cols: grid.cols, rows: grid.rows });
+      if (generation !== connectGeneration) return;
+      createTermInstance(info);
+      if (jump) setConnectStatus("");
       const tab = activeId ? tabs.get(activeId) : void 0;
       if (tab) requestAnimationFrame(() => fitTab(tab));
     } catch (err) {
-      showToast(err instanceof Error ? err.message : "\u8FDE\u63A5\u5931\u8D25");
+      if (generation !== connectGeneration) return;
+      const message = err instanceof Error ? err.message : "\u8FDE\u63A5\u5931\u8D25";
+      if (jump) setConnectStatus(message, true);
+      showToast(message);
     }
   }
   function findInActiveTerm(needle, forward = false) {
@@ -7279,8 +7359,16 @@ WARNING: This link could potentially be dangerous`)) {
       tab.fit.fit();
     }
   }
-  function mcpConfigs(url, token) {
+  function mcpConfigs(url, token, attach) {
     const cursor = {
+      mcpServers: {
+        tianshell: {
+          command: attach?.command ?? "tianshell",
+          args: attach?.args ?? ["mcp", "--attach"]
+        }
+      }
+    };
+    const cursorHttp = {
       mcpServers: {
         tianshell: {
           url,
@@ -7297,7 +7385,11 @@ WARNING: This link could potentially be dangerous`)) {
         }
       }
     };
-    return { cursor: JSON.stringify(cursor, null, 2), claude: JSON.stringify(claude, null, 2) };
+    return {
+      cursor: JSON.stringify(cursor, null, 2),
+      cursorHttp: JSON.stringify(cursorHttp, null, 2),
+      claude: JSON.stringify(claude, null, 2)
+    };
   }
   async function copyText(text, ok) {
     try {
@@ -7311,10 +7403,11 @@ WARNING: This link could potentially be dangerous`)) {
     const dlg = document.getElementById("mcp-dialog");
     const info = await webApi.mcpInfo();
     const token = resolveClientToken();
-    const configs = mcpConfigs(info.url, token);
+    const configs = mcpConfigs(info.url, token, info.cursorAttach);
     document.getElementById("mcp-url").value = info.url;
     document.getElementById("mcp-token").value = token;
     document.getElementById("mcp-cursor").value = configs.cursor;
+    document.getElementById("mcp-cursor-http").value = configs.cursorHttp;
     document.getElementById("mcp-claude").value = configs.claude;
     const status = document.getElementById("mcp-status");
     if (status) status.textContent = info.url.replace(/^https?:\/\//, "");
@@ -7327,6 +7420,13 @@ WARNING: This link could potentially be dangerous`)) {
     }));
     document.getElementById("close-mcp")?.addEventListener("click", () => {
       document.getElementById("mcp-dialog").close();
+    });
+    document.getElementById("install-cursor")?.addEventListener("click", () => {
+      void webApi.installCursor().then((result) => {
+        showToast(`\u5DF2\u5199\u5165 ${result.path}`);
+      }).catch((err) => {
+        showToast(err instanceof Error ? err.message : "\u5199\u5165 Cursor \u914D\u7F6E\u5931\u8D25");
+      });
     });
     document.getElementById("copy-cursor")?.addEventListener("click", () => {
       void copyText(document.getElementById("mcp-cursor").value, "\u5DF2\u590D\u5236 Cursor \u914D\u7F6E");

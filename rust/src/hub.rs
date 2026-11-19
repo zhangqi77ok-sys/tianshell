@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use base64::Engine;
@@ -12,8 +13,8 @@ use uuid::Uuid;
 use crate::history::{CommandHistory, HistoryDraft};
 use crate::monitor::{poll_probe, ProbeHistory, PROBE_COMMAND};
 use crate::pty::LocalShellSession;
-use crate::screen::{note_cd, parse_end_marker, transcript_before_marker, LineAssembler, Screen, ShellKind};
-use crate::shared_ssh::{emit_data, PtySsh, SideSsh};
+use crate::screen::{note_cd, parse_end_marker, transcript_before_marker, LineAssembler, ProbeConceal, Screen, ShellKind};
+use crate::shared_ssh::{emit_data, PtySsh, SideSsh, TermRawTx};
 use crate::ssh::{connect_chain, exec_command, truncate_output};
 use crate::state::lock;
 use crate::store::HostStore;
@@ -56,6 +57,7 @@ struct TabMind {
     last_exit: Option<i32>,
     screen: Screen,
     assembler: LineAssembler,
+    conceal: ProbeConceal,
     job: Option<LiveJob>,
     alias: String,
     kind: String,
@@ -107,40 +109,37 @@ pub struct SessionHub {
     finished: Arc<Mutex<HashMap<String, JobView>>>,
     history: Arc<Mutex<Option<Arc<CommandHistory>>>>,
     events: broadcast::Sender<String>,
+    raw_tx: TermRawTx,
+    raw_rx: Mutex<Option<mpsc::Receiver<(String, Vec<u8>)>>>,
     interval: Arc<AtomicU64>,
 }
 
 impl SessionHub {
     pub fn new(interval_ms: u64) -> Arc<Self> {
         let (events, _) = broadcast::channel::<String>(256);
-        let screens = Arc::new(Mutex::new(HashMap::new()));
-        let history = Arc::new(Mutex::new(None));
-        let finished = Arc::new(Mutex::new(HashMap::new()));
-        let pump_screens = screens.clone();
-        let pump_history = history.clone();
-        let pump_finished = finished.clone();
-        let mut pump_rx = events.subscribe();
+        let (raw_tx, raw_rx) = mpsc::channel();
+        let hub = Arc::new(Self {
+            tabs: Mutex::new(HashMap::new()),
+            screens: Arc::new(Mutex::new(HashMap::new())),
+            job_index: Arc::new(Mutex::new(HashMap::new())),
+            finished: Arc::new(Mutex::new(HashMap::new())),
+            history: Arc::new(Mutex::new(None)),
+            events,
+            raw_tx,
+            raw_rx: Mutex::new(Some(raw_rx)),
+            interval: Arc::new(AtomicU64::new(interval_ms.clamp(1000, 10_000))),
+        });
+        let pump = hub.clone();
+        let rx = lock(&pump.raw_rx).take().expect("终端回放通道只启动一次");
         std::thread::Builder::new()
             .name("term-screen".into())
             .spawn(move || {
-                loop {
-                    match pump_rx.blocking_recv() {
-                        Ok(raw) => apply_terminal_output(&raw, &pump_screens, &pump_history, &pump_finished),
-                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(broadcast::error::RecvError::Closed) => break,
-                    }
+                while let Ok((session_id, bytes)) = rx.recv() {
+                    pump.on_terminal_output(&session_id, &bytes);
                 }
             })
             .expect("无法启动终端回放线程");
-        Arc::new(Self {
-            tabs: Mutex::new(HashMap::new()),
-            screens,
-            job_index: Arc::new(Mutex::new(HashMap::new())),
-            finished,
-            history,
-            events,
-            interval: Arc::new(AtomicU64::new(interval_ms.clamp(1000, 10_000))),
-        })
+        hub
     }
 
     pub fn set_history(&self, history: Arc<CommandHistory>) {
@@ -175,6 +174,7 @@ impl SessionHub {
         let id = Uuid::new_v4().to_string();
         let cwd = dirs::home_dir().map(|path| path.to_string_lossy().to_string());
         self.register_mind(&id, ShellKind::local_default(), cwd, "local", "本机终端", None);
+        let raw_tx = self.raw_tx.clone();
         let events = self.events.clone();
         let id_reader = id.clone();
         std::thread::spawn(move || {
@@ -182,7 +182,7 @@ impl SessionHub {
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
-                    Ok(n) => emit_data(&events, &id_reader, &buf[..n]),
+                    Ok(n) => emit_data(&raw_tx, &id_reader, &buf[..n]),
                     Err(_) => break,
                 }
             }
@@ -240,7 +240,7 @@ impl SessionHub {
         let id = Uuid::new_v4().to_string();
         self.register_mind(&id, ShellKind::Posix, None, "ssh", &leaf.alias, Some(leaf.id.clone()));
         let stop = Arc::new(AtomicBool::new(false));
-        let pty = PtySsh::spawn(pty_session, channel, self.events.clone(), id.clone(), stop.clone());
+        let pty = PtySsh::spawn(pty_session, channel, self.raw_tx.clone(), self.events.clone(), id.clone(), stop.clone());
         let side = SideSsh::spawn(side_session, id.clone());
         let probes = Arc::new(Mutex::new(None));
         let remote = RemoteTab { pty, side: side.clone(), probes: probes.clone() };
@@ -441,6 +441,9 @@ impl SessionHub {
             return Err("这个终端还有一条命令在跑。先 poll_command，或 interrupt_terminal。".into());
         }
         let nonce = command_nonce();
+        let quiet = shell.trailer(&nonce);
+        let follow = shell.probe_followup(&nonce);
+        let line_needles = shell.line_needles();
         let job_id = Uuid::new_v4().to_string();
         let meta = self.tab_meta(session_id);
         let redacted = self
@@ -468,6 +471,7 @@ impl SessionHub {
             if let Some(view) = snapshot(session_id, &mind) {
                 lock(&self.finished).insert(view.job_id.clone(), view);
             }
+            mind.conceal.arm(&nonce, &quiet, follow, &line_needles);
             let mark = mind.screen.mark();
             mind.job = Some(LiveJob {
                 id: job_id.clone(),
@@ -482,9 +486,10 @@ impl SessionHub {
             });
         }
         lock(&self.job_index).insert(job_id.clone(), session_id.to_string());
-        let payload = format!("{command}\r{}\r", shell.trailer(&nonce));
+        let payload = format!("{command}\r{quiet}\r");
         if let Err(err) = self.write_raw(session_id, &payload) {
             let mut mind = lock(&mind);
+            mind.conceal.finish();
             if let Some(job) = mind.job.as_mut() {
                 job.done = true;
                 job.cancelled = true;
@@ -542,6 +547,7 @@ impl SessionHub {
             .cloned()
             .ok_or_else(|| "没有这条命令".to_string())?;
         let _ = self.write_raw(&session_id, "\u{3}");
+        self.finish_conceal(&session_id);
         if let Some(mind) = lock(&self.screens).get(&session_id).cloned() {
             let finish = {
                 let mut mind = lock(&mind);
@@ -569,6 +575,7 @@ impl SessionHub {
 
     pub fn interrupt(&self, session_id: &str) -> Result<(), String> {
         self.write_raw(session_id, "\u{3}")?;
+        self.finish_conceal(session_id);
         if let Some(mind) = lock(&self.screens).get(session_id).cloned() {
             let finish = {
                 let mut mind = lock(&mind);
@@ -611,6 +618,7 @@ impl SessionHub {
                 last_exit: None,
                 screen: Screen::new(),
                 assembler: LineAssembler::new(),
+                conceal: ProbeConceal::new(),
                 job: None,
                 alias: alias.to_string(),
                 kind: kind.to_string(),
@@ -700,6 +708,53 @@ impl SessionHub {
             TabIo::Local(_) => Err("会话未连接到 SSH 主机".into()),
         }
     }
+
+    fn finish_conceal(&self, session_id: &str) {
+        let Some(mind) = lock(&self.screens).get(session_id).cloned() else { return };
+        let restore_echo = {
+            let mut mind = lock(&mind);
+            let restore = mind.conceal.follow_was_sent();
+            let _ = mind.conceal.finish();
+            restore
+        };
+        if restore_echo {
+            let _ = self.write_raw(session_id, "stty echo\r");
+        }
+    }
+
+    fn on_terminal_output(&self, session_id: &str, bytes: &[u8]) {
+        let Some(mind) = lock(&self.screens).get(session_id).cloned() else { return };
+        let (filtered, follow, finish, view) = {
+            let mut mind = lock(&mind);
+            mind.screen.ingest(bytes);
+            let quiet = mind.conceal.quiet_text();
+            if mind.conceal.armed() && !quiet.is_empty() {
+                mind.screen.scrub_probe(&quiet);
+            }
+            let (mut filtered, follow) = mind.conceal.push(bytes);
+            let finish = observe_job(&mut mind);
+            if mind.job.as_ref().map(|job| job.done).unwrap_or(false) {
+                filtered.extend(mind.conceal.finish());
+            }
+            let view = snapshot(session_id, &mind).filter(|view| view.done);
+            (filtered, follow, finish, view)
+        };
+        if let Some(view) = view {
+            lock(&self.finished).insert(view.job_id.clone(), view);
+        }
+        if let Some(finish) = finish {
+            if let Some(history) = self.history_handle() {
+                history.finish(&finish.id, finish.exit_code, finish.cwd, finish.ok);
+            }
+        }
+        if let Some(cmd) = follow {
+            let _ = self.write_raw(session_id, &format!("{cmd}\r"));
+        }
+        if !filtered.is_empty() {
+            let data = base64::engine::general_purpose::STANDARD.encode(&filtered);
+            let _ = self.events.send(json!({"type": "term:data", "sessionId": session_id, "data": data}).to_string());
+        }
+    }
 }
 
 struct TabMeta {
@@ -762,37 +817,6 @@ fn snapshot(session_id: &str, mind: &TabMind) -> Option<JobView> {
         truncated: log_cut || cut,
         streams: "merged".into(),
     })
-}
-
-fn apply_terminal_output(
-    raw: &str,
-    screens: &Mutex<HashMap<String, Arc<Mutex<TabMind>>>>,
-    history: &Mutex<Option<Arc<CommandHistory>>>,
-    finished: &Mutex<HashMap<String, JobView>>,
-) {
-    let Ok(msg) = serde_json::from_str::<Value>(raw) else { return };
-    if msg.get("type").and_then(|value| value.as_str()) != Some("term:data") {
-        return;
-    }
-    let Some(session_id) = msg.get("sessionId").and_then(|value| value.as_str()) else { return };
-    let Some(data) = msg.get("data").and_then(|value| value.as_str()) else { return };
-    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else { return };
-    let Some(mind) = lock(screens).get(session_id).cloned() else { return };
-    let (finish, view) = {
-        let mut mind = lock(&mind);
-        mind.screen.ingest(&bytes);
-        let finish = observe_job(&mut mind);
-        let view = snapshot(session_id, &mind).filter(|view| view.done);
-        (finish, view)
-    };
-    if let Some(view) = view {
-        lock(finished).insert(view.job_id.clone(), view);
-    }
-    if let Some(finish) = finish {
-        if let Some(history) = lock(history).clone() {
-            history.finish(&finish.id, finish.exit_code, finish.cwd, finish.ok);
-        }
-    }
 }
 
 fn remember_fingerprints(hosts: &Arc<Mutex<HostStore>>, learned: &[(String, String)]) {

@@ -27,22 +27,38 @@ Windows 安装包里双击 `tianshell.exe` 就是这条命令，不用再记参�
 - macOS：`~/Library/Application Support/tianshell`
 - Linux：`~/.config/tianshell`
 
-令牌在 `mcp.token`，也在工作台启动后的 `runtime.json` 里。界面左下角的「连接 MCP」会显示地址和令牌，并给出可以直接复制的客户端配置。不要把令牌写进仓库或日志。
+令牌在 `mcp.token`，也在工作台启动后的 `runtime.json` 里。界面左下角的「连接 MCP」可以一键写入 Cursor 的附着配置（不含令牌）。HTTP 备用配置仍会显示令牌，只在这台电脑上。不要把令牌写进仓库或日志。
 
 ## 客户端该用哪种传输
 
 | 客户端 | 用这个 | 原因 |
 | --- | --- | --- |
-| Cursor | Streamable HTTP，`url` + `headers`，**不要**写 `type` | Cursor 看到 `url` 就走 HTTP / SSE |
+| Cursor | `tianshell mcp --attach`（stdio，配置里没有令牌） | 进程读本机 `runtime.json`，再带令牌去连已经在跑的工作台 |
 | Claude Code | Streamable HTTP，必须写 `"type": "http"` | 只有 `url`、没有 `type` 时，Claude Code 会把它当成 stdio 并跳过 |
+| 只认 HTTP、不会拉起进程的客户端 | Streamable HTTP，`url` + `headers`，**不要**写 `type` | Cursor 看到 `url` 就走 HTTP / SSE。这是备用，令牌仍要放在请求里 |
 | 只支持 2024-11-05 SSE 的旧客户端 | `GET /sse` | 服务仍提供这条旧传输 |
-| 只会自己拉起进程的客户端 | `tianshell-mcp --attach` | stdio 转到已经在跑的工作台 |
+| 只会自己拉起进程的客户端 | `tianshell mcp --attach`，或 `tianshell-mcp --attach` | stdio 转到已经在跑的工作台 |
 
 先启动 TianShell，再让客户端连接。端口或令牌变了，就改配置。下面的 `YOUR_TOKEN` 换成 `mcp.token` 里的内容，或从界面「连接 MCP」直接复制。
 
 ### Cursor
 
-写到 `~/.cursor/mcp.json`（所有项目）或项目里的 `.cursor/mcp.json`。
+先启动工作台。推荐写到 `~/.cursor/mcp.json`（所有项目）或项目里的 `.cursor/mcp.json`。`command` 用本机的 `tianshell` 路径。界面「连接 MCP」里的「安装到 Cursor」会写成同一份，不会把令牌放进文件。
+
+```json
+{
+  "mcpServers": {
+    "tianshell": {
+      "command": "tianshell",
+      "args": ["mcp", "--attach"]
+    }
+  }
+}
+```
+
+工作台没在跑时，这条命令会退出并说明先执行 `tianshell serve`。令牌留在数据目录里，由这个进程自己读，不出现在配置和日志中。
+
+只认 HTTP、不会拉起进程时，再用下面的地址。`YOUR_TOKEN` 换成 `mcp.token` 里的内容。
 
 ```json
 {
@@ -291,7 +307,7 @@ TianShell 是会话和记忆，不是一个用完就丢掉的 SSH 客户端。�
 ## 和界面的关系
 
 - 编码工具打进已打开标签的命令，会出现在用户正在看的终端里。
-- 右侧「命令历史」可以浏览这些记录，点一条会送进当前终端。左下角「连接 MCP」仍可复制 Cursor / Claude Code 配置。
+- 右侧「命令历史」可以浏览这些记录，点一条会送进当前终端。左下角「连接 MCP」可以把不含令牌的附着配置写进 Cursor，也可以复制 Claude Code 的 HTTP 配置。
 - 启动日志只打印界面和 MCP 地址，不打印令牌。
 - 一个 SSH 标签在界面上仍是一个会话。终端独占一条 SSH 连接；工作台里的 SFTP 和监控共用另一条不另开标签的连接。关掉标签时两条一起拆掉。
 - 不要让 Node 版 `npm start` 和这个 Rust 进程同时写同一个 `TIANSHELL_HOME`。
@@ -308,11 +324,11 @@ Preferred transport: Streamable HTTP `POST/GET/DELETE http://127.0.0.1:53921/mcp
 
 Auth: `Authorization: Bearer <token>`. The token is stable for a data directory (`TIANSHELL_TOKEN`, otherwise `mcp.token`). The same value is in `runtime.json` while the process is up. Bind address is loopback only. `initialize` returns `Mcp-Session-Id`. Startup logs do not print the token.
 
-Cursor config is `url` plus `headers`, with no `type` field. Claude Code config must set `"type": "http"` (alias `"streamable-http"`). A Claude Code entry that has `url` and no `type` is skipped. Copy-paste JSON is in the sections above; replace `YOUR_TOKEN` or read it from the workbench **连接 MCP** dialog. Do not commit the token.
+Cursor's preferred entry is `{ "command": "tianshell", "args": ["mcp", "--attach"] }`. That process reads the loopback token itself; the file does not contain it. The workbench button **安装到 Cursor** writes `~/.cursor/mcp.json` the same way and leaves other `mcpServers` in place. HTTP remains available: Cursor uses `url` plus `headers` and no `type` field. Claude Code must set `"type": "http"` (alias `"streamable-http"`). A Claude Code entry that has `url` and no `type` is skipped. Do not commit the token, and do not print it.
 
-stdio binary: `tianshell-mcp --attach` proxies to the running workbench. Without `--attach`, stdio can read the same hosts, snippets, and command history, but it cannot see or type into interactive tabs, and it cannot start the workbench's port forwards.
+stdio: `tianshell mcp --attach` and `tianshell-mcp --attach` proxy to the running workbench. Without `--attach`, `tianshell-mcp` can read the same hosts, snippets, and command history, but it cannot see or type into interactive tabs, and it cannot start the workbench's port forwards.
 
-Typical loop: `list_hosts` → `list_terminal_sessions` or `open_terminal` → `read_terminal` → `run_command` (or `write_terminal`) → `sftp_read` → `search_history`. `run_command` types into a matching open tab unless `new_session` is true or no tab matches. On a tab, stdout and stderr are merged and `exitCode` comes from a POSIX `$?` trailer (PowerShell `$LASTEXITCODE` for the local Windows console). `fish` and `csh` do not parse that trailer.
+Typical loop: `list_hosts` → `list_terminal_sessions` or `open_terminal` → `read_terminal` → `run_command` (or `write_terminal`) → `sftp_read` → `search_history`. `run_command` types into a matching open tab unless `new_session` is true or no tab matches. On a tab, stdout and stderr are merged. `exitCode` and cwd still come from a POSIX `$?` probe (PowerShell `$LASTEXITCODE` on the local Windows console). The probe is not left on the person's screen. `fish` and `csh` do not parse it, so `exitCode` may be empty.
 
 `start_command`, `poll_command`, and `cancel_command` run on an open tab so a long job does not block the client. An interactive tab keeps the shell on its own SSH session. The workbench SFTP pane and the metrics probe use a second silent login, so a listing, a transfer, or a probe does not block typing. MCP file tools (`sftp_list`, `sftp_read`, `sftp_write`, `sftp_download`, `sftp_upload`, `sftp_mkdir`) still open their own SSH login. Private keys, passwords, passphrases, and the MCP token are omitted from tool results and from `command-history.json`.
 

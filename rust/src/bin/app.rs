@@ -1,10 +1,19 @@
 use std::env;
 use std::time::Duration;
 use tianshell_core::http_server::{start_workbench, ServerOptions};
+use tianshell_core::mcp_http::run_stdio_attach;
 use tianshell_core::VERSION;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
+    if wants_help(&args) {
+        print!("{}", help_text());
+        return Ok(());
+    }
+    if args.first().map(String::as_str) == Some("mcp") {
+        eprintln!("TianShell MCP 正在附着到已启动的工作台");
+        return run_stdio_attach();
+    }
     let serve_only = args.iter().any(|arg| arg == "serve" || arg == "--serve" || arg == "--no-window");
     let no_open = args.iter().any(|arg| arg == "--no-open");
     let mut port = None;
@@ -43,6 +52,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         wait_for_ctrl_c();
     }
     Ok(())
+}
+
+fn wants_help(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--help" || arg == "-h" || arg == "help")
+}
+
+fn help_text() -> String {
+    format!(
+        "\
+TianShell {version}
+
+用法
+  tianshell                         启动工作台并打开浏览器
+  tianshell serve [--no-open] [--port N]
+  tianshell mcp --attach            附着到已经在跑的工作台（stdio，配置里不用写令牌）
+  tianshell --help                  显示这段说明，不启动服务
+
+工作台只监听 127.0.0.1。MCP 跟工作台在同一个端口上。令牌不写在日志里。
+Linux 上编译需要 Rust {rust_min} 或更新，以及 pkg-config 和 OpenSSL 头文件
+（Debian/Ubuntu：pkg-config libssl-dev）。
+",
+        version = VERSION,
+        rust_min = "1.89"
+    )
 }
 
 fn banner(running: &tianshell_core::http_server::RunningServer) -> String {

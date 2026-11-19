@@ -119,7 +119,15 @@ export const webApi = {
     apiRequest<boolean>(`/api/transfers/${encodeURIComponent(tid)}/cancel`, { method: 'POST' }),
 
   mcpInfo: () =>
-    apiRequest<{ url: string; sseUrl: string; transport: string; tools: string[] }>('/api/mcp'),
+    apiRequest<{
+      url: string;
+      sseUrl: string;
+      transport: string;
+      tools: string[];
+      cursorAttach?: { command: string; args: string[] };
+    }>('/api/mcp'),
+  installCursor: () =>
+    apiRequest<{ path: string; installed: boolean; command: string; args: string[] }>('/api/mcp/cursor', { method: 'POST' }),
 };
 
 export interface LiveSocket {

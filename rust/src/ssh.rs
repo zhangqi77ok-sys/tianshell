@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -182,46 +182,123 @@ pub fn connect_direct(target: &SshTarget) -> Result<(Session, String), SshError>
 
 pub fn connect_chain(chain: &[SshTarget]) -> Result<(Session, Vec<(String, String)>), SshError> {
     let first = chain.first().ok_or(SshError::EmptyChain)?;
-    let (mut current, fingerprint) = connect_direct(first)?;
+    let (mut current, fingerprint) = connect_direct(first).map_err(|err| {
+        if chain.len() > 1 {
+            SshError::Message(describe_hop_error(chain, 0, &err))
+        } else {
+            err
+        }
+    })?;
     let mut learned = vec![(first.id.clone(), fingerprint)];
     if chain.len() == 1 {
         return Ok((current, learned));
     }
-    for next in &chain[1..] {
-        let (next_sess, next_fp) = connect_through(&current, next)?;
+    for (index, next) in chain.iter().enumerate().skip(1) {
+        let (next_sess, next_fp) = connect_through(current, next)
+            .map_err(|err| SshError::Message(describe_hop_error(chain, index, &err)))?;
         learned.push((next.id.clone(), next_fp));
         current = next_sess;
     }
     Ok((current, learned))
 }
 
-fn connect_through(current: &Session, next: &SshTarget) -> Result<(Session, String), SshError> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let local_port = listener.local_addr()?.port();
-    let target_host = next.host.clone();
-    let target_port = next.port;
-    let channel = current.channel_direct_tcpip(&target_host, target_port, None)?;
-    std::thread::spawn(move || {
-        if let Ok((mut client_stream, _)) = listener.accept() {
-            let client_clone = client_stream.try_clone().ok();
-            let mut channel_stream = channel.stream(0);
-            let mut channel_clone = channel.stream(0);
-            let copy = std::thread::spawn(move || {
-                let _ = std::io::copy(&mut channel_stream, &mut client_stream);
-            });
-            if let Some(mut cloned) = client_clone {
-                let _ = std::io::copy(&mut cloned, &mut channel_clone);
-            }
-            let _ = copy.join();
-        }
-    });
-    let tcp = TcpStream::connect(("127.0.0.1", local_port))?;
+/// One libssh2 session is not safe to read and write from two threads.
+/// The bastion session moves onto a single pump thread and stays there until
+/// the next hop's socket closes. Dropping it early used to kill the tunnel
+/// under the handshake, which is why a live jump sat until the client gave up.
+fn connect_through(bastion: Session, next: &SshTarget) -> Result<(Session, String), SshError> {
+    bastion.set_timeout(12_000);
+    let channel = bastion.channel_direct_tcpip(&next.host, next.port, Some(("127.0.0.1", 0)))?;
+    bastion.set_timeout(0);
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    let app_stream = TcpStream::connect(("127.0.0.1", port))?;
+    let (jump_stream, _) = listener.accept()?;
+    drop(listener);
+    app_stream.set_nodelay(true).ok();
+    std::thread::Builder::new()
+        .name("ssh-jump".into())
+        .spawn(move || bridge_loop(bastion, channel, jump_stream))
+        .map_err(SshError::Io)?;
     let mut next_sess = Session::new()?;
-    next_sess.set_tcp_stream(tcp);
+    next_sess.set_timeout(12_000);
+    next_sess.set_tcp_stream(app_stream);
     next_sess.handshake()?;
     let fingerprint = check_host_key(&next_sess, next.known_fingerprint.as_deref())?;
     authenticate_session(&next_sess, next)?;
+    next_sess.set_timeout(0);
     Ok((next_sess, fingerprint))
+}
+
+fn bridge_loop(session: Session, mut channel: ssh2::Channel, mut local: TcpStream) {
+    session.set_blocking(true);
+    session.set_timeout(40);
+    let _ = local.set_nodelay(true);
+    let _ = local.set_read_timeout(Some(Duration::from_millis(40)));
+    let _ = local.set_write_timeout(Some(Duration::from_secs(20)));
+    let mut buf = [0u8; 16384];
+    let mut pending = Vec::new();
+    loop {
+        match channel.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if local.write_all(&buf[..n]).is_err() {
+                    break;
+                }
+            }
+            Err(err) if io_wait(&err) => {}
+            Err(_) => break,
+        }
+        if pending.is_empty() {
+            match local.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => pending.extend_from_slice(&buf[..n]),
+                Err(err) if io_wait(&err) => {}
+                Err(_) => break,
+            }
+        }
+        if !pending.is_empty() {
+            session.set_timeout(15_000);
+            match channel.write(&pending) {
+                Ok(0) => break,
+                Ok(n) => {
+                    pending.drain(..n);
+                }
+                Err(err) if io_wait(&err) => {}
+                Err(_) => break,
+            }
+            session.set_timeout(40);
+        }
+    }
+}
+
+fn io_wait(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+    ) || {
+        let text = err.to_string().to_ascii_lowercase();
+        text.contains("timeout") || text.contains("would block") || text.contains("eagain")
+    }
+}
+
+pub fn describe_hop_error(chain: &[SshTarget], hop_index: usize, err: &SshError) -> String {
+    if chain.len() > 1 && hop_index == 0 {
+        let hop = &chain[0];
+        return format!(
+            "跳板机「{}」({}:{}) 连接失败: {err}",
+            hop.alias, hop.host, hop.port
+        );
+    }
+    if hop_index > 0 {
+        if let (Some(via), Some(dest)) = (chain.get(hop_index - 1), chain.get(hop_index)) {
+            return format!(
+                "经跳板机「{}」({}:{}) 连接「{}」({}:{}) 失败: {err}",
+                via.alias, via.host, via.port, dest.alias, dest.host, dest.port
+            );
+        }
+    }
+    err.to_string()
 }
 
 pub fn exec_command(sess: &Session, command: &str) -> Result<ExecResult, SshError> {
@@ -242,4 +319,46 @@ pub fn truncate_output(text: String, max_chars: usize) -> (String, bool) {
     }
     let trimmed: String = text.chars().take(max_chars).collect();
     (format!("{trimmed}\n…（输出已截断）"), true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hop(alias: &str, host: &str, port: u16) -> SshTarget {
+        SshTarget {
+            id: alias.into(),
+            alias: alias.into(),
+            host: host.into(),
+            port,
+            username: "ops".into(),
+            password: None,
+            private_key: None,
+            passphrase: None,
+            known_fingerprint: None,
+        }
+    }
+
+    #[test]
+    fn jump_errors_name_the_bastion() {
+        let chain = vec![
+            hop("lab", "127.0.0.1", 2222),
+            hop("内网", "127.0.0.1", 2223),
+        ];
+        let refused = SshError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "Connection refused (os error 111)",
+        ));
+        let first = describe_hop_error(&chain, 0, &refused);
+        assert!(first.contains("跳板机「lab」"), "{first}");
+        assert!(first.contains("127.0.0.1:2222"), "{first}");
+        assert!(first.contains("Connection refused"), "{first}");
+        let second = describe_hop_error(&chain, 1, &refused);
+        assert!(second.contains("经跳板机「lab」"), "{second}");
+        assert!(second.contains("「内网」"), "{second}");
+        assert!(second.contains("2223"), "{second}");
+        let direct = vec![hop("lab", "127.0.0.1", 2222)];
+        let plain = describe_hop_error(&direct, 0, &refused);
+        assert!(!plain.contains("跳板机"), "{plain}");
+    }
 }

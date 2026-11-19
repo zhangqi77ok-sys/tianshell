@@ -19,7 +19,7 @@
 - **多标签终端 & 本机 Shell & 广播输入**：
   - 同一个 SSH 标签在界面上仍是一个会话。交互终端独占一条 SSH 连接；SFTP 和监控走同一条不另开标签的第二条连接，所以采样、列目录和大文件传输不会挡住键盘和回显。关掉标签时两条连接一起拆掉。端口转发仍然单独占一条连接，因为它要一直握着转发通道。
   - 同时开启多台 SSH 终端与本机 Shell（Windows PowerShell / POSIX `$SHELL`）标签页，互不关闭。本机终端走系统 PTY（Windows 上是 ConPTY），窗口尺寸会跟着变。
-  - 支持终端内 `Ctrl+F` 搜索、拖拽调整上下分屏比例、勾选「广播输入」将命令/快捷片段同步下发到所有已打开终端。
+  - 支持终端内 `Ctrl+F` 搜索、拖拽调整上下分屏比例。勾选「广播到已选」后，输入只进入当前终端和标签上另外勾选的终端；默认不勾选，不会把按键送进其他 SSH 标签。
 - **完整 SFTP 文件管理与在线文本编辑**：
   - 支持目录浏览、面包屑导航、显示隐藏文件、新建目录、重命名、权限修改 (`chmod`)、递归删除。
   - 支持文件**拖拽上传**、流式下载、底部实时传输队列进度与取消；双击文本/配置文件可弹出等宽编辑器直接修改并写回远端。
@@ -32,11 +32,22 @@
 
 ## 环境与运行
 
-启动工作台需要 Rust（stable）。不需要 Node.js，也不需要先执行 `npm install`。
+启动工作台需要 **Rust 1.89 或更新**（仓库里的 `rust-toolchain.toml` 会选 1.89.0）。1.83 编不过：锁文件里的依赖用了 edition 2024。不需要 Node.js，也不需要先执行 `npm install`。
+
+Linux 上还要有 `pkg-config` 和 OpenSSL 头文件，否则 `openssl-sys` 编不过：
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install pkg-config libssl-dev
+# Fedora
+sudo dnf install pkgconf-pkg-config openssl-devel
+```
 
 ```bash
 cargo run --bin tianshell -- serve
 ```
+
+`tianshell --help` 只打印用法，不启动服务。
 
 进程绑定 `127.0.0.1`，默认端口 `53921`，并打开浏览器。只要看地址、不打开浏览器：
 
@@ -44,7 +55,7 @@ cargo run --bin tianshell -- serve
 cargo run --bin tianshell -- serve --no-open
 ```
 
-MCP 随这个进程一起听在 `http://127.0.0.1:53921/mcp`。令牌、端口和给其他客户端的配置见 [docs/mcp.md](docs/mcp.md)。
+MCP 随这个进程一起听在 `http://127.0.0.1:53921/mcp`。Cursor 不用手抄令牌：工作台开着时，在「连接 MCP」里点「安装到 Cursor」，或在 `~/.cursor/mcp.json` 里写 `tianshell mcp --attach`。令牌仍只在本机回环上校验。完整说明见 [docs/mcp.md](docs/mcp.md)。
 
 发布用的可执行文件：
 
@@ -179,7 +190,7 @@ test          Node 版单元测试和本机 SSH/SFTP 集成测试
 - 上传先收下整个请求体（上限 64MB）再写入远端；下载是分块送出的。
 - 本地转发、SOCKS5 和远程转发的代码在 Rust 里。这次的 Rust 测试没有启动 SSH 服务，所以没有做真实的远端隧道或 SFTP 往返。那些真实连接仍由 Node 测试覆盖。
 - MCP 的文件工具仍各自另开一条 SSH，不进入交互终端，也不占用标签上那条 SFTP/监控连接。工作台里的目录刷新和传输走标签的第二条连接。
-- 打进交互终端的命令，标准输出和标准错误混在同一份屏幕里。退出码来自一段收尾：远端和 POSIX 本机用 `$?`，Windows 本机 PowerShell 用 `$LASTEXITCODE`。`fish` / `csh` 读不懂这段收尾，这时 `exitCode` 为空，屏幕文本仍然返回。
+- 打进交互终端的命令，标准输出和标准错误混在同一份屏幕里。退出码和当前目录仍由一段收尾读出：POSIX 先记下 `$?` 再关掉回显，标记走终端看不见的 OSC；Windows 本机 PowerShell 用 `$LASTEXITCODE`。人在屏幕上不会留下 `__TS_END_` 或 `__ts_ec`。`fish` / `csh` 读不懂这段收尾，这时 `exitCode` 为空，屏幕文本仍然返回。
 - 交互历史记的是 TianShell 送进终端的那一行。Windows ConPTY 里，只发生在控制台内部的行编辑（例如方向键翻历史）不会被还原成命令。
 - 本机终端在 Windows 上依赖 ConPTY。更老的、没有 ConPTY 的系统打不开本机标签，而不是退回管道。
 

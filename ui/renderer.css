@@ -462,6 +462,22 @@ button.danger {
 .tab-chip.closed .tab-dot {
   background: var(--muted);
 }
+.tab-cast {
+  margin: 0;
+  accent-color: var(--amber);
+}
+.connect-status {
+  margin: 0 8px 6px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--elevated);
+  border: 1px solid var(--amber);
+  font-size: 12px;
+}
+.connect-status.error {
+  border-color: var(--danger);
+  color: var(--danger);
+}
 .tab-dot {
   width: 7px;
   height: 7px;

@@ -26,14 +26,35 @@ impl ShellKind {
         }
     }
 
+    /// First extra line after the user's command.
+    ///
+    /// POSIX captures `$?`, turns echo off, and emits a short OSC so the
+    /// follow-up can be typed while the terminal is not echoing. PowerShell
+    /// reports the exit code on this same line; there is no second write.
     pub fn trailer(self, nonce: &str) -> String {
         match self {
-            Self::Posix => format!(
-                "__ts_ec=$?; printf '\\n__TS_END_{nonce}__ ec=%s cwd=%s\\n' \"$__ts_ec\" \"$PWD\""
-            ),
+            Self::Posix => format!("ec=$?;stty -echo;printf '\\033]9;Q{nonce}\\a'"),
             Self::PowerShell => format!(
                 "$global:__ts_ec = if ($null -ne $LASTEXITCODE) {{ $LASTEXITCODE }} elseif ($?) {{ 0 }} else {{ 1 }}; Write-Output \"__TS_END_{nonce}__ ec=$global:__ts_ec cwd=$((Get-Location).Path)\""
             ),
+        }
+    }
+
+    /// Typed only after the quiet OSC, while echo is off, so it never appears.
+    /// The printf clears the spare prompt, emits the exit marker, then restores echo.
+    pub fn probe_followup(self, nonce: &str) -> Option<String> {
+        match self {
+            Self::Posix => Some(format!(
+                "printf '\\r\\033[K\\033]1337;__TS_END_{nonce}__ ec=%s cwd=%s\\007' \"$ec\" \"$PWD\";stty echo"
+            )),
+            Self::PowerShell => None,
+        }
+    }
+
+    pub fn line_needles(self) -> Vec<String> {
+        match self {
+            Self::Posix => Vec::new(),
+            Self::PowerShell => vec!["$global:__ts_ec".to_string()],
         }
     }
 }
@@ -56,6 +77,7 @@ enum EscMode {
     Esc,
     Csi,
     Osc,
+    OscSt,
 }
 
 impl Screen {
@@ -138,10 +160,52 @@ impl Screen {
                 }
             }
             EscMode::Osc => {
-                if byte == 0x07 || byte == 0x1b {
+                if byte == 0x07 {
+                    self.finish_osc();
                     self.mode = EscMode::Normal;
-                    self.esc.clear();
+                } else if byte == 0x1b {
+                    self.mode = EscMode::OscSt;
+                } else {
+                    self.esc.push(byte);
+                    if self.esc.len() > 4096 {
+                        self.esc.clear();
+                        self.mode = EscMode::Normal;
+                    }
                 }
+            }
+            EscMode::OscSt => {
+                self.finish_osc();
+                self.mode = EscMode::Normal;
+                if byte != b'\\' {
+                    self.push_byte(byte);
+                }
+            }
+        }
+    }
+
+    fn finish_osc(&mut self) {
+        let payload = String::from_utf8_lossy(&self.esc).into_owned();
+        self.esc.clear();
+        if payload.contains("__TS_END_") {
+            self.push_log_char('\n');
+            for ch in payload.chars() {
+                self.push_log_char(ch);
+            }
+            self.push_log_char('\n');
+        }
+    }
+
+    /// Drop a probe command that was echoed onto a visible line.
+    pub fn scrub_probe(&mut self, quiet: &str) {
+        if quiet.is_empty() {
+            return;
+        }
+        for line in &mut self.lines {
+            if line.contains(quiet) {
+                *line = line.replace(quiet, "");
+            }
+            if is_trailer_line(line) {
+                line.clear();
             }
         }
     }
@@ -372,8 +436,9 @@ pub fn is_trailer_line(line: &str) -> bool {
     let trimmed = line.trim();
     trimmed.contains("__TS_END_")
         || trimmed.contains("__TS_CWD__")
-        || trimmed.starts_with("__ts_ec=")
+        || trimmed.contains("__ts_ec")
         || trimmed.contains("$global:__ts_ec")
+        || trimmed.contains("stty -echo;printf")
 }
 
 pub fn parse_end_marker(text: &str, nonce: &str) -> Option<(i32, String)> {
@@ -407,8 +472,10 @@ pub fn parse_exec_cwd(stderr: &str) -> Option<String> {
 pub fn transcript_before_marker(text: &str, nonce: &str) -> String {
     let key = format!("__TS_END_{nonce}__ ec=");
     let cut = text.rfind(&key).unwrap_or(text.len());
-    let head = &text[..cut];
+    let quiet = ShellKind::Posix.trailer(nonce);
+    let head = text[..cut].replace(&quiet, "");
     head.lines()
+        .map(|line| line.trim_end())
         .filter(|line| !is_trailer_line(line))
         .collect::<Vec<_>>()
         .join("\n")
@@ -482,6 +549,297 @@ pub fn strip_exec_cwd(stderr: &str) -> String {
         .join("\n")
 }
 
+/// Hides the exit-code probe from bytes that are about to be drawn.
+///
+/// Armed while a command is running:
+/// - drop the exact quiet-line echo and the line break the tty adds after it
+/// - drop OSC payloads that carry our nonce (the quiet signal and the marker)
+/// - drop a visible `__TS_END_` line (PowerShell writes the marker as text)
+/// - hold only a suffix that could still grow into one of those, so ordinary
+///   output is forwarded immediately
+///
+/// When the quiet OSC arrives, `push` returns the follow-up command. That
+/// command is typed with echo off, so it never joins the prompt.
+#[derive(Debug)]
+pub struct ProbeConceal {
+    armed: bool,
+    nonce: String,
+    quiet: Vec<u8>,
+    marker: Vec<u8>,
+    line_needles: Vec<Vec<u8>>,
+    follow: Option<String>,
+    follow_sent: bool,
+    buf: Vec<u8>,
+}
+
+impl ProbeConceal {
+    pub fn new() -> Self {
+        Self {
+            armed: false,
+            nonce: String::new(),
+            quiet: Vec::new(),
+            marker: Vec::new(),
+            line_needles: Vec::new(),
+            follow: None,
+            follow_sent: false,
+            buf: Vec::new(),
+        }
+    }
+
+    pub fn arm(
+        &mut self,
+        nonce: &str,
+        quiet: &str,
+        follow: Option<String>,
+        line_needles: &[String],
+    ) {
+        *self = Self::new();
+        self.armed = true;
+        self.nonce = nonce.to_string();
+        self.quiet = quiet.as_bytes().to_vec();
+        self.marker = format!("__TS_END_{nonce}__").into_bytes();
+        self.line_needles = line_needles
+            .iter()
+            .map(|item| item.as_bytes().to_vec())
+            .collect();
+        self.follow = follow;
+    }
+
+    pub fn quiet_text(&self) -> String {
+        String::from_utf8_lossy(&self.quiet).into_owned()
+    }
+
+    pub fn armed(&self) -> bool {
+        self.armed
+    }
+
+    /// The quiet line has already turned echo off. A cancel has to turn it back on.
+    pub fn follow_was_sent(&self) -> bool {
+        self.follow_sent
+    }
+
+    /// Flush anything still held and stop filtering.
+    pub fn finish(&mut self) -> Vec<u8> {
+        if !self.armed {
+            return Vec::new();
+        }
+        self.armed = false;
+        self.follow_sent = false;
+        std::mem::take(&mut self.buf)
+    }
+
+    pub fn push(&mut self, data: &[u8]) -> (Vec<u8>, Option<String>) {
+        if !self.armed {
+            return (data.to_vec(), None);
+        }
+        self.buf.extend_from_slice(data);
+        let follow = self.take_followup();
+        self.strip_complete();
+        let hold = self.hold_len();
+        let emit_end = self.buf.len().saturating_sub(hold);
+        let visible = self.buf.drain(..emit_end).collect();
+        (visible, follow)
+    }
+
+    fn take_followup(&mut self) -> Option<String> {
+        if self.follow_sent {
+            return None;
+        }
+        let follow = self.follow.clone()?;
+        let key = format!("Q{}", self.nonce);
+        if osc_payloads(&self.buf).any(|payload| payload.contains(&key)) {
+            self.follow_sent = true;
+            return Some(follow);
+        }
+        None
+    }
+
+    fn strip_complete(&mut self) {
+        if !self.quiet.is_empty() {
+            while let Some(pos) = find_subslice(&self.buf, &self.quiet) {
+                let mut end = pos + self.quiet.len();
+                if self.buf.get(end) == Some(&b'\r') {
+                    end += 1;
+                }
+                if self.buf.get(end) == Some(&b'\n') {
+                    end += 1;
+                }
+                self.buf.drain(pos..end);
+            }
+        }
+        strip_nonce_oscs(&mut self.buf, &self.nonce);
+        for needle in self.line_needles.clone() {
+            while let Some(pos) = find_subslice(&self.buf, &needle) {
+                let Some(rel) = self.buf[pos..].iter().position(|byte| *byte == b'\n') else {
+                    break;
+                };
+                self.buf.drain(pos..pos + rel + 1);
+            }
+        }
+        while let Some(pos) = find_subslice(&self.buf, &self.marker) {
+            let Some(rel) = self.buf[pos..].iter().position(|byte| *byte == b'\n') else {
+                break;
+            };
+            self.buf.drain(pos..pos + rel + 1);
+        }
+    }
+
+    fn hold_len(&self) -> usize {
+        if let Some(pos) = find_subslice(&self.buf, &self.marker) {
+            if !self.buf[pos..].contains(&b'\n') {
+                return self.buf.len() - pos;
+            }
+        }
+        for needle in &self.line_needles {
+            if let Some(pos) = find_subslice(&self.buf, needle) {
+                if !self.buf[pos..].contains(&b'\n') {
+                    return self.buf.len() - pos;
+                }
+            }
+        }
+        if let Some(esc) = incomplete_escape_start(&self.buf) {
+            return self.buf.len() - esc;
+        }
+        let mut hold = suffix_prefix_len(&self.buf, &self.quiet);
+        hold = hold.max(suffix_prefix_len(&self.buf, &self.marker));
+        for needle in &self.line_needles {
+            hold = hold.max(suffix_prefix_len(&self.buf, needle));
+        }
+        hold
+    }
+}
+
+impl Default for ProbeConceal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    hay.windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn suffix_prefix_len(hay: &[u8], needle: &[u8]) -> usize {
+    if needle.is_empty() || hay.is_empty() {
+        return 0;
+    }
+    let max = needle.len().saturating_sub(1).min(hay.len());
+    for len in (1..=max).rev() {
+        if hay[hay.len() - len..] == needle[..len] {
+            return len;
+        }
+    }
+    0
+}
+
+fn incomplete_escape_start(buf: &[u8]) -> Option<usize> {
+    let start = buf.iter().rposition(|byte| *byte == 0x1b)?;
+    let tail = &buf[start..];
+    if tail.len() == 1 {
+        return Some(start);
+    }
+    match tail[1] {
+        b'[' => {
+            let done = tail[2..].iter().any(|byte| (0x40..=0x7e).contains(byte));
+            if done {
+                None
+            } else {
+                Some(start)
+            }
+        }
+        b']' => {
+            let done = tail.contains(&0x07) || tail.windows(2).any(|pair| pair == [0x1b, b'\\']);
+            if done {
+                None
+            } else {
+                Some(start)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn osc_payloads(buf: &[u8]) -> impl Iterator<Item = String> + '_ {
+    OscIter { buf, index: 0 }
+}
+
+struct OscIter<'a> {
+    buf: &'a [u8],
+    index: usize,
+}
+
+impl Iterator for OscIter<'_> {
+    type Item = String;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.index + 1 < self.buf.len() {
+            if self.buf[self.index] == 0x1b && self.buf[self.index + 1] == b']' {
+                let start = self.index + 2;
+                let mut end = start;
+                while end < self.buf.len() {
+                    if self.buf[end] == 0x07 {
+                        let payload = String::from_utf8_lossy(&self.buf[start..end]).into_owned();
+                        self.index = end + 1;
+                        return Some(payload);
+                    }
+                    if self.buf[end] == 0x1b
+                        && end + 1 < self.buf.len()
+                        && self.buf[end + 1] == b'\\'
+                    {
+                        let payload = String::from_utf8_lossy(&self.buf[start..end]).into_owned();
+                        self.index = end + 2;
+                        return Some(payload);
+                    }
+                    end += 1;
+                }
+                return None;
+            }
+            self.index += 1;
+        }
+        None
+    }
+}
+
+fn strip_nonce_oscs(buf: &mut Vec<u8>, nonce: &str) {
+    if nonce.is_empty() {
+        return;
+    }
+    let mut index = 0;
+    while index + 1 < buf.len() {
+        if buf[index] == 0x1b && buf[index + 1] == b']' {
+            let start = index + 2;
+            let mut end = start;
+            let mut term = None;
+            while end < buf.len() {
+                if buf[end] == 0x07 {
+                    term = Some(end + 1);
+                    break;
+                }
+                if buf[end] == 0x1b && end + 1 < buf.len() && buf[end + 1] == b'\\' {
+                    term = Some(end + 2);
+                    break;
+                }
+                end += 1;
+            }
+            let Some(term) = term else {
+                return;
+            };
+            let payload = String::from_utf8_lossy(&buf[start..end]);
+            if payload.contains(nonce) {
+                buf.drain(index..term);
+                continue;
+            }
+            index = term;
+            continue;
+        }
+        index += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,14 +861,61 @@ mod tests {
     fn marker_parse_ignores_the_echoed_format_string() {
         let nonce = "ab12";
         let echoed = ShellKind::Posix.trailer(nonce);
-        let output = format!("{echoed}\n__TS_END_{nonce}__ ec=0 cwd=/tmp/work\n");
+        let mut screen = Screen::new();
+        let osc = format!("\u{1b}]1337;__TS_END_{nonce}__ ec=0 cwd=/tmp/work\u{7}");
+        screen.ingest(format!("{echoed}\n").as_bytes());
+        screen.ingest(osc.as_bytes());
+        let (raw, _) = screen.since(0);
         assert!(parse_end_marker(&echoed, nonce).is_none());
-        let (code, cwd) = parse_end_marker(&output, nonce).unwrap();
+        let (code, cwd) = parse_end_marker(&raw, nonce).unwrap();
         assert_eq!(code, 0);
         assert_eq!(cwd, "/tmp/work");
-        let transcript = transcript_before_marker(&output, nonce);
-        assert!(!transcript.contains("__TS_END_"));
+        let transcript = transcript_before_marker(&raw, nonce);
+        assert!(!transcript.contains("__TS_END_"), "{transcript}");
+        assert!(!transcript.contains("stty"), "{transcript}");
         assert!(is_trailer_line(&echoed));
+        screen.scrub_probe(&echoed);
+        let (visible, _) = screen.text(4000);
+        assert!(!visible.contains("stty"), "{visible}");
+        assert!(!visible.contains("__TS_END_"), "{visible}");
+    }
+
+    #[test]
+    fn conceal_strips_the_probe_and_keeps_the_command() {
+        let nonce = "abcd1234";
+        let shell = ShellKind::Posix;
+        let mut conceal = ProbeConceal::new();
+        conceal.arm(
+            nonce,
+            &shell.trailer(nonce),
+            shell.probe_followup(nonce),
+            &shell.line_needles(),
+        );
+        let echoed = format!("$ echo hi\r\nhi\r\n$ {}\r\n", shell.trailer(nonce));
+        let (visible, follow) = conceal.push(echoed.as_bytes());
+        assert!(follow.is_none(), "quiet OSC has not arrived");
+        let quiet = format!("\u{1b}]9;Q{nonce}\u{7}");
+        let (more, follow) = conceal.push(quiet.as_bytes());
+        let follow = follow.expect("follow-up");
+        assert!(follow.contains(&format!("__TS_END_{nonce}__")), "{follow}");
+        assert!(follow.contains("stty echo"), "{follow}");
+        let marker = format!("\u{1b}]1337;__TS_END_{nonce}__ ec=0 cwd=/tmp/work\u{7}$ ");
+        let (tail, again) = conceal.push(marker.as_bytes());
+        assert!(again.is_none());
+        let mut shown = visible;
+        shown.extend(more);
+        shown.extend(tail);
+        shown.extend(conceal.finish());
+        let text = String::from_utf8_lossy(&shown);
+        assert!(text.contains("echo hi"), "{text}");
+        assert!(text.contains("hi"), "{text}");
+        assert!(!text.contains("stty"), "{text}");
+        assert!(!text.contains("__TS_END_"), "{text}");
+        assert!(!text.contains(&nonce), "{text}");
+        assert!(
+            text.trim_end().ends_with('$') || text.contains("$ "),
+            "{text}"
+        );
     }
 
     #[test]

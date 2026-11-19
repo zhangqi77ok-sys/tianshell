@@ -48,8 +48,8 @@
         <header class="tabbar">
           <div id="tabs" class="tabs"></div>
           <div class="toolbar-actions">
-            <label class="toggle-chip" title="同步向所有已打开终端发送快捷键与命令">
-              <input id="broadcast-toggle" type="checkbox" /> 广播输入
+            <label class="toggle-chip" title="默认关闭。打开后只发到当前终端，以及标签上勾选的终端。不会进入没勾选的 SSH 标签。">
+              <input id="broadcast-toggle" type="checkbox" /> 广播到已选
             </label>
             <button id="search-toggle" type="button" title="搜索终端内容 (Ctrl+F)">查找</button>
             <button id="theme-toggle" type="button" title="切换暗/亮主题">主题</button>
@@ -65,6 +65,7 @@
               <button id="search-next" type="button">下一个</button>
               <button id="search-close" type="button">✕</button>
             </div>
+            <div id="connect-status" class="connect-status hidden" role="status"></div>
             <div id="terminal-stage" class="terminal-stage"></div>
             <div id="term-empty" class="empty-state">
               <p class="empty-kicker">没有打开的终端</p>
@@ -152,7 +153,7 @@
 
     <div id="toast" class="toast" role="status"></div>
 
-    <dialog id="host-dialog">
+    <dialog id="host-dialog" tabindex="-1">
       <form id="host-form">
         <header class="dialog-head"><h2 id="dialog-title">添加主机</h2><p>凭据由 Windows DPAPI 加密保管在本机。</p></header>
         <div class="grid">
@@ -167,6 +168,7 @@
           <legend>认证方式</legend>
           <label class="radio"><input type="radio" name="auth" value="password" checked />密码</label>
           <label class="radio"><input type="radio" name="auth" value="privateKey" />私钥</label>
+          <p id="auth-hint" class="panel-note"></p>
         </fieldset>
         <label id="password-field">密码<input id="field-password" type="password" autocomplete="off" /></label>
         <div id="key-field" class="hidden">
@@ -217,15 +219,19 @@
     <dialog id="mcp-dialog" class="wide-dialog">
       <header class="dialog-head">
         <h2>把 TianShell 接到 Cursor / Claude Code</h2>
-        <p>工作台已经在本机提供 MCP。保持这个进程开着，把下面的配置贴进客户端。令牌只在这台电脑的界面里显示。</p>
+        <p>工作台已经在本机提供 MCP。Cursor 直接附着到这个进程，配置里不用抄令牌。令牌仍只留在本机，不会写进日志。</p>
       </header>
+      <label>Cursor 附着（<span class="mono">~/.cursor/mcp.json</span>，不含令牌）<textarea id="mcp-cursor" class="mono mcp-config" readonly></textarea></label>
+      <div class="dialog-actions">
+        <button type="button" id="install-cursor" class="primary">安装到 Cursor</button>
+        <button type="button" id="copy-cursor">复制附着配置</button>
+      </div>
+      <p class="panel-note">编码工具应先看已打开的标签，再往这个终端里打字。文件读写另开一条 SSH，避免堵住正在输入的会话。命令历史记在本机数据目录里。只认 HTTP 的客户端仍用下面的地址和令牌。</p>
       <label>Streamable HTTP<input id="mcp-url" class="mono" readonly /></label>
       <label>本机令牌<input id="mcp-token" class="mono" readonly /></label>
-      <p class="panel-note">编码工具应先看已打开的标签，再往这个终端里打字。文件读写另开一条 SSH，避免堵住正在输入的会话。命令历史记在本机数据目录里。</p>
-      <label>Cursor（<span class="mono">~/.cursor/mcp.json</span> 或项目 <span class="mono">.cursor/mcp.json</span>）<textarea id="mcp-cursor" class="mono mcp-config" readonly></textarea></label>
+      <label>Cursor HTTP（备用）<textarea id="mcp-cursor-http" class="mono mcp-config" readonly></textarea></label>
       <label>Claude Code（<span class="mono">.mcp.json</span>，必须带 type）<textarea id="mcp-claude" class="mono mcp-config" readonly></textarea></label>
       <div class="dialog-actions">
-        <button type="button" id="copy-cursor">复制 Cursor 配置</button>
         <button type="button" id="copy-claude">复制 Claude Code 配置</button>
         <button type="button" id="close-mcp">关闭</button>
       </div>

@@ -325,3 +325,66 @@ fn parse_http_response(raw: &[u8]) -> Result<(u16, HashMap<String, String>, Stri
     }
     Ok((status, headers, String::from_utf8_lossy(body).trim().to_string()))
 }
+
+/// Cursor 附着配置。只有可执行文件路径和参数，没有令牌。
+pub fn cursor_attach_spec() -> (String, Vec<String>) {
+    let command = std::env::current_exe()
+        .ok()
+        .map(|path| path.to_string_lossy().to_string())
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| "tianshell".to_string());
+    (command, vec!["mcp".to_string(), "--attach".to_string()])
+}
+
+/// 把 tianshell 写进已有的 mcp.json。别的服务器原样保留。
+/// 文件不是对象时返回错误，调用方不得覆盖原文件。
+pub fn merge_cursor_mcp(existing: &str, command: &str) -> Result<String, String> {
+    let mut root: Value = if existing.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(existing).map_err(|_| {
+            "Cursor 的 mcp.json 不是合法 JSON，已停止写入，避免盖掉原来的配置。".to_string()
+        })?
+    };
+    let Some(object) = root.as_object_mut() else {
+        return Err("Cursor 的 mcp.json 不是 JSON 对象，已停止写入。".into());
+    };
+    let servers = object
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(servers) = servers.as_object_mut() else {
+        return Err("mcp.json 里的 mcpServers 不是对象，已停止写入。".into());
+    };
+    servers.insert(
+        "tianshell".into(),
+        serde_json::json!({
+            "command": command,
+            "args": ["mcp", "--attach"]
+        }),
+    );
+    serde_json::to_string_pretty(&root).map_err(|err| format!("无法生成 mcp.json: {err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_config_has_no_token_and_keeps_other_servers() {
+        let existing = r#"{"mcpServers":{"other":{"command":"echo","args":["hi"]}}}"#;
+        let merged = merge_cursor_mcp(existing, "/usr/local/bin/tianshell").expect("merge");
+        assert!(!merged.to_ascii_lowercase().contains("token"));
+        assert!(!merged.contains("secret-token-value"));
+        let value: Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(value["mcpServers"]["other"]["command"], "echo");
+        assert_eq!(
+            value["mcpServers"]["tianshell"]["command"],
+            "/usr/local/bin/tianshell"
+        );
+        assert_eq!(value["mcpServers"]["tianshell"]["args"][0], "mcp");
+        assert_eq!(value["mcpServers"]["tianshell"]["args"][1], "--attach");
+        assert!(value["mcpServers"]["tianshell"].get("env").is_none());
+        let bad = merge_cursor_mcp("[1, 2]", "/bin/tianshell");
+        assert!(bad.is_err());
+    }
+}
