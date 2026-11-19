@@ -6187,16 +6187,37 @@ WARNING: This link could potentially be dangerous`)) {
     ),
     cancelTransfer: (tid) => apiRequest(`/api/transfers/${encodeURIComponent(tid)}/cancel`, { method: "POST" })
   };
-  function connectWs(onEvent) {
-    const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const ws2 = new WebSocket(`${proto}//${location.host}/ws?token=${encodeURIComponent(resolveClientToken())}`);
-    ws2.addEventListener("message", (ev) => {
-      try {
-        onEvent(JSON.parse(String(ev.data)));
-      } catch {
+  function connectWs(onEvent, onOpen) {
+    let socket = null;
+    let attempt = 0;
+    const open = () => {
+      const proto = location.protocol === "https:" ? "wss:" : "ws:";
+      const ws2 = new WebSocket(`${proto}//${location.host}/ws?token=${encodeURIComponent(resolveClientToken())}`);
+      socket = ws2;
+      ws2.addEventListener("open", () => {
+        attempt = 0;
+        onOpen?.();
+      });
+      ws2.addEventListener("message", (ev) => {
+        try {
+          onEvent(JSON.parse(String(ev.data)));
+        } catch {
+        }
+      });
+      ws2.addEventListener("close", () => {
+        attempt += 1;
+        window.setTimeout(open, Math.min(4e3, 400 * attempt));
+      });
+    };
+    open();
+    return {
+      send(data) {
+        if (socket && socket.readyState === WebSocket.OPEN) socket.send(data);
+      },
+      get readyState() {
+        return socket?.readyState ?? WebSocket.CLOSED;
       }
-    });
-    return ws2;
+    };
   }
 
   // src/renderer/host-tree.ts
@@ -6220,6 +6241,13 @@ WARNING: This link could potentially be dangerous`)) {
       const q = document.getElementById("filter").value.trim().toLowerCase();
       const tree = document.getElementById("host-tree");
       tree.textContent = "";
+      if (!q && this.hosts.length === 0 && this.groups.length === 0) {
+        const note = document.createElement("p");
+        note.className = "tree-empty";
+        note.textContent = "\u8FD8\u6CA1\u6709\u4E3B\u673A\u3002\u7528\u300C+ \u4E3B\u673A\u300D\u6DFB\u52A0\uFF0C\u5217\u8868\u4F1A\u8DDF\u7740\u53D8\u3002";
+        tree.appendChild(note);
+        return;
+      }
       const filtered = this.hosts.filter(
         (h) => !q || h.alias.toLowerCase().includes(q) || h.host.includes(q) || (h.tags ?? []).some((t) => t.toLowerCase().includes(q))
       );
@@ -6378,9 +6406,13 @@ WARNING: This link could potentially be dangerous`)) {
     constructor(deps) {
       this.deps = deps;
       this.bindEvents();
+      window.setInterval(() => {
+        if (this.deps.getActiveSshId()) void this.load(this.currentDir, true);
+      }, 3e3);
     }
     currentDir = "/";
     showHidden = false;
+    lastSig = "";
     transfers = /* @__PURE__ */ new Map();
     editingPath = null;
     pathInput = document.getElementById("sftp-path");
@@ -6398,29 +6430,36 @@ WARNING: This link could potentially be dangerous`)) {
       if (this.deps.getActiveSshId()) void this.load(this.currentDir);
     }
     syncSession() {
+      this.lastSig = "";
       const active = Boolean(this.deps.getActiveSshId());
       for (const id of ["sftp-up", "sftp-home", "sftp-path", "sftp-go", "sftp-mkdir", "sftp-upload", "sftp-refresh"]) {
         const el = document.getElementById(id);
         el.disabled = !active;
       }
       if (active) {
-        void this.load(this.currentDir);
+        void this.load(this.currentDir, true);
       } else {
+        this.lastSig = "";
         this.tableEl.classList.add("hidden");
         this.emptyEl.classList.remove("hidden");
+        this.emptyEl.textContent = "\u7A7A\u95F2\u3002\u8FDE\u4E0A SSH \u4F1A\u8BDD\u540E\uFF0C\u8FD9\u91CC\u663E\u793A\u8BE5\u4F1A\u8BDD\u7684\u5F53\u524D\u76EE\u5F55\u3002";
         this.bodyEl.textContent = "";
       }
     }
-    async load(dirPath) {
+    async load(dirPath, quiet = false) {
       const sid = this.deps.getActiveSshId();
       if (!sid) return;
       try {
         const list = await webApi.sftpList(sid, dirPath);
         this.currentDir = dirPath || "/";
         this.pathInput.value = this.currentDir;
-        this.renderEntries(list.filter((e) => this.showHidden || !e.name.startsWith(".")));
+        const visible = list.filter((e) => this.showHidden || !e.name.startsWith("."));
+        const sig = `${this.currentDir}|${visible.map((e) => `${e.path}:${e.size}:${e.mtimeMs}:${e.mode}`).join("|")}`;
+        if (sig === this.lastSig) return;
+        this.lastSig = sig;
+        this.renderEntries(visible);
       } catch (err) {
-        this.deps.toast(err instanceof Error ? err.message : "SFTP \u8BFB\u53D6\u5931\u8D25");
+        if (!quiet) this.deps.toast(err instanceof Error ? err.message : "SFTP \u8BFB\u53D6\u5931\u8D25");
       }
     }
     onTransferProgress(task) {
@@ -6618,18 +6657,26 @@ WARNING: This link could potentially be dangerous`)) {
     disksEl = document.getElementById("mon-disks");
     procsEl = document.getElementById("mon-procs");
     snippetsEl = document.getElementById("snippet-list");
-    renderMetrics(metrics) {
+    tunnelDialogOpen = false;
+    renderMetrics(metrics, mode = metrics ? "live" : "idle") {
+      const bento = document.getElementById("mon-bento");
+      const note = document.getElementById("mon-note");
+      const idle = mode !== "live";
+      bento?.classList.toggle("idle", idle);
+      if (note) note.hidden = mode === "live";
+      if (mode === "sampling" && note) note.textContent = "\u6B63\u5728\u91C7\u6837\u2026";
+      if (mode === "idle" && note) note.textContent = "\u6253\u5F00 SSH \u4F1A\u8BDD\u540E\u81EA\u52A8\u91C7\u6837\u3002";
       if (!metrics) {
-        this.hostEl.textContent = "\u672A\u8FDE\u63A5";
-        this.cpuEl.textContent = "--%";
+        this.hostEl.textContent = mode === "sampling" ? "\u91C7\u6837\u4E2D" : "\u7A7A\u95F2";
+        this.cpuEl.textContent = "\u2014";
         this.cpuBar.style.width = "0%";
-        this.memEl.textContent = "-- / --";
+        this.memEl.textContent = "\u2014";
         this.memBar.style.width = "0%";
-        this.swapEl.textContent = "-- / --";
+        this.swapEl.textContent = "\u2014";
         this.swapBar.style.width = "0%";
-        this.rxEl.textContent = "0 B/s";
-        this.txEl.textContent = "0 B/s";
-        this.loadEl.textContent = "--";
+        this.rxEl.textContent = "\u2014";
+        this.txEl.textContent = "\u2014";
+        this.loadEl.textContent = "\u2014";
         this.disksEl.textContent = "";
         this.procsEl.textContent = "";
         return;
@@ -6695,6 +6742,9 @@ WARNING: This link could potentially be dangerous`)) {
 `));
       this.snippetsEl.appendChild(card);
     }
+    refreshTunnelsIfOpen() {
+      if (this.tunnelDialogOpen) void this.renderTunnels();
+    }
     async openTunnelModal() {
       const dlg = document.getElementById("tunnel-dialog");
       const hostSel = document.getElementById("tun-host");
@@ -6706,6 +6756,10 @@ WARNING: This link could potentially be dangerous`)) {
         hostSel.appendChild(opt);
       }
       await this.renderTunnels();
+      this.tunnelDialogOpen = true;
+      dlg.addEventListener("close", () => {
+        this.tunnelDialogOpen = false;
+      }, { once: true });
       dlg.showModal();
     }
     async renderTunnels() {
@@ -6796,7 +6850,6 @@ WARNING: This link could potentially be dangerous`)) {
   var activeId = null;
   var fontSize = 14;
   var tabs = /* @__PURE__ */ new Map();
-  var ws = connectWs(handleWsEvent);
   var toastEl = document.getElementById("toast");
   function showToast(msg) {
     toastEl.textContent = msg;
@@ -6826,7 +6879,7 @@ WARNING: This link could potentially be dangerous`)) {
   var sftpCtrl = new SftpController({
     getActiveSshId: () => {
       const tab = activeId ? tabs.get(activeId) : null;
-      return tab && tab.info.kind === "ssh" ? tab.info.sessionId : null;
+      return tab && !tab.closed && tab.info.kind === "ssh" ? tab.info.sessionId : null;
     },
     toast: showToast,
     promptText
@@ -6845,24 +6898,42 @@ WARNING: This link could potentially be dangerous`)) {
     const type = String(msg.type || "");
     if (type === "term:data" && typeof msg.sessionId === "string" && typeof msg.data === "string") {
       const tab = tabs.get(msg.sessionId);
-      if (tab) tab.term.write(Uint8Array.from(atob(msg.data), (c) => c.charCodeAt(0)));
-    } else if (type === "term:closed" && typeof msg.sessionId === "string") {
-      tabs.get(msg.sessionId)?.term.writeln("\r\n\x1B[33m[\u4F1A\u8BDD\u5DF2\u65AD\u5F00]\x1B[0m");
+      if (tab && !tab.closed) tab.term.write(Uint8Array.from(atob(msg.data), (c) => c.charCodeAt(0)));
+    } else if ((type === "term:closed" || type === "session:closed") && typeof msg.sessionId === "string") {
+      markClosed(msg.sessionId);
+    } else if (type === "session:opened" && msg.session && typeof msg.session === "object") {
+      const info = msg.session;
+      if (info.sessionId) createTermInstance(info);
     } else if (type === "metrics:update" && typeof msg.sessionId === "string") {
       const tab = tabs.get(msg.sessionId);
-      if (!tab) return;
+      if (!tab || tab.closed) return;
       tab.metrics = msg.metrics;
-      if (activeId === msg.sessionId) monCtrl.renderMetrics(tab.metrics);
+      if (activeId === msg.sessionId) showMetricsFor(tab);
+    } else if (type === "catalog:changed") {
+      void refreshLive(String(msg.kind || "disk"));
     } else if (type === "transfer:progress") {
       sftpCtrl.onTransferProgress(msg.task);
     }
   }
+  async function refreshLive(kind) {
+    if (kind === "snippets" || kind === "disk") await monCtrl.refreshSnippets();
+    if (kind === "settings" || kind === "disk") await applySettings();
+    if (kind === "tunnels" || kind === "disk") monCtrl.refreshTunnelsIfOpen();
+    if (kind === "hosts" || kind === "disk" || kind === "") await treeCtrl.refresh();
+  }
+  var ws = connectWs(handleWsEvent, () => {
+    void refreshLive("disk");
+  });
   function sendInput(data) {
     if (!activeId || ws.readyState !== WebSocket.OPEN) return;
     const broadcast = document.getElementById("broadcast-toggle").checked;
     ws.send(JSON.stringify(broadcast ? { type: "term:broadcast", sessionIds: Array.from(tabs.keys()), data } : { type: "term:input", sessionId: activeId, data }));
   }
   function createTermInstance(info) {
+    if (tabs.has(info.sessionId)) {
+      selectTab(info.sessionId);
+      return;
+    }
     const stage = document.getElementById("terminal-stage");
     const slot = document.createElement("div");
     slot.className = "term-slot hidden";
@@ -6880,8 +6951,26 @@ WARNING: This link could potentially be dangerous`)) {
     term.loadAddon(fit);
     term.open(slot);
     term.onData((data) => sendInput(data));
-    tabs.set(info.sessionId, { info, term, fit, slot, metrics: null });
+    tabs.set(info.sessionId, { info, term, fit, slot, metrics: null, closed: false });
     selectTab(info.sessionId);
+  }
+  function showMetricsFor(tab) {
+    if (!tab || tab.closed || tab.info.kind !== "ssh") {
+      monCtrl.renderMetrics(null, "idle");
+      return;
+    }
+    monCtrl.renderMetrics(tab.metrics, tab.metrics ? "live" : "sampling");
+  }
+  function markClosed(sessionId) {
+    const tab = tabs.get(sessionId);
+    if (!tab || tab.closed) return;
+    tab.closed = true;
+    tab.term.writeln("\r\n\x1B[33m[\u4F1A\u8BDD\u5DF2\u65AD\u5F00]\x1B[0m");
+    if (activeId === sessionId) {
+      showMetricsFor(tab);
+      sftpCtrl.syncSession();
+    }
+    renderTabs();
   }
   function selectTab(sessionId) {
     activeId = sessionId;
@@ -6891,12 +6980,12 @@ WARNING: This link could potentially be dangerous`)) {
       tab.slot.classList.toggle("hidden", !isAct);
       if (isAct) {
         tab.fit.fit();
-        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "term:resize", sessionId: id, cols: tab.term.cols, rows: tab.term.rows }));
+        if (!tab.closed && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "term:resize", sessionId: id, cols: tab.term.cols, rows: tab.term.rows }));
         tab.term.focus();
-        monCtrl.renderMetrics(tab.metrics);
+        showMetricsFor(tab);
       }
     }
-    if (!activeId) monCtrl.renderMetrics(null);
+    if (!activeId) monCtrl.renderMetrics(null, "idle");
     renderTabs();
     sftpCtrl.syncSession();
   }
@@ -6905,11 +6994,11 @@ WARNING: This link could potentially be dangerous`)) {
     bar.textContent = "";
     for (const [id, tab] of tabs) {
       const chip = document.createElement("div");
-      chip.className = `tab-chip${id === activeId ? " active" : ""}`;
+      chip.className = `tab-chip${id === activeId ? " active" : ""}${tab.closed ? " closed" : ""}`;
       const dot = document.createElement("span");
       dot.className = "tab-dot";
       const label = document.createElement("span");
-      label.textContent = tab.info.kind === "local" ? "\u{1F4BB} \u672C\u673A\u7EC8\u7AEF" : tab.info.alias;
+      label.textContent = tab.info.kind === "local" ? "\u672C\u673A" : tab.info.alias;
       const closeBtn = document.createElement("button");
       closeBtn.type = "button";
       closeBtn.textContent = "\xD7";
@@ -7026,13 +7115,27 @@ WARNING: This link could potentially be dangerous`)) {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "term:resize", sessionId: activeId, cols: tab.term.cols, rows: tab.term.rows }));
     }
   });
-  async function boot() {
-    bindGlobalUi();
+  async function applySettings() {
     const s = await webApi.getSettings();
     fontSize = s.fontSize;
     document.documentElement.setAttribute("data-theme", s.theme);
     sftpCtrl.setShowHidden(s.showHiddenFiles);
-    await Promise.all([treeCtrl.refresh(), monCtrl.refreshSnippets()]);
+    const theme = document.getElementById("set-theme");
+    const font = document.getElementById("set-font");
+    const interval = document.getElementById("set-interval");
+    const hidden = document.getElementById("set-hidden");
+    if (theme) theme.value = s.theme;
+    if (font) font.value = String(s.fontSize);
+    if (interval) interval.value = String(s.monitorIntervalMs);
+    if (hidden) hidden.checked = s.showHiddenFiles;
+    for (const tab of tabs.values()) {
+      tab.term.options.fontSize = fontSize;
+      tab.fit.fit();
+    }
+  }
+  async function boot() {
+    bindGlobalUi();
+    await refreshLive("disk");
   }
   void boot();
 })();

@@ -39,6 +39,7 @@ enum TabIo {
 }
 
 struct Tab {
+    info: ConnectInfo,
     host_id: Option<String>,
     io: TabIo,
     stop: Arc<AtomicBool>,
@@ -70,6 +71,10 @@ impl SessionHub {
 
     pub fn broadcast(&self, event: Value) {
         let _ = self.events.send(event.to_string());
+    }
+
+    pub fn list_sessions(&self) -> Vec<ConnectInfo> {
+        lock(&self.tabs).values().map(|tab| tab.info.clone()).collect()
     }
 
     pub fn host_id(&self, session_id: &str) -> Result<Option<String>, String> {
@@ -109,22 +114,25 @@ impl SessionHub {
                 }
             });
         }
-        lock(&self.tabs).insert(
-            id.clone(),
-            Tab {
-                host_id: None,
-                io: TabIo::Local(session),
-                stop: Arc::new(AtomicBool::new(false)),
-            },
-        );
-        Ok(ConnectInfo {
-            session_id: id,
+        let info = ConnectInfo {
+            session_id: id.clone(),
             alias: "本机终端".into(),
             username: "local".into(),
             host: "localhost".into(),
             port: 0,
             kind: "local".into(),
-        })
+        };
+        lock(&self.tabs).insert(
+            id,
+            Tab {
+                info: info.clone(),
+                host_id: None,
+                io: TabIo::Local(session),
+                stop: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        self.broadcast(json!({"type": "session:opened", "session": info}));
+        Ok(info)
     }
 
     pub fn open_ssh(&self, hosts: &Arc<Mutex<HostStore>>, host_id: &str, cols: u32, rows: u32) -> Result<ConnectInfo, String> {
@@ -166,27 +174,31 @@ impl SessionHub {
         let interval = self.interval.clone();
         std::thread::spawn(move || metrics_loop(chain, metrics_events, metrics_stop, interval, metrics_id));
 
-        lock(&self.tabs).insert(
-            id.clone(),
-            Tab {
-                host_id: Some(leaf.id),
-                io: TabIo::Remote(tx),
-                stop,
-            },
-        );
-        Ok(ConnectInfo {
-            session_id: id,
+        let info = ConnectInfo {
+            session_id: id.clone(),
             alias: leaf.alias.clone(),
             username: leaf.username,
             host: leaf.host,
             port: leaf.port,
             kind: "ssh".into(),
-        })
+        };
+        lock(&self.tabs).insert(
+            id,
+            Tab {
+                info: info.clone(),
+                host_id: Some(leaf.id),
+                io: TabIo::Remote(tx),
+                stop,
+            },
+        );
+        self.broadcast(json!({"type": "session:opened", "session": info}));
+        Ok(info)
     }
 
     pub fn close_session(&self, session_id: &str) {
         let tab = lock(&self.tabs).remove(session_id);
         let Some(tab) = tab else { return };
+        self.broadcast(json!({"type": "session:closed", "sessionId": session_id}));
         tab.stop.store(true, Ordering::Relaxed);
         match tab.io {
             TabIo::Local(session) => {

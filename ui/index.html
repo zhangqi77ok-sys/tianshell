@@ -63,8 +63,8 @@
             </div>
             <div id="terminal-stage" class="terminal-stage"></div>
             <div id="term-empty" class="empty-state">
-              <h2>⚡ 欢迎使用 TianShell 工作台</h2>
-              <p>双击左侧 SSH 主机连接远端、点击「+ 本机终端」开启本地 Shell，或配置 MCP 交给 TianCode AI 协同运维。</p>
+              <p class="empty-kicker">没有打开的终端</p>
+              <p>双击左侧主机，或使用「本机终端」。</p>
             </div>
           </div>
 
@@ -86,7 +86,7 @@
               </div>
             </div>
             <div id="sftp-table-wrap" class="sftp-table-wrap">
-              <div id="sftp-empty" class="empty-muted">连接任意 SSH 会话后，此处自动加载 SFTP 文件管理（支持拖拽上传与双击在线编辑）。</div>
+              <div id="sftp-empty" class="empty-muted">空闲。连上 SSH 会话后，这里显示该会话的当前目录。</div>
               <table id="sftp-table" class="sftp-table hidden">
                 <thead>
                   <tr><th>名称</th><th>权限</th><th>大小</th><th>修改时间</th><th>操作</th></tr>
@@ -98,7 +98,7 @@
         </section>
 
         <footer class="transfer-bar" id="transfer-bar">
-          <span id="transfer-summary">传输队列空闲</span>
+          <span id="transfer-summary">没有正在传输的文件</span>
           <div id="transfer-list" class="transfer-list"></div>
         </footer>
       </main>
@@ -106,20 +106,21 @@
       <aside class="inspector" id="inspector">
         <div class="inspector-section">
           <div class="section-head">
-            <span>📊 服务器实时监控</span>
-            <span id="mon-host" class="badge-muted">未连接</span>
+            <span>监控</span>
+            <span id="mon-host" class="badge-muted">空闲</span>
           </div>
-          <div id="mon-bento" class="mon-bento">
-            <div class="kpi-row"><span>CPU</span><span id="mon-cpu" class="mono">--%</span></div>
+          <div id="mon-bento" class="mon-bento idle">
+            <p id="mon-note" class="panel-note">打开 SSH 会话后自动采样。</p>
+            <div class="kpi-row"><span>CPU</span><span id="mon-cpu" class="mono">—</span></div>
             <div class="meter"><div id="mon-cpu-bar" class="meter-fill"></div></div>
-            <div class="kpi-row"><span>内存</span><span id="mon-mem" class="mono">-- / --</span></div>
+            <div class="kpi-row"><span>内存</span><span id="mon-mem" class="mono">—</span></div>
             <div class="meter"><div id="mon-mem-bar" class="meter-fill teal"></div></div>
-            <div class="kpi-row"><span>Swap</span><span id="mon-swap" class="mono">-- / --</span></div>
+            <div class="kpi-row"><span>Swap</span><span id="mon-swap" class="mono">—</span></div>
             <div class="meter"><div id="mon-swap-bar" class="meter-fill amber"></div></div>
             <div class="kpi-grid mono">
-              <div><small>下行 RX</small><div id="mon-rx">0 B/s</div></div>
-              <div><small>上行 TX</small><div id="mon-tx">0 B/s</div></div>
-              <div class="wide"><small>负载 LoadAvg</small><div id="mon-load">--</div></div>
+              <div><small>下行 RX</small><div id="mon-rx">—</div></div>
+              <div><small>上行 TX</small><div id="mon-tx">—</div></div>
+              <div class="wide"><small>负载</small><div id="mon-load">—</div></div>
             </div>
           </div>
           <div id="mon-disks" class="sub-list"></div>
@@ -128,7 +129,7 @@
 
         <div class="inspector-section grow">
           <div class="section-head">
-            <span>⚡ 快捷命令</span>
+            <span>快捷命令</span>
             <button id="add-snippet" type="button">+ 新增</button>
           </div>
           <div id="snippet-list" class="snippet-list"></div>

@@ -27,18 +27,27 @@ export class MonitorAndToolsController {
     this.bindDialogs();
   }
 
-  renderMetrics(metrics: ServerMetrics | null): void {
+  private tunnelDialogOpen = false;
+
+  renderMetrics(metrics: ServerMetrics | null, mode: 'idle' | 'sampling' | 'live' = metrics ? 'live' : 'idle'): void {
+    const bento = document.getElementById('mon-bento');
+    const note = document.getElementById('mon-note');
+    const idle = mode !== 'live';
+    bento?.classList.toggle('idle', idle);
+    if (note) note.hidden = mode === 'live';
+    if (mode === 'sampling' && note) note.textContent = '正在采样…';
+    if (mode === 'idle' && note) note.textContent = '打开 SSH 会话后自动采样。';
     if (!metrics) {
-      this.hostEl.textContent = '未连接';
-      this.cpuEl.textContent = '--%';
+      this.hostEl.textContent = mode === 'sampling' ? '采样中' : '空闲';
+      this.cpuEl.textContent = '—';
       this.cpuBar.style.width = '0%';
-      this.memEl.textContent = '-- / --';
+      this.memEl.textContent = '—';
       this.memBar.style.width = '0%';
-      this.swapEl.textContent = '-- / --';
+      this.swapEl.textContent = '—';
       this.swapBar.style.width = '0%';
-      this.rxEl.textContent = '0 B/s';
-      this.txEl.textContent = '0 B/s';
-      this.loadEl.textContent = '--';
+      this.rxEl.textContent = '—';
+      this.txEl.textContent = '—';
+      this.loadEl.textContent = '—';
       this.disksEl.textContent = '';
       this.procsEl.textContent = '';
       return;
@@ -115,6 +124,10 @@ export class MonitorAndToolsController {
     this.snippetsEl.appendChild(card);
   }
 
+  refreshTunnelsIfOpen(): void {
+    if (this.tunnelDialogOpen) void this.renderTunnels();
+  }
+
   async openTunnelModal(): Promise<void> {
     const dlg = document.getElementById('tunnel-dialog') as HTMLDialogElement;
     const hostSel = document.getElementById('tun-host') as HTMLSelectElement;
@@ -126,6 +139,8 @@ export class MonitorAndToolsController {
       hostSel.appendChild(opt);
     }
     await this.renderTunnels();
+    this.tunnelDialogOpen = true;
+    dlg.addEventListener('close', () => { this.tunnelDialogOpen = false; }, { once: true });
     dlg.showModal();
   }
 

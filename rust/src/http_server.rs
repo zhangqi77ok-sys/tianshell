@@ -93,7 +93,9 @@ pub fn start_workbench(options: ServerOptions) -> Result<RunningServer, String> 
         transfers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         sse: Arc::new(SseHub::default()),
         mcp_sessions: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
+    spawn_catalog_watch(state.clone());
     let listen_port = chosen_port(options.port);
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -136,11 +138,13 @@ pub fn start_workbench(options: ServerOptions) -> Result<RunningServer, String> 
                 let data_dir = thread_state.data_dir.clone();
                 let hub = thread_state.hub.clone();
                 let tunnels = thread_state.tunnels.clone();
+                let stopping = thread_state.stopping.clone();
                 let _ = axum::serve(listener, app)
                     .with_graceful_shutdown(async move {
                         let _ = shutdown_rx.await;
                     })
                     .await;
+                stopping.store(true, Ordering::Relaxed);
                 hub.close_all();
                 tunnels.stop_all();
                 remove_runtime(&data_dir, std::process::id());
@@ -270,8 +274,14 @@ async fn ws_upgrade(State(state): State<AppState>, headers: HeaderMap, Query(que
 async fn ws_loop(socket: axum::extract::ws::WebSocket, state: AppState) {
     use axum::extract::ws::Message;
     use futures_util::{SinkExt, StreamExt};
-    let (mut writer, mut reader) = socket.split();
     let mut events = state.hub.subscribe();
+    let (mut writer, mut reader) = socket.split();
+    for info in state.hub.list_sessions() {
+        let text = json!({"type": "session:opened", "session": info}).to_string();
+        if writer.send(Message::Text(text)).await.is_err() {
+            return;
+        }
+    }
     let outbound = tokio::spawn(async move {
         loop {
             match events.recv().await {
@@ -306,14 +316,20 @@ async fn list_hosts(_auth: Authed, State(state): State<AppState>) -> Response {
 
 async fn save_host(_auth: Authed, State(state): State<AppState>, Json(body): Json<Value>) -> Response {
     match lock(&state.hosts).save_draft(&body) {
-        Ok(host) => json_ok(json!(host)),
+        Ok(host) => {
+            notify_catalog(&state, "hosts");
+            json_ok(json!(host))
+        }
         Err(err) => json_err(StatusCode::BAD_REQUEST, err.to_string()),
     }
 }
 
 async fn delete_host(_auth: Authed, State(state): State<AppState>, IdPath(id): IdPath<String>) -> Response {
     match lock(&state.hosts).delete(&id) {
-        Ok(true) => json_ok(json!(true)),
+        Ok(true) => {
+            notify_catalog(&state, "hosts");
+            json_ok(json!(true))
+        }
         Ok(false) => json_err(StatusCode::BAD_REQUEST, "找不到这台主机"),
         Err(err) => json_err(StatusCode::BAD_REQUEST, err.to_string()),
     }
@@ -321,14 +337,20 @@ async fn delete_host(_auth: Authed, State(state): State<AppState>, IdPath(id): I
 
 async fn save_group(_auth: Authed, State(state): State<AppState>, Json(body): Json<Value>) -> Response {
     match lock(&state.hosts).save_group_draft(&body) {
-        Ok(group) => json_ok(json!(group)),
+        Ok(group) => {
+            notify_catalog(&state, "hosts");
+            json_ok(json!(group))
+        }
         Err(err) => json_err(StatusCode::BAD_REQUEST, err.to_string()),
     }
 }
 
 async fn delete_group(_auth: Authed, State(state): State<AppState>, IdPath(id): IdPath<String>) -> Response {
     match lock(&state.hosts).delete_group(&id) {
-        Ok(()) => json_ok(json!(true)),
+        Ok(()) => {
+            notify_catalog(&state, "hosts");
+            json_ok(json!(true))
+        }
         Err(err) => json_err(StatusCode::BAD_REQUEST, err.to_string()),
     }
 }
@@ -339,14 +361,20 @@ async fn list_snippets(_auth: Authed, State(state): State<AppState>) -> Response
 
 async fn save_snippet(_auth: Authed, State(state): State<AppState>, Json(body): Json<Value>) -> Response {
     match lock(&state.snippets).save_draft(&body) {
-        Ok(snippet) => json_ok(json!(snippet)),
+        Ok(snippet) => {
+            notify_catalog(&state, "snippets");
+            json_ok(json!(snippet))
+        }
         Err(err) => json_err(StatusCode::BAD_REQUEST, err.to_string()),
     }
 }
 
 async fn delete_snippet(_auth: Authed, State(state): State<AppState>, IdPath(id): IdPath<String>) -> Response {
     match lock(&state.snippets).delete(&id) {
-        Ok(()) => json_ok(json!(true)),
+        Ok(()) => {
+            notify_catalog(&state, "snippets");
+            json_ok(json!(true))
+        }
         Err(err) => json_err(StatusCode::BAD_REQUEST, err.to_string()),
     }
 }
@@ -358,7 +386,10 @@ async fn list_tunnels(_auth: Authed, State(state): State<AppState>) -> Response 
 
 async fn save_tunnel(_auth: Authed, State(state): State<AppState>, Json(body): Json<Value>) -> Response {
     match lock(&state.tunnel_rules).save_draft(&body) {
-        Ok(rule) => json_ok(json!(rule)),
+        Ok(rule) => {
+            notify_catalog(&state, "tunnels");
+            json_ok(json!(rule))
+        }
         Err(err) => json_err(StatusCode::BAD_REQUEST, err.to_string()),
     }
 }
@@ -366,7 +397,10 @@ async fn save_tunnel(_auth: Authed, State(state): State<AppState>, Json(body): J
 async fn delete_tunnel(_auth: Authed, State(state): State<AppState>, IdPath(id): IdPath<String>) -> Response {
     state.tunnels.stop(&id);
     match lock(&state.tunnel_rules).delete(&id) {
-        Ok(()) => json_ok(json!(true)),
+        Ok(()) => {
+            notify_catalog(&state, "tunnels");
+            json_ok(json!(true))
+        }
         Err(err) => json_err(StatusCode::BAD_REQUEST, err.to_string()),
     }
 }
@@ -393,7 +427,10 @@ async fn start_tunnel(_auth: Authed, State(state): State<AppState>, Json(body): 
     })
     .await
     {
-        Ok(port) => json_ok(json!({"port": port})),
+        Ok(port) => {
+            notify_catalog(&state, "tunnels");
+            json_ok(json!({"port": port}))
+        }
         Err(err) => json_err(StatusCode::BAD_REQUEST, err),
     }
 }
@@ -401,6 +438,7 @@ async fn start_tunnel(_auth: Authed, State(state): State<AppState>, Json(body): 
 async fn stop_tunnel(_auth: Authed, State(state): State<AppState>, Json(body): Json<Value>) -> Response {
     if let Some(id) = body.get("id").and_then(|v| v.as_str()) {
         state.tunnels.stop(id);
+        notify_catalog(&state, "tunnels");
     }
     json_ok(json!(true))
 }
@@ -413,6 +451,7 @@ async fn put_settings(_auth: Authed, State(state): State<AppState>, Json(body): 
     match lock(&state.settings).apply_patch(&body) {
         Ok(settings) => {
             state.hub.set_interval(settings.monitor_interval_ms);
+            notify_catalog(&state, "settings");
             json_ok(json!(settings))
         }
         Err(err) => json_err(StatusCode::BAD_REQUEST, err.to_string()),
@@ -690,6 +729,42 @@ async fn block<T: Send + 'static>(op: impl FnOnce() -> Result<T, String> + Send 
         Ok(result) => result,
         Err(err) => Err(format!("后台任务失败: {err}")),
     }
+}
+
+fn notify_catalog(state: &AppState, kind: &str) {
+    state.hub.broadcast(json!({"type": "catalog:changed", "kind": kind}));
+}
+
+fn spawn_catalog_watch(state: AppState) {
+    std::thread::spawn(move || {
+        let mut seen = catalog_stamp(&state.data_dir);
+        while !state.stopping.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let now = catalog_stamp(&state.data_dir);
+            if now != seen {
+                seen = now;
+                state.hub.broadcast(json!({"type": "catalog:changed", "kind": "disk"}));
+            }
+        }
+    });
+}
+
+fn catalog_stamp(dir: &Path) -> String {
+    ["hosts.json", "snippets.json", "tunnels.json", "settings.json"]
+        .iter()
+        .map(|name| {
+            let meta = std::fs::metadata(dir.join(name)).ok();
+            let mtime = meta
+                .as_ref()
+                .and_then(|item| item.modified().ok())
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|dur| dur.as_millis())
+                .unwrap_or(0);
+            let len = meta.map(|item| item.len()).unwrap_or(0);
+            format!("{name}:{mtime}:{len}")
+        })
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 fn json_ok(data: Value) -> Response {

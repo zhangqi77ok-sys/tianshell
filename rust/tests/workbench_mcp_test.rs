@@ -153,6 +153,108 @@ fn workbench_starts_mcp_with_the_http_server() {
     assert!(read_runtime(dir.path()).is_none());
 }
 
+#[test]
+fn host_and_session_changes_arrive_on_the_workbench_socket() {
+    let dir = tempdir().unwrap();
+    let server = start_workbench(ServerOptions {
+        data_dir: Some(dir.path().to_path_buf()),
+        port: Some(0),
+        open_browser: false,
+    })
+    .expect("workbench");
+    let mut sock = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+    sock.set_read_timeout(Some(Duration::from_millis(200))).ok();
+    let upgrade = format!(
+        "GET /ws?token={} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+        server.token,
+        port = server.port
+    );
+    sock.write_all(upgrade.as_bytes()).unwrap();
+    let mut pending = Vec::new();
+    let header = read_http_head(&mut sock, &mut pending);
+    assert!(header.contains("101"), "{header}");
+    std::thread::sleep(Duration::from_millis(80));
+
+    let (status, _, body) = http(server.port, "POST", "/api/sessions", Some(&server.token), Some(r#"{"kind":"local"}"#));
+    assert_eq!(status, 200, "{body}");
+    let (status, _, body) = http(
+        server.port,
+        "POST",
+        "/api/hosts",
+        Some(&server.token),
+        Some(r#"{"alias":"live-box","host":"10.9.9.9","username":"root","authType":"password","secret":"pw"}"#),
+    );
+    assert_eq!(status, 200, "{body}");
+
+    let mut text = decode_ws_text(&mut pending);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline && !(text.contains("session:opened") && text.contains("catalog:changed")) {
+        let mut buf = [0u8; 8192];
+        match sock.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                pending.extend_from_slice(&buf[..n]);
+                text.push_str(&decode_ws_text(&mut pending));
+            }
+            Err(_) => {}
+        }
+    }
+    assert!(text.contains("session:opened"), "missing session event: {text}");
+    assert!(text.contains("catalog:changed"), "missing catalog event: {text}");
+    let (status, _, listed) = http(server.port, "GET", "/api/hosts", Some(&server.token), None);
+    assert_eq!(status, 200, "{listed}");
+    assert!(listed.contains("live-box"), "{listed}");
+    drop(server);
+}
+
+fn read_http_head(stream: &mut TcpStream, pending: &mut Vec<u8>) -> String {
+    let mut buf = [0u8; 2048];
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                pending.extend_from_slice(&buf[..n]);
+                if let Some(split) = pending.windows(4).position(|window| window == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&pending[..split]).into_owned();
+                    pending.drain(..split + 4);
+                    return head;
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    String::from_utf8_lossy(pending).into_owned()
+}
+
+fn decode_ws_text(buf: &mut Vec<u8>) -> String {
+    let mut out = String::new();
+    let mut offset = 0;
+    while buf.len() - offset >= 2 {
+        let opcode = buf[offset] & 0x0f;
+        let mut len = (buf[offset + 1] & 0x7f) as usize;
+        let mut header = 2usize;
+        if len == 126 {
+            if buf.len() - offset < 4 {
+                break;
+            }
+            len = u16::from_be_bytes([buf[offset + 2], buf[offset + 3]]) as usize;
+            header = 4;
+        } else if len == 127 {
+            break;
+        }
+        if buf.len() < offset + header + len {
+            break;
+        }
+        if opcode == 0x1 {
+            out.push_str(&String::from_utf8_lossy(&buf[offset + header..offset + header + len]));
+        }
+        offset += header + len;
+    }
+    buf.drain(..offset);
+    out
+}
+
 fn http(port: u16, method: &str, path: &str, token: Option<&str>, body: Option<&str>) -> (u16, Vec<(String, String)>, String) {
     let mut extra = String::new();
     if let Some(token) = token {

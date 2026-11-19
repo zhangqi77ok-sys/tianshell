@@ -23,6 +23,7 @@ pub struct AppState {
     pub transfers: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     pub sse: Arc<SseHub>,
     pub mcp_sessions: Arc<Mutex<std::collections::HashSet<String>>>,
+    pub stopping: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Default)]
