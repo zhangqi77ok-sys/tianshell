@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod http_server;
 pub mod hub;
+pub mod keys;
 pub mod mcp;
 pub mod mcp_http;
 pub mod monitor;
@@ -10,6 +11,7 @@ pub mod paths;
 pub mod pty;
 pub mod runtime;
 pub mod sftp;
+pub mod shared_ssh;
 pub mod ssh;
 pub mod state;
 pub mod store;

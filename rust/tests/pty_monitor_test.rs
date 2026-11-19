@@ -34,6 +34,45 @@ fn test_local_shell_echo_and_crlf() {
 }
 
 #[test]
+fn local_shell_is_a_pty_and_accepts_resize() {
+    let (mut session, mut reader) = LocalShellSession::spawn(None).unwrap();
+    session.resize(40, 12).unwrap();
+    let probe: &[u8] = if cfg!(windows) {
+        b"if ([Console]::IsInputRedirected) { 'NO_TTY' } else { 'HAS_TTY' }; Write-Output ([Console]::WindowWidth)\r\n"
+    } else {
+        b"if test -t 0; then echo HAS_TTY; else echo NO_TTY; fi\nstty size\n"
+    };
+    session.write(probe).unwrap();
+
+    let start = Instant::now();
+    let mut out = Vec::new();
+    let mut buf = [0u8; 1024];
+    while start.elapsed() < Duration::from_secs(8) {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                out.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&out);
+                if text.contains("HAS_TTY") && (cfg!(windows) || text.contains("12 40")) {
+                    break;
+                }
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(30)),
+        }
+    }
+    let text = String::from_utf8_lossy(&out);
+    let lines: Vec<&str> = text.split(|c| c == '\n' || c == '\r').map(str::trim).filter(|line| !line.is_empty()).collect();
+    assert!(lines.iter().any(|line| *line == "HAS_TTY"), "local shell is not a tty: {text}");
+    assert!(!lines.iter().any(|line| *line == "NO_TTY"), "{text}");
+    assert!(!text.to_ascii_lowercase().contains("can't access tty"), "{text}");
+    assert!(!text.to_ascii_lowercase().contains("not a tty"), "{text}");
+    if !cfg!(windows) {
+        assert!(lines.iter().any(|line| *line == "12 40"), "resize was not applied: {text}");
+    }
+    session.kill().unwrap();
+}
+
+#[test]
 fn test_parse_metrics_sample() {
     let raw = r#"
 __HOST__

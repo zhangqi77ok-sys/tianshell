@@ -1,11 +1,13 @@
 use std::io::{Read, Write};
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum PtyError {
     #[error("本地终端 IO 错误: {0}")]
     Io(#[from] std::io::Error),
+    #[error("本地终端错误: {0}")]
+    Message(String),
 }
 
 pub struct CrLfNormalizer {
@@ -78,57 +80,68 @@ impl<R: Read> Read for NormalizedReader<R> {
 }
 
 pub struct LocalShellSession {
-    child: Child,
-    stdin: ChildStdin,
-    stderr: Option<ChildStderr>,
+    child: Box<dyn Child + Send + Sync>,
+    writer: Box<dyn Write + Send>,
+    master: Box<dyn MasterPty + Send>,
 }
 
 impl LocalShellSession {
-    pub fn spawn(cwd: Option<&str>) -> Result<(Self, NormalizedReader<ChildStdout>), PtyError> {
-        let is_win = cfg!(target_os = "windows");
-        let shell = if is_win { "powershell.exe" } else { "sh" };
-        let mut cmd = Command::new(shell);
-        if is_win {
-            cmd.args([
-                "-NoLogo",
-                "-NoExit",
-                "-Command",
-                "[Console]::InputEncoding=[System.Text.Encoding]::UTF8; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8",
-            ]);
-        } else {
-            cmd.arg("-i");
-        }
-        if let Some(dir) = cwd {
-            cmd.current_dir(dir);
-        } else if let Some(home) = dirs::home_dir() {
-            cmd.current_dir(home);
-        }
-
-        cmd.stdin(Stdio::piped());
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-
-        let mut child = cmd.spawn()?;
-        let stdin = child.stdin.take().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "无法连接终端 stdin")
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "无法连接终端 stdout")
-        })?;
-
-        let stderr = child.stderr.take();
-        let reader = NormalizedReader::new(stdout);
-        let session = Self { child, stdin, stderr };
-        Ok((session, reader))
+    pub fn spawn(cwd: Option<&str>) -> Result<(Self, Box<dyn Read + Send>), PtyError> {
+        Self::open(cwd, 80, 24)
     }
 
-    pub fn take_stderr(&mut self) -> Option<ChildStderr> {
-        self.stderr.take()
+    pub fn open(cwd: Option<&str>, cols: u32, rows: u32) -> Result<(Self, Box<dyn Read + Send>), PtyError> {
+        let system = native_pty_system();
+        let pair = system
+            .openpty(PtySize {
+                rows: dim(rows),
+                cols: dim(cols),
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|err| PtyError::Message(err.to_string()))?;
+        let mut cmd = shell_command();
+        if let Some(dir) = cwd {
+            cmd.cwd(dir);
+        } else if let Some(home) = dirs::home_dir() {
+            cmd.cwd(home);
+        }
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .map_err(|err| PtyError::Message(err.to_string()))?;
+        let reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|err| PtyError::Message(err.to_string()))?;
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|err| PtyError::Message(err.to_string()))?;
+        Ok((
+            Self {
+                child,
+                writer,
+                master: pair.master,
+            },
+            reader,
+        ))
+    }
+
+    pub fn resize(&mut self, cols: u32, rows: u32) -> Result<(), PtyError> {
+        self.master
+            .resize(PtySize {
+                rows: dim(rows),
+                cols: dim(cols),
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|err| PtyError::Message(err.to_string()))
     }
 
     pub fn write(&mut self, data: &[u8]) -> Result<(), PtyError> {
-        self.stdin.write_all(data)?;
-        self.stdin.flush()?;
+        self.writer.write_all(data)?;
+        self.writer.flush()?;
         Ok(())
     }
 
@@ -140,9 +153,34 @@ impl LocalShellSession {
     }
 
     pub fn kill(&mut self) -> Result<(), PtyError> {
-        let _ = self.stdin.flush();
+        let _ = self.writer.flush();
         let _ = self.child.kill();
         let _ = self.child.wait();
         Ok(())
+    }
+}
+
+fn dim(value: u32) -> u16 {
+    value.clamp(1, 512) as u16
+}
+
+fn shell_command() -> CommandBuilder {
+    if cfg!(target_os = "windows") {
+        let mut cmd = CommandBuilder::new("powershell.exe");
+        cmd.args([
+            "-NoLogo",
+            "-NoExit",
+            "-Command",
+            "[Console]::InputEncoding=[System.Text.Encoding]::UTF8; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8",
+        ]);
+        cmd
+    } else {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        let mut cmd = CommandBuilder::new(shell);
+        cmd.arg("-i");
+        if std::env::var_os("TERM").is_none() {
+            cmd.env("TERM", "xterm-256color");
+        }
+        cmd
     }
 }

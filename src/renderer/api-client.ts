@@ -99,6 +99,9 @@ export const webApi = {
     ),
   cancelTransfer: (tid: string) =>
     apiRequest<boolean>(`/api/transfers/${encodeURIComponent(tid)}/cancel`, { method: 'POST' }),
+
+  mcpInfo: () =>
+    apiRequest<{ url: string; sseUrl: string; transport: string; tools: string[] }>('/api/mcp'),
 };
 
 export interface LiveSocket {

@@ -3,7 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import './styles.css';
 import type { ConnectInfo, ServerMetrics, TransferTask } from '../shared/types.js';
-import { connectWs, webApi } from './api-client.js';
+import { connectWs, resolveClientToken, webApi } from './api-client.js';
 import { HostTreeController } from './host-tree.js';
 import { MonitorAndToolsController } from './monitor-panel.js';
 import { SftpController } from './sftp-panel.js';
@@ -399,8 +399,72 @@ async function applySettings(): Promise<void> {
   }
 }
 
+function mcpConfigs(url: string, token: string): { cursor: string; claude: string } {
+  const cursor = {
+    mcpServers: {
+      tianshell: {
+        url,
+        headers: { Authorization: `Bearer ${token}` },
+      },
+    },
+  };
+  const claude = {
+    mcpServers: {
+      tianshell: {
+        type: 'http',
+        url,
+        headers: { Authorization: `Bearer ${token}` },
+      },
+    },
+  };
+  return { cursor: JSON.stringify(cursor, null, 2), claude: JSON.stringify(claude, null, 2) };
+}
+
+async function copyText(text: string, ok: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast(ok);
+  } catch {
+    showToast('复制失败，请在对话框里手动选择');
+  }
+}
+
+async function showMcpDialog(): Promise<void> {
+  const dlg = document.getElementById('mcp-dialog') as HTMLDialogElement;
+  const info = await webApi.mcpInfo();
+  const token = resolveClientToken();
+  const configs = mcpConfigs(info.url, token);
+  (document.getElementById('mcp-url') as HTMLInputElement).value = info.url;
+  (document.getElementById('mcp-token') as HTMLInputElement).value = token;
+  (document.getElementById('mcp-cursor') as HTMLTextAreaElement).value = configs.cursor;
+  (document.getElementById('mcp-claude') as HTMLTextAreaElement).value = configs.claude;
+  const status = document.getElementById('mcp-status');
+  if (status) status.textContent = info.url.replace(/^https?:\/\//, '');
+  dlg.showModal();
+}
+
 async function boot(): Promise<void> {
   bindGlobalUi();
+  document.getElementById('open-mcp')?.addEventListener('click', () => void showMcpDialog().catch((err: unknown) => {
+    showToast(err instanceof Error ? err.message : '读不到 MCP 地址');
+  }));
+  document.getElementById('close-mcp')?.addEventListener('click', () => {
+    (document.getElementById('mcp-dialog') as HTMLDialogElement).close();
+  });
+  document.getElementById('copy-cursor')?.addEventListener('click', () => {
+    void copyText((document.getElementById('mcp-cursor') as HTMLTextAreaElement).value, '已复制 Cursor 配置');
+  });
+  document.getElementById('copy-claude')?.addEventListener('click', () => {
+    void copyText((document.getElementById('mcp-claude') as HTMLTextAreaElement).value, '已复制 Claude Code 配置');
+  });
+  try {
+    const info = await webApi.mcpInfo();
+    const status = document.getElementById('mcp-status');
+    if (status) status.textContent = info.url.replace(/^https?:\/\//, '');
+  } catch {
+    const status = document.getElementById('mcp-status');
+    if (status) status.textContent = 'MCP 地址暂时读不到';
+  }
   await refreshLive('disk');
 }
 

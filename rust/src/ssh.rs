@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use ssh2::Session;
 use thiserror::Error;
 use uuid::Uuid;
+use crate::keys::prepare_private_key;
 use crate::store::HostStore;
 use crate::types::{AuthType, HostRecord};
 
@@ -148,15 +149,16 @@ fn authenticate_session(sess: &Session, target: &SshTarget) -> Result<(), SshErr
     if let Some(password) = &target.password {
         sess.userauth_password(&target.username, password)?;
     } else if let Some(private_key) = &target.private_key {
+        let prepared = prepare_private_key(private_key, target.passphrase.as_deref()).map_err(SshError::Message)?;
         let key_file = std::env::temp_dir().join(format!("ts_{}.key", Uuid::new_v4()));
-        std::fs::write(&key_file, private_key)?;
+        std::fs::write(&key_file, prepared.material.as_bytes())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600));
         }
         let _guard = TempKey(key_file.clone());
-        sess.userauth_pubkey_file(&target.username, None, &key_file, target.passphrase.as_deref())?;
+        sess.userauth_pubkey_file(&target.username, None, &key_file, prepared.passphrase.as_deref())?;
     }
     if !sess.authenticated() {
         return Err(SshError::AuthFailed);

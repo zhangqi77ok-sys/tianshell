@@ -183,26 +183,30 @@ fn parse_ps(lines: &[&str]) -> Vec<ProcessStat> {
 }
 
 pub fn sample_remote_metrics(sess: &Session) -> Result<ServerMetrics, SshError> {
-    let first = exec_command(sess, PROBE_COMMAND)?;
     let started = Instant::now();
+    let first = exec_command(sess, PROBE_COMMAND)?;
     std::thread::sleep(Duration::from_millis(200));
     let second = exec_command(sess, PROBE_COMMAND)?;
-    let dt = started.elapsed().as_secs_f64().max(0.05);
-    let mut metrics = parse_metrics_sample(&second.stdout);
-    if let (Some((t1, i1)), Some((t2, i2))) = (cpu_jiffies(&first.stdout), cpu_jiffies(&second.stdout)) {
+    Ok(metrics_from_samples(&first.stdout, &second.stdout, started.elapsed().as_secs_f64()))
+}
+
+pub fn metrics_from_samples(first_raw: &str, second_raw: &str, elapsed_secs: f64) -> ServerMetrics {
+    let dt = elapsed_secs.max(0.05);
+    let mut metrics = parse_metrics_sample(second_raw);
+    if let (Some((t1, i1)), Some((t2, i2))) = (cpu_jiffies(first_raw), cpu_jiffies(second_raw)) {
         let total = t2.saturating_sub(t1);
         let idle = i2.saturating_sub(i1);
         if total > 0 {
             metrics.cpu_percent = (100.0 * (1.0 - idle as f32 / total as f32)).clamp(0.0, 100.0);
         }
     }
-    let (rx1, tx1) = net_totals_raw(&first.stdout);
-    let (rx2, tx2) = net_totals_raw(&second.stdout);
+    let (rx1, tx1) = net_totals_raw(first_raw);
+    let (rx2, tx2) = net_totals_raw(second_raw);
     metrics.net.rx_bytes_per_sec = rx2.saturating_sub(rx1) as f64 / dt;
     metrics.net.tx_bytes_per_sec = tx2.saturating_sub(tx1) as f64 / dt;
     metrics.net.total_rx_bytes = rx2;
     metrics.net.total_tx_bytes = tx2;
-    Ok(metrics)
+    metrics
 }
 
 fn cpu_jiffies(raw: &str) -> Option<(u64, u64)> {

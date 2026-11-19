@@ -10,7 +10,7 @@ use tianshell_core::store::HostStore;
 use tianshell_core::vault::load_or_create_master_key;
 
 #[test]
-fn mcp_handler_lists_public_hosts_and_seven_tools() {
+fn mcp_handler_lists_public_hosts_and_workbench_tools() {
     let dir = tempdir().unwrap();
     let key = load_or_create_master_key(&dir.path().join("vault.key")).unwrap();
     let mut store = HostStore::load(dir.path().join("hosts.json"), key).unwrap();
@@ -34,11 +34,31 @@ fn mcp_handler_lists_public_hosts_and_seven_tools() {
         })
         .unwrap();
     let tools = listed["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 7);
+    assert_eq!(tools.len(), 9);
     let names: Vec<&str> = tools.iter().filter_map(|tool| tool["name"].as_str()).collect();
-    for name in ["list_hosts", "run_command", "session_status", "sftp_list", "sftp_read", "sftp_write", "system_metrics"] {
+    for name in [
+        "list_hosts",
+        "list_terminal_sessions",
+        "run_command",
+        "session_status",
+        "sftp_list",
+        "sftp_mkdir",
+        "sftp_read",
+        "sftp_write",
+        "system_metrics",
+    ] {
         assert!(names.contains(&name), "missing {name}");
     }
+    let terminals = handler
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!(3)),
+            method: "tools/call".into(),
+            params: Some(json!({"name": "list_terminal_sessions", "arguments": {}})),
+        })
+        .unwrap();
+    let terminal_text = terminals["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(terminal_text.contains("\"attached\": false"));
     let hosts = handler
         .handle_request(JsonRpcRequest {
             jsonrpc: "2.0".into(),
@@ -98,9 +118,18 @@ fn workbench_starts_mcp_with_the_http_server() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["data"]["fontSize"], 16);
 
-    let (status, _, body) = http(server.port, "POST", "/api/sessions", headers, Some(r#"{"kind":"local"}"#));
+    let (status, _, body) = http(server.port, "POST", "/api/sessions", headers, Some(r#"{"kind":"local","cols":100,"rows":30}"#));
     assert_eq!(status, 200, "{body}");
     let session_id = serde_json::from_str::<Value>(&body).unwrap()["data"]["sessionId"].as_str().unwrap().to_string();
+    let (status, _, body) = http(
+        server.port,
+        "GET",
+        &format!("/api/sessions/{session_id}/sftp/list?path=/"),
+        headers,
+        None,
+    );
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("会话未连接到 SSH 主机"), "{body}");
 
     let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}"#;
     let (status, _response_headers, body) = http(server.port, "POST", "/mcp", None, Some(init));
@@ -124,7 +153,33 @@ fn workbench_starts_mcp_with_the_http_server() {
         Some(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#),
     );
     assert_eq!(status, 200, "{body}");
-    assert!(body.contains("list_hosts") && body.contains("system_metrics"));
+    assert!(body.contains("list_hosts") && body.contains("system_metrics") && body.contains("list_terminal_sessions"));
+    let (status, _, body) = http_with_bearer(
+        server.port,
+        "POST",
+        "/mcp",
+        &server.token,
+        Some(&session),
+        Some(&format!(
+            r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"list_terminal_sessions","arguments":{{}}}}}}"#
+        )),
+    );
+    assert_eq!(status, 200, "{body}");
+    let listed: Value = serde_json::from_str(&body).unwrap();
+    let listed_text = listed["result"]["content"][0]["text"].as_str().unwrap();
+    let listed_value: Value = serde_json::from_str(listed_text).unwrap();
+    assert_eq!(listed_value["attached"], true);
+    assert!(listed_text.contains(&session_id), "{listed_text}");
+    let (status, _, body) = http_with_bearer(
+        server.port,
+        "POST",
+        "/mcp",
+        &server.token,
+        Some(&session),
+        Some(r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"session_status","arguments":{}}}"#),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(!body.contains(&session_id), "run_command records must not include the interactive tab: {body}");
     let (status, _, body) = http_with_bearer(
         server.port,
         "POST",
