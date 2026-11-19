@@ -52,7 +52,18 @@ cargo build --release --bin tianshell
 ./target/release/tianshell serve
 ```
 
-Windows 上 GitHub Actions 使用默认的 MSVC 工具链。不要把某台机器的 `linker` / `ar` 绝对路径写进仓库里的 `.cargo/config.toml`。如果本机要走 GNU 工具链，写在用户自己的 Cargo 配置里。
+生成的是 `target/release/tianshell`（Windows 上是 `tianshell.exe`）。GitHub Actions 的 Windows 任务使用 runner 默认的 MSVC 目标。仓库里不提交 `.cargo/config.toml`，也不提交某台机器的 `linker` / `ar` 绝对路径。
+
+本机如果只用 w64devkit、没有 MSVC，把配置写到用户目录 `%USERPROFILE%\.cargo\config.toml`，路径改成自己的安装位置。默认工具链是 MSVC 时，先执行 `rustup target add x86_64-pc-windows-gnu`。这时可执行文件在 `target/x86_64-pc-windows-gnu/release/`。
+
+```toml
+[build]
+target = "x86_64-pc-windows-gnu"
+
+[target.x86_64-pc-windows-gnu]
+linker = "C:\\path\\to\\w64devkit\\bin\\gcc.exe"
+ar = "C:\\path\\to\\w64devkit\\bin\\ar.exe"
+```
 
 ### 原生窗口
 
