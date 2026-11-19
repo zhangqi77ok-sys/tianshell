@@ -17,8 +17,10 @@ use serde_json::{json, Value};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 use crate::auth::authorize;
+use crate::bindings::BindingStore;
+use crate::history::CommandHistory;
 use crate::hub::SessionHub;
-use crate::mcp::McpHandler;
+use crate::mcp::{tool_names, McpHandler, WorkbenchMcp};
 use crate::mcp_http::{self, TokenQuery};
 use crate::paths::resolve_data_dir;
 use crate::runtime::{self, remove_runtime, write_runtime};
@@ -77,20 +79,39 @@ pub fn start_workbench(options: ServerOptions) -> Result<RunningServer, String> 
     let settings = SettingsStore::load(data_dir.join("settings.json")).map_err(|err| err.to_string())?;
     let interval = settings.get().monitor_interval_ms;
     let token = load_token(&data_dir);
+    let history = Arc::new(CommandHistory::open(data_dir.join("command-history.json")).map_err(|err| err.to_string())?);
+    history.set_token(&token);
     let hub = SessionHub::new(interval);
+    hub.set_history(history.clone());
+    let snippets = Arc::new(std::sync::Mutex::new(snippets));
+    let tunnel_rules = Arc::new(std::sync::Mutex::new(
+        TunnelStore::load(data_dir.join("tunnels.json")).map_err(|err| err.to_string())?,
+    ));
+    let settings = Arc::new(std::sync::Mutex::new(settings));
+    let tunnels = Arc::new(TunnelManager::new());
+    let bindings = Arc::new(BindingStore::open(data_dir.join("bindings.json")).map_err(|err| err.to_string())?);
     let state = AppState {
         token: token.clone(),
         data_dir: data_dir.clone(),
         port: Arc::new(std::sync::atomic::AtomicU16::new(0)),
         hosts: hosts.clone(),
-        snippets: Arc::new(std::sync::Mutex::new(snippets)),
-        tunnel_rules: Arc::new(std::sync::Mutex::new(
-            TunnelStore::load(data_dir.join("tunnels.json")).map_err(|err| err.to_string())?,
-        )),
-        settings: Arc::new(std::sync::Mutex::new(settings)),
+        snippets: snippets.clone(),
+        tunnel_rules: tunnel_rules.clone(),
+        settings: settings.clone(),
         hub: hub.clone(),
-        tunnels: Arc::new(TunnelManager::new()),
-        mcp: Arc::new(McpHandler::with_terminals(hosts, Some(hub))),
+        history: history.clone(),
+        tunnels: tunnels.clone(),
+        mcp: Arc::new(McpHandler::for_workbench(WorkbenchMcp {
+            hosts,
+            snippets,
+            tunnel_rules,
+            tunnels,
+            settings,
+            bindings,
+            hub,
+            history,
+            token: token.clone(),
+        })),
         transfers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         sse: Arc::new(SseHub::default()),
         mcp_sessions: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -194,6 +215,7 @@ fn router(state: AppState) -> Router {
         .route("/api/hosts/:id", delete(delete_host))
         .route("/api/groups", post(save_group))
         .route("/api/groups/:id", delete(delete_group))
+        .route("/api/history", get(list_history))
         .route("/api/snippets", get(list_snippets).post(save_snippet))
         .route("/api/snippets/:id", delete(delete_snippet))
         .route("/api/tunnels/start", post(start_tunnel))
@@ -354,6 +376,18 @@ async fn delete_group(_auth: Authed, State(state): State<AppState>, IdPath(id): 
         }
         Err(err) => json_err(StatusCode::BAD_REQUEST, err.to_string()),
     }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct HistoryQuery {
+    q: Option<String>,
+    host: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn list_history(_auth: Authed, State(state): State<AppState>, Query(query): Query<HistoryQuery>) -> Response {
+    let rows = state.history.search(query.q.as_deref(), query.host.as_deref(), query.limit.unwrap_or(80));
+    json_ok(json!(rows))
 }
 
 async fn list_snippets(_auth: Authed, State(state): State<AppState>) -> Response {
@@ -711,7 +745,7 @@ async fn mcp_info(_auth: Authed, State(state): State<AppState>) -> Response {
         "sseUrl": format!("http://127.0.0.1:{port}/sse"),
         "messageUrl": format!("http://127.0.0.1:{port}/message"),
         "authorization": "Bearer",
-        "tools": ["list_hosts", "list_terminal_sessions", "run_command", "session_status", "sftp_list", "sftp_mkdir", "sftp_read", "sftp_write", "system_metrics"]
+        "tools": tool_names()
     }))
 }
 
@@ -749,7 +783,7 @@ fn spawn_catalog_watch(state: AppState) {
 }
 
 fn catalog_stamp(dir: &Path) -> String {
-    ["hosts.json", "snippets.json", "tunnels.json", "settings.json"]
+    ["hosts.json", "snippets.json", "tunnels.json", "settings.json", "command-history.json", "bindings.json"]
         .iter()
         .map(|name| {
             let meta = std::fs::metadata(dir.join(name)).ok();

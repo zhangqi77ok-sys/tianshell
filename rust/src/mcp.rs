@@ -3,20 +3,59 @@ use std::io::{BufRead, Write};
 use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use uuid::Uuid;
+use crate::bindings::BindingStore;
+use crate::history::{load_token_quietly, CommandHistory};
 use crate::hub::SessionHub;
 use crate::monitor::sample_remote_metrics;
 use crate::paths::resolve_data_dir;
+use crate::redact::redact_secrets;
 use crate::runtime::MCP_PROTOCOL;
 use crate::sftp::{list_dir, mkdir, read_text_limited, write_text};
-use crate::ssh::{connect_chain, exec_command, resolve_targets, truncate_output};
+use crate::ssh::{connect_chain, resolve_targets};
 use crate::state::lock;
-use crate::store::HostStore;
+use crate::store::{HostStore, SettingsStore, SnippetStore, TunnelStore};
+use crate::tunnel::TunnelManager;
 use crate::vault::load_or_create_master_key;
 use crate::VERSION;
 
-const OUTPUT_LIMIT: usize = 200_000;
 const SUPPORTED_PROTOCOLS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+
+pub fn tool_names() -> &'static [&'static str] {
+    &[
+        "list_hosts",
+        "list_groups",
+        "list_terminal_sessions",
+        "open_terminal",
+        "close_terminal",
+        "read_terminal",
+        "write_terminal",
+        "interrupt_terminal",
+        "run_command",
+        "start_command",
+        "poll_command",
+        "cancel_command",
+        "session_status",
+        "search_history",
+        "list_snippets",
+        "save_snippet",
+        "run_snippet",
+        "list_tunnels",
+        "start_tunnel",
+        "stop_tunnel",
+        "get_settings",
+        "list_bindings",
+        "save_binding",
+        "delete_binding",
+        "set_host_note",
+        "sftp_list",
+        "sftp_mkdir",
+        "sftp_read",
+        "sftp_write",
+        "sftp_download",
+        "sftp_upload",
+        "system_metrics",
+    ]
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JsonRpcRequest {
@@ -41,10 +80,29 @@ pub struct SessionRecord {
     pub error: Option<String>,
 }
 
+pub struct WorkbenchMcp {
+    pub hosts: Arc<Mutex<HostStore>>,
+    pub snippets: Arc<Mutex<SnippetStore>>,
+    pub tunnel_rules: Arc<Mutex<TunnelStore>>,
+    pub tunnels: Arc<TunnelManager>,
+    pub settings: Arc<Mutex<SettingsStore>>,
+    pub bindings: Arc<BindingStore>,
+    pub hub: Arc<SessionHub>,
+    pub history: Arc<CommandHistory>,
+    pub token: String,
+}
+
 pub struct McpHandler {
-    hosts: Arc<Mutex<HostStore>>,
-    sessions: Mutex<HashMap<String, SessionRecord>>,
-    terminals: Option<Arc<SessionHub>>,
+    pub(crate) hosts: Arc<Mutex<HostStore>>,
+    pub(crate) snippets: Option<Arc<Mutex<SnippetStore>>>,
+    pub(crate) tunnel_rules: Option<Arc<Mutex<TunnelStore>>>,
+    pub(crate) tunnels: Option<Arc<TunnelManager>>,
+    pub(crate) settings: Option<Arc<Mutex<SettingsStore>>>,
+    pub(crate) bindings: Option<Arc<BindingStore>>,
+    pub(crate) terminals: Option<Arc<SessionHub>>,
+    pub(crate) history: Arc<CommandHistory>,
+    pub(crate) token: String,
+    pub(crate) sessions: Mutex<HashMap<String, SessionRecord>>,
 }
 
 impl McpHandler {
@@ -53,7 +111,25 @@ impl McpHandler {
         std::fs::create_dir_all(&data_dir)?;
         let key = load_or_create_master_key(&data_dir.join("vault.key"))?;
         let hosts = HostStore::load(data_dir.join("hosts.json"), key)?;
-        Ok(Self::from_hosts(Arc::new(Mutex::new(hosts))))
+        let snippets = SnippetStore::load(data_dir.join("snippets.json"))?;
+        let tunnel_rules = TunnelStore::load(data_dir.join("tunnels.json"))?;
+        let settings = SettingsStore::load(data_dir.join("settings.json"))?;
+        let bindings = BindingStore::open(data_dir.join("bindings.json"))?;
+        let history = CommandHistory::open(data_dir.join("command-history.json"))?;
+        let token = load_token_quietly(&data_dir);
+        history.set_token(&token);
+        Ok(Self {
+            hosts: Arc::new(Mutex::new(hosts)),
+            snippets: Some(Arc::new(Mutex::new(snippets))),
+            tunnel_rules: Some(Arc::new(Mutex::new(tunnel_rules))),
+            tunnels: None,
+            settings: Some(Arc::new(Mutex::new(settings))),
+            bindings: Some(Arc::new(bindings)),
+            terminals: None,
+            history: Arc::new(history),
+            token,
+            sessions: Mutex::new(HashMap::new()),
+        })
     }
 
     pub fn from_hosts(hosts: Arc<Mutex<HostStore>>) -> Self {
@@ -63,8 +139,31 @@ impl McpHandler {
     pub fn with_terminals(hosts: Arc<Mutex<HostStore>>, terminals: Option<Arc<SessionHub>>) -> Self {
         Self {
             hosts,
-            sessions: Mutex::new(HashMap::new()),
+            snippets: None,
+            tunnel_rules: None,
+            tunnels: None,
+            settings: None,
+            bindings: None,
             terminals,
+            history: Arc::new(CommandHistory::memory()),
+            token: String::new(),
+            sessions: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn for_workbench(parts: WorkbenchMcp) -> Self {
+        parts.history.set_token(&parts.token);
+        Self {
+            hosts: parts.hosts,
+            snippets: Some(parts.snippets),
+            tunnel_rules: Some(parts.tunnel_rules),
+            tunnels: Some(parts.tunnels),
+            settings: Some(parts.settings),
+            bindings: Some(parts.bindings),
+            terminals: Some(parts.hub),
+            history: parts.history,
+            token: parts.token,
+            sessions: Mutex::new(HashMap::new()),
         }
     }
 
@@ -73,10 +172,13 @@ impl McpHandler {
         let result = match req.method.as_str() {
             "initialize" => Ok(self.handle_initialize(req.params.as_ref())),
             "tools/list" => Ok(self.handle_tools_list()),
-            "tools/call" => match self.handle_tools_call(req.params.unwrap_or_else(|| json!({}))) {
-                Ok(value) => Ok(value),
-                Err(message) => Ok(tool_text(message, true)),
-            },
+            "tools/call" => {
+                let value = match self.handle_tools_call(req.params.unwrap_or_else(|| json!({}))) {
+                    Ok(value) => value,
+                    Err(message) => tool_text(self.scrub(&message), true),
+                };
+                Ok(self.scrub_tool(value))
+            }
             "ping" | "logging/setLevel" | "notifications/initialized" => Ok(json!({})),
             "resources/list" => Ok(json!({"resources": []})),
             "resources/templates/list" => Ok(json!({"resourceTemplates": []})),
@@ -104,7 +206,7 @@ impl McpHandler {
             "protocolVersion": protocol,
             "capabilities": {"tools": {"listChanged": false}},
             "serverInfo": {"name": "tianshell", "version": VERSION},
-            "instructions": "TianShell 保存了用户的 SSH 主机（支持分组和跳板机）。工作台启动时会在 127.0.0.1 上同时提供这套 MCP。先用 list_hosts 查看主机别名，再用 run_command / sftp_list / sftp_read / sftp_write / sftp_mkdir / system_metrics。run_command 会另开一条 SSH，不会写进界面里已经打开的终端；界面终端用 list_terminal_sessions 查看。不要猜测密码。"
+            "instructions": "TianShell 是会话和记忆中枢。先 list_terminal_sessions 或 open_terminal，用 read_terminal 看屏幕，用 write_terminal / run_command 打进已经打开的标签（用户能在窗口里看见）。只有没有匹配标签，或 new_session 为 true 时，run_command 才另开一条连接。长命令用 start_command、poll_command、cancel_command，避免一直阻塞。文件工具会另开一条 SSH，不会占用交互终端那条线程。主机、片段、隧道、历史和笔记都不含私钥、密码或令牌。不要猜测密码。"
         })
     }
 
@@ -112,21 +214,45 @@ impl McpHandler {
         json!({
             "tools": [
                 tool_def("list_hosts", "列出本机保存的 SSH 主机（含分组与跳板机关联，不含密码私钥）。List saved SSH hosts without secrets.", json!({"type": "object", "properties": {}}), json!([])),
-                tool_def("list_terminal_sessions", "列出工作台界面里已经打开的交互终端标签。这些不是 run_command 的记录。List interactive workbench terminal tabs.", json!({"type": "object", "properties": {}}), json!([])),
-                tool_def("run_command", "另开一条 SSH（支持 ProxyJump）执行一条命令并返回输出与退出码。不会写入界面里已打开的终端。Run one command on a saved host, separate from interactive tabs.", json!({
+                tool_def("list_terminal_sessions", "列出工作台里已经打开的交互终端。run_command 会优先打进这里。List open interactive tabs, including cwd and last exit.", json!({"type": "object", "properties": {}}), json!([])),
+                tool_def("run_command", "优先把命令打进已经打开的匹配终端并等待退出码。没有标签，或 new_session 为 true 时，才另开一条 SSH。Prefer an open tab; dial only when none matches or new_session is true.", json!({
                     "type": "object",
                     "properties": {
-                        "host": {"type": "string", "description": "主机 id 或别名"},
+                        "host": {"type": "string", "description": "主机 id、别名，或 local"},
                         "command": {"type": "string", "description": "要执行的命令"},
-                        "timeout_seconds": {"type": "integer", "description": "超时秒数，默认 30，最大 120"}
+                        "session_id": {"type": "string", "description": "指定已经打开的终端"},
+                        "timeout_seconds": {"type": "integer", "description": "超时秒数，默认 30，最大 120"},
+                        "new_session": {"type": "boolean", "description": "为 true 时不复用已打开的终端"},
+                        "wait": {"type": "boolean", "description": "为 false 时立刻返回 jobId，用 poll_command 接着看"}
                     },
-                    "required": ["host", "command"]
-                }), json!(["host", "command"])),
+                    "required": ["command"]
+                }), json!(["command"])),
+                tool_def("open_terminal", "按主机别名打开交互终端；已有匹配标签时直接返回它。Open or reuse an interactive tab.", json!({"type":"object","properties":{"host":{"type":"string"},"kind":{"type":"string","description":"ssh 或 local"},"new_session":{"type":"boolean"},"cols":{"type":"integer"},"rows":{"type":"integer"}}}), json!([])),
+                tool_def("close_terminal", "关闭一个交互终端。Close an interactive tab.", json!({"type":"object","properties":{"session_id":{"type":"string"}},"required":["session_id"]}), json!(["session_id"])),
+                tool_def("read_terminal", "读取已打开终端的近期屏幕、cwd 和上次退出码。Read the live screen of an open tab.", json!({"type":"object","properties":{"session_id":{"type":"string"},"host":{"type":"string"},"max_chars":{"type":"integer"}}}), json!([])),
+                tool_def("write_terminal", "向已打开的终端发送按键。submit 为 true 时补上回车。Type into an open tab.", json!({"type":"object","properties":{"session_id":{"type":"string"},"host":{"type":"string"},"data":{"type":"string"},"submit":{"type":"boolean"}}}), json!([])),
+                tool_def("interrupt_terminal", "向已打开的终端发送 Ctrl+C。Interrupt the foreground command in a tab.", json!({"type":"object","properties":{"session_id":{"type":"string"},"host":{"type":"string"}}}), json!([])),
+                tool_def("start_command", "把命令打进已打开的终端并立刻返回 jobId，不阻塞。Start a command on an open tab without waiting.", json!({"type":"object","properties":{"session_id":{"type":"string"},"host":{"type":"string"},"command":{"type":"string"}},"required":["command"]}), json!(["command"])),
+                tool_def("poll_command", "查看 start_command 或 run_command 的 jobId。Poll a command started on an open tab.", json!({"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]}), json!(["job_id"])),
+                tool_def("cancel_command", "取消一条还在跑的命令（Ctrl+C）。Cancel a running tab command.", json!({"type":"object","properties":{"job_id":{"type":"string"},"session_id":{"type":"string"}}}), json!([])),
+                tool_def("search_history", "搜索数据目录里的命令历史，最近的在前。Search persistent command history.", json!({"type":"object","properties":{"query":{"type":"string"},"host":{"type":"string"},"limit":{"type":"integer"}}}), json!([])),
+                tool_def("list_groups", "列出主机分组，不含凭据。List host groups.", json!({"type":"object","properties":{}}), json!([])),
+                tool_def("list_snippets", "列出快捷命令。秘密样式的参数会被抹掉。List snippets without secret values.", json!({"type":"object","properties":{}}), json!([])),
+                tool_def("save_snippet", "保存一条快捷命令。拒绝私钥、密码和令牌。Save a snippet.", json!({"type":"object","properties":{"name":{"type":"string"},"command":{"type":"string"},"category":{"type":"string"},"description":{"type":"string"}},"required":["name","command"]}), json!(["name","command"])),
+                tool_def("run_snippet", "按名称或 id 执行已保存的快捷命令，优先打进已打开的终端。Run a saved snippet.", json!({"type":"object","properties":{"name":{"type":"string"},"id":{"type":"string"},"host":{"type":"string"},"session_id":{"type":"string"},"timeout_seconds":{"type":"integer"},"new_session":{"type":"boolean"}}}), json!([])),
+                tool_def("list_tunnels", "列出端口转发规则和是否在跑。不含凭据。List tunnel rules.", json!({"type":"object","properties":{}}), json!([])),
+                tool_def("start_tunnel", "按规则 id 或名称启动已保存的端口转发。这条连接独立于交互终端。Start a saved port forward.", json!({"type":"object","properties":{"id":{"type":"string"},"name":{"type":"string"}}}), json!([])),
+                tool_def("stop_tunnel", "停止一条端口转发。Stop a port forward.", json!({"type":"object","properties":{"id":{"type":"string"},"name":{"type":"string"}}}), json!([])),
+                tool_def("get_settings", "读取非机密的工作台设置。Read non-secret settings.", json!({"type":"object","properties":{}}), json!([])),
+                tool_def("list_bindings", "列出本地项目路径和远端目录的绑定。List project path bindings.", json!({"type":"object","properties":{}}), json!([])),
+                tool_def("save_binding", "记住本地路径对应哪台主机的哪个远端目录。Save a project path binding.", json!({"type":"object","properties":{"name":{"type":"string"},"localPath":{"type":"string"},"host":{"type":"string"},"remotePath":{"type":"string"},"note":{"type":"string"},"id":{"type":"string"}},"required":["localPath","host","remotePath"]}), json!(["localPath","host","remotePath"])),
+                tool_def("delete_binding", "删除一条路径绑定。Delete a project path binding.", json!({"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}), json!(["id"])),
+                tool_def("set_host_note", "写主机备注（端口、服务名、注意事项）。拒绝私钥、密码和令牌。Set a host note without secrets.", json!({"type":"object","properties":{"host":{"type":"string"},"notes":{"type":"string"}},"required":["host"]}), json!(["host"])),
                 tool_def("session_status", "查看 run_command 留下的命令记录。不含界面里的交互终端，那些用 list_terminal_sessions。Read exec records for this MCP process.", json!({
                     "type": "object",
                     "properties": {"session_id": {"type": "string", "description": "可选会话 ID"}}
                 }), json!([])),
-                tool_def("sftp_list", "通过 SFTP 列出目标主机指定目录的文件与权限。List directory contents over SFTP.", json!({
+                tool_def("sftp_list", "另开一条 SSH 用 SFTP 列目录，不占用交互终端那条线程。List a directory over a separate SSH login.", json!({
                     "type": "object",
                     "properties": {
                         "host": {"type": "string", "description": "主机 id 或别名"},
@@ -151,7 +277,7 @@ impl McpHandler {
                     },
                     "required": ["host", "path"]
                 }), json!(["host", "path"])),
-                tool_def("sftp_write", "通过 SFTP 将 UTF-8 文本内容写入远端文件（慎用，会覆盖原文件，上限 512KB）。Write UTF-8 text file over SFTP.", json!({
+                tool_def("sftp_write", "另开一条 SSH，把 UTF-8 文本写入远端文件（覆盖，上限 512KB）。不占用交互终端。Write a UTF-8 file over a separate SSH login.", json!({
                     "type": "object",
                     "properties": {
                         "host": {"type": "string", "description": "主机 id 或别名"},
@@ -160,6 +286,8 @@ impl McpHandler {
                     },
                     "required": ["host", "path", "content"]
                 }), json!(["host", "path", "content"])),
+                tool_def("sftp_download", "另开一条 SSH 下载小文件，返回 base64，上限 256KB。拒绝私钥。Download a small remote file without using the interactive tab.", json!({"type":"object","properties":{"host":{"type":"string"},"path":{"type":"string"},"max_bytes":{"type":"integer"}},"required":["host","path"]}), json!(["host","path"])),
+                tool_def("sftp_upload", "另开一条 SSH 上传 base64 小文件，上限 512KB。拒绝私钥。Upload a small file without using the interactive tab.", json!({"type":"object","properties":{"host":{"type":"string"},"path":{"type":"string"},"content_base64":{"type":"string"}},"required":["host","path","content_base64"]}), json!(["host","path","content_base64"])),
                 tool_def("system_metrics", "采集目标主机 CPU、内存、Swap、磁盘挂载、网卡和 Top 进程状态。Sample server system metrics.", json!({
                     "type": "object",
                     "properties": {"host": {"type": "string", "description": "主机 id 或别名"}},
@@ -173,24 +301,75 @@ impl McpHandler {
         let name = params.get("name").and_then(|v| v.as_str()).ok_or("缺少工具名称")?;
         let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
         match name {
-            "list_hosts" => {
-                let hosts = lock(&self.hosts);
-                let text = serde_json::to_string_pretty(&hosts.list_public()).unwrap_or_else(|_| "[]".into());
-                Ok(tool_text(text, false))
-            }
+            "list_hosts" => self.tool_list_hosts(),
+            "list_groups" => self.tool_list_groups(),
             "list_terminal_sessions" => self.tool_terminal_sessions(),
-            "session_status" => self.tool_session_status(args.get("session_id").and_then(|v| v.as_str())),
+            "open_terminal" => self.tool_open_terminal(args),
+            "close_terminal" => self.tool_close_terminal(args),
+            "read_terminal" => self.tool_read_terminal(args),
+            "write_terminal" => self.tool_write_terminal(args),
+            "interrupt_terminal" => self.tool_interrupt_terminal(args),
             "run_command" => self.tool_run_command(args),
+            "start_command" => self.tool_start_command(args),
+            "poll_command" => self.tool_poll_command(args),
+            "cancel_command" => self.tool_cancel_command(args),
+            "session_status" => self.tool_session_status(args.get("session_id").and_then(|v| v.as_str())),
+            "search_history" => self.tool_search_history(args),
+            "list_snippets" => self.tool_list_snippets(),
+            "save_snippet" => self.tool_save_snippet(args),
+            "run_snippet" => self.tool_run_snippet(args),
+            "list_tunnels" => self.tool_list_tunnels(),
+            "start_tunnel" => self.tool_start_tunnel(args),
+            "stop_tunnel" => self.tool_stop_tunnel(args),
+            "get_settings" => self.tool_get_settings(),
+            "list_bindings" => self.tool_list_bindings(),
+            "save_binding" => self.tool_save_binding(args),
+            "delete_binding" => self.tool_delete_binding(args),
+            "set_host_note" => self.tool_set_host_note(args),
             "sftp_list" => self.tool_sftp_list(args),
             "sftp_mkdir" => self.tool_sftp_mkdir(args),
             "sftp_read" => self.tool_sftp_read(args),
             "sftp_write" => self.tool_sftp_write(args),
+            "sftp_download" => self.tool_sftp_download(args),
+            "sftp_upload" => self.tool_sftp_upload(args),
             "system_metrics" => self.tool_system_metrics(args),
             _ => Err(format!("未知的工具: {name}")),
         }
     }
 
-    fn connect(&self, host_query: &str) -> Result<ssh2::Session, String> {
+    pub(crate) fn tool_list_hosts(&self) -> Result<Value, String> {
+        let hosts = lock(&self.hosts);
+        let items: Vec<Value> = hosts
+            .list_public()
+            .into_iter()
+            .map(|host| {
+                let mut value = serde_json::to_value(&host).unwrap_or(json!({}));
+                if let Some(notes) = value.get("notes").and_then(|item| item.as_str()) {
+                    value["notes"] = json!(self.scrub(notes));
+                }
+                value
+            })
+            .collect();
+        Ok(tool_text(serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".into()), false))
+    }
+
+    pub(crate) fn scrub(&self, text: &str) -> String {
+        let token = self.token.trim();
+        let extra: Vec<&str> = if token.len() >= 8 { vec![token] } else { Vec::new() };
+        redact_secrets(text, &extra)
+    }
+
+    fn scrub_tool(&self, mut value: Value) -> Value {
+        if let Some(text) = value.pointer("/content/0/text").and_then(|item| item.as_str()) {
+            let clean = self.scrub(text);
+            if let Some(slot) = value.pointer_mut("/content/0/text") {
+                *slot = json!(clean);
+            }
+        }
+        value
+    }
+
+    pub(crate) fn connect(&self, host_query: &str) -> Result<ssh2::Session, String> {
         let chain = {
             let hosts = lock(&self.hosts);
             resolve_targets(&hosts, host_query)?
@@ -205,118 +384,6 @@ impl McpHandler {
             }
         }
         Ok(session)
-    }
-
-    fn tool_run_command(&self, args: Value) -> Result<Value, String> {
-        let host = args.get("host").and_then(|v| v.as_str()).ok_or("缺少 host 参数")?;
-        let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("").trim();
-        if command.is_empty() {
-            return Err("命令是空的".into());
-        }
-        if command.chars().count() > 8000 {
-            return Err("命令太长了（上限 8000 个字符）".into());
-        }
-        if command.contains('\0') {
-            return Err("命令里不能有空字符".into());
-        }
-        let timeout = args.get("timeout_seconds").and_then(|v| v.as_u64()).unwrap_or(30).clamp(1, 120);
-        let chain = {
-            let hosts = lock(&self.hosts);
-            resolve_targets(&hosts, host)?
-        };
-        let leaf = chain.last().cloned().ok_or_else(|| "跳板机链为空".to_string())?;
-        let (session, learned) = connect_chain(&chain).map_err(|err| err.to_string())?;
-        {
-            let mut hosts = lock(&self.hosts);
-            for (id, fingerprint) in &learned {
-                if !fingerprint.is_empty() {
-                    let _ = hosts.remember_fingerprint(id, fingerprint);
-                }
-            }
-        }
-        session.set_timeout((timeout * 1000) as u32);
-        let session_id = Uuid::new_v4().to_string();
-        match exec_command(&session, command) {
-            Ok(result) => {
-                let (stdout, out_cut) = truncate_output(result.stdout, OUTPUT_LIMIT);
-                let (stderr, err_cut) = truncate_output(result.stderr, OUTPUT_LIMIT);
-                lock(&self.sessions).insert(
-                    session_id.clone(),
-                    SessionRecord {
-                        id: session_id.clone(),
-                        alias: host.to_string(),
-                        host: leaf.host.clone(),
-                        command: command.to_string(),
-                        status: "closed".into(),
-                        exit_code: Some(result.exit_code),
-                        timed_out: Some(false),
-                        error: None,
-                    },
-                );
-                Ok(tool_text(
-                    serde_json::to_string_pretty(&json!({
-                        "sessionId": session_id,
-                        "alias": host,
-                        "host": leaf.host,
-                        "port": leaf.port,
-                        "username": leaf.username,
-                        "command": command,
-                        "exitCode": result.exit_code,
-                        "timedOut": false,
-                        "truncated": out_cut || err_cut,
-                        "stdout": stdout,
-                        "stderr": stderr
-                    }))
-                    .unwrap_or_default(),
-                    false,
-                ))
-            }
-            Err(err) if is_timeout(&err) => {
-                lock(&self.sessions).insert(
-                    session_id.clone(),
-                    SessionRecord {
-                        id: session_id.clone(),
-                        alias: host.to_string(),
-                        host: leaf.host,
-                        command: command.to_string(),
-                        status: "closed".into(),
-                        exit_code: None,
-                        timed_out: Some(true),
-                        error: Some(err.to_string()),
-                    },
-                );
-                Ok(tool_text(
-                    serde_json::to_string_pretty(&json!({
-                        "sessionId": session_id,
-                        "alias": host,
-                        "command": command,
-                        "exitCode": null,
-                        "timedOut": true,
-                        "truncated": false,
-                        "stdout": "",
-                        "stderr": ""
-                    }))
-                    .unwrap_or_default(),
-                    false,
-                ))
-            }
-            Err(err) => {
-                lock(&self.sessions).insert(
-                    session_id.clone(),
-                    SessionRecord {
-                        id: session_id,
-                        alias: host.to_string(),
-                        host: leaf.host,
-                        command: command.to_string(),
-                        status: "error".into(),
-                        exit_code: None,
-                        timed_out: None,
-                        error: Some(err.to_string()),
-                    },
-                );
-                Err(format!("执行错误: {err}"))
-            }
-        }
     }
 
     fn tool_terminal_sessions(&self) -> Result<Value, String> {
@@ -334,8 +401,8 @@ impl McpHandler {
         Ok(tool_text(
             serde_json::to_string_pretty(&json!({
                 "attached": true,
-                "sessions": hub.list_sessions(),
-                "note": "这些是界面里的交互终端。run_command 和 session_status 是另一批一次性命令记录，不会写进这些终端，也不会复用它们的 SSH 连接。"
+                "sessions": hub.list_views(),
+                "note": "这些是界面里的交互终端。run_command 会优先把命令打进匹配的标签。文件工具另开连接，避免堵住这个终端。"
             }))
             .unwrap_or_default(),
             false,
@@ -412,16 +479,11 @@ fn tool_def(name: &str, description: &str, schema: Value, _required: Value) -> V
     })
 }
 
-fn tool_text(text: String, is_error: bool) -> Value {
+pub(crate) fn tool_text(text: String, is_error: bool) -> Value {
     json!({
         "content": [{"type": "text", "text": text}],
         "isError": is_error
     })
-}
-
-fn is_timeout(err: &crate::ssh::SshError) -> bool {
-    let text = err.to_string().to_ascii_lowercase();
-    text.contains("timeout") || text.contains("timed out")
 }
 
 pub fn run_stdio_loop(handler: McpHandler) -> Result<(), Box<dyn std::error::Error>> {

@@ -3,17 +3,21 @@ use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use base64::Engine;
 use serde::Serialize;
 use serde_json::{json, Value};
 use ssh2::Session;
 use tokio::sync::broadcast;
 use uuid::Uuid;
+use crate::history::{CommandHistory, HistoryDraft};
 use crate::monitor::{metrics_from_samples, PROBE_COMMAND};
 use crate::pty::LocalShellSession;
+use crate::screen::{note_cd, parse_end_marker, transcript_before_marker, LineAssembler, Screen, ShellKind};
 use crate::shared_ssh::{emit_data, SharedSsh};
-use crate::ssh::{connect_chain, exec_command};
+use crate::ssh::{connect_chain, exec_command, truncate_output};
 use crate::state::lock;
 use crate::store::HostStore;
+use crate::terminal::TerminalView;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ConnectInfo {
@@ -39,20 +43,101 @@ struct Tab {
     stop: Arc<AtomicBool>,
 }
 
+struct TabMind {
+    shell: ShellKind,
+    cwd: Option<String>,
+    last_exit: Option<i32>,
+    screen: Screen,
+    assembler: LineAssembler,
+    job: Option<LiveJob>,
+    alias: String,
+    kind: String,
+    host_id: Option<String>,
+}
+
+struct LiveJob {
+    id: String,
+    nonce: String,
+    history_id: Option<String>,
+    log_mark: u64,
+    command: String,
+    done: bool,
+    cancelled: bool,
+    exit_code: Option<i32>,
+    cwd: Option<String>,
+}
+
+struct HistoryFinish {
+    id: String,
+    exit_code: Option<i32>,
+    cwd: Option<String>,
+    ok: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct JobView {
+    #[serde(rename = "jobId")]
+    pub job_id: String,
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    pub command: String,
+    pub done: bool,
+    pub cancelled: bool,
+    #[serde(rename = "timedOut")]
+    pub timed_out: bool,
+    #[serde(rename = "exitCode")]
+    pub exit_code: Option<i32>,
+    pub cwd: Option<String>,
+    pub stdout: String,
+    pub truncated: bool,
+    pub streams: String,
+}
+
 pub struct SessionHub {
     tabs: Mutex<HashMap<String, Tab>>,
+    screens: Arc<Mutex<HashMap<String, Arc<Mutex<TabMind>>>>>,
+    job_index: Arc<Mutex<HashMap<String, String>>>,
+    finished: Arc<Mutex<HashMap<String, JobView>>>,
+    history: Arc<Mutex<Option<Arc<CommandHistory>>>>,
     events: broadcast::Sender<String>,
     interval: Arc<AtomicU64>,
 }
 
 impl SessionHub {
     pub fn new(interval_ms: u64) -> Arc<Self> {
-        let (events, _) = broadcast::channel(256);
+        let (events, _) = broadcast::channel::<String>(256);
+        let screens = Arc::new(Mutex::new(HashMap::new()));
+        let history = Arc::new(Mutex::new(None));
+        let finished = Arc::new(Mutex::new(HashMap::new()));
+        let pump_screens = screens.clone();
+        let pump_history = history.clone();
+        let pump_finished = finished.clone();
+        let mut pump_rx = events.subscribe();
+        std::thread::Builder::new()
+            .name("term-screen".into())
+            .spawn(move || {
+                loop {
+                    match pump_rx.blocking_recv() {
+                        Ok(raw) => apply_terminal_output(&raw, &pump_screens, &pump_history, &pump_finished),
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            })
+            .expect("无法启动终端回放线程");
         Arc::new(Self {
             tabs: Mutex::new(HashMap::new()),
+            screens,
+            job_index: Arc::new(Mutex::new(HashMap::new())),
+            finished,
+            history,
             events,
             interval: Arc::new(AtomicU64::new(interval_ms.clamp(1000, 10_000))),
         })
+    }
+
+    pub fn set_history(&self, history: Arc<CommandHistory>) {
+        *lock(&self.history) = Some(history);
     }
 
     pub fn set_interval(&self, ms: u64) {
@@ -81,6 +166,8 @@ impl SessionHub {
         let (session, mut reader) = LocalShellSession::open(None, cols, rows).map_err(|err| err.to_string())?;
         let session = Arc::new(Mutex::new(session));
         let id = Uuid::new_v4().to_string();
+        let cwd = dirs::home_dir().map(|path| path.to_string_lossy().to_string());
+        self.register_mind(&id, ShellKind::local_default(), cwd, "local", "本机终端", None);
         let events = self.events.clone();
         let id_reader = id.clone();
         std::thread::spawn(move || {
@@ -140,6 +227,7 @@ impl SessionHub {
         channel.shell().map_err(|err| format!("无法启动远程 Shell: {err}"))?;
 
         let id = Uuid::new_v4().to_string();
+        self.register_mind(&id, ShellKind::Posix, None, "ssh", &leaf.alias, Some(leaf.id.clone()));
         let stop = Arc::new(AtomicBool::new(false));
         let shared = SharedSsh::spawn(session, channel, self.events.clone(), id.clone(), stop.clone());
 
@@ -175,6 +263,18 @@ impl SessionHub {
         let tab = lock(&self.tabs).remove(session_id);
         let Some(tab) = tab else { return };
         self.broadcast(json!({"type": "session:closed", "sessionId": session_id}));
+        if let Some(mind) = lock(&self.screens).remove(session_id) {
+            let mut mind = lock(&mind);
+            if let Some(job) = mind.job.as_mut() {
+                if !job.done {
+                    job.done = true;
+                    job.cancelled = true;
+                }
+            }
+            if let Some(view) = snapshot(session_id, &mind) {
+                lock(&self.finished).insert(view.job_id.clone(), view);
+            }
+        }
         tab.stop.store(true, Ordering::Relaxed);
         match tab.io {
             TabIo::Local(session) => {
@@ -200,14 +300,14 @@ impl SessionHub {
                     msg.get("sessionId").and_then(|v| v.as_str()),
                     msg.get("data").and_then(|v| v.as_str()),
                 ) {
-                    let _ = self.write(id, data);
+                    let _ = self.write_input(id, data, "interactive");
                 }
             }
             "term:broadcast" => {
                 let data = msg.get("data").and_then(|v| v.as_str()).unwrap_or("");
                 if let Some(ids) = msg.get("sessionIds").and_then(|v| v.as_array()) {
                     for id in ids.iter().filter_map(|v| v.as_str()) {
-                        let _ = self.write(id, data);
+                        let _ = self.write_input(id, data, "interactive");
                     }
                 }
             }
@@ -222,18 +322,6 @@ impl SessionHub {
         }
     }
 
-    fn write(&self, session_id: &str, data: &str) -> bool {
-        let io = {
-            let tabs = lock(&self.tabs);
-            tabs.get(session_id).map(|tab| tab.io.clone())
-        };
-        match io {
-            Some(TabIo::Local(session)) => lock(&session).write(data.as_bytes()).is_ok(),
-            Some(TabIo::Remote(ssh)) => ssh.write(data.as_bytes()),
-            None => false,
-        }
-    }
-
     fn resize(&self, session_id: &str, cols: u32, rows: u32) {
         let io = {
             let tabs = lock(&self.tabs);
@@ -245,6 +333,330 @@ impl SessionHub {
                 let _ = lock(&session).resize(clamp_dim(cols, 80), clamp_dim(rows, 24));
             }
             None => {}
+        }
+    }
+
+    pub fn list_views(&self) -> Vec<TerminalView> {
+        let tabs = lock(&self.tabs);
+        let screens = lock(&self.screens);
+        tabs.values()
+            .map(|tab| {
+                let mind = screens.get(&tab.info.session_id).map(|mind| lock(mind));
+                TerminalView {
+                    session_id: tab.info.session_id.clone(),
+                    kind: tab.info.kind.clone(),
+                    alias: tab.info.alias.clone(),
+                    username: tab.info.username.clone(),
+                    host: tab.info.host.clone(),
+                    port: tab.info.port,
+                    host_id: tab.host_id.clone(),
+                    cwd: mind.as_ref().and_then(|item| item.cwd.clone()),
+                    last_exit: mind.as_ref().and_then(|item| item.last_exit),
+                    busy: mind.as_ref().and_then(|item| item.job.as_ref()).map(|job| !job.done).unwrap_or(false),
+                }
+            })
+            .collect()
+    }
+
+    pub fn read_screen(&self, session_id: &str, max_chars: usize) -> Result<Value, String> {
+        let mind = self.mind(session_id)?;
+        let view = self.list_views().into_iter().find(|item| item.session_id == session_id);
+        let mind = lock(&mind);
+        let (text, truncated) = mind.screen.text(max_chars.clamp(1, 100_000));
+        Ok(json!({
+            "sessionId": session_id,
+            "kind": mind.kind,
+            "alias": mind.alias,
+            "hostId": mind.host_id,
+            "cwd": mind.cwd,
+            "lastExit": mind.last_exit,
+            "busy": mind.job.as_ref().map(|job| !job.done).unwrap_or(false),
+            "text": text,
+            "truncated": truncated,
+            "attached": view.is_some()
+        }))
+    }
+
+    pub fn write_input(&self, session_id: &str, data: &str, source: &str) -> Result<(), String> {
+        let mind = self.mind(session_id)?;
+        let submitted = {
+            let mut mind = lock(&mind);
+            let lines = mind.assembler.feed(data);
+            for line in &lines {
+                note_cd(&mut mind.cwd, line);
+            }
+            lines
+        };
+        if !submitted.is_empty() {
+            let meta = self.tab_meta(session_id);
+            if let Some(history) = self.history_handle() {
+                for line in submitted {
+                    history.record(HistoryDraft {
+                        host_id: meta.host_id.clone(),
+                        alias: meta.alias.clone(),
+                        session_kind: meta.kind.clone(),
+                        session_id: Some(session_id.to_string()),
+                        command: line,
+                        cwd: meta.cwd.clone(),
+                        exit_code: None,
+                        ok: None,
+                        source: source.to_string(),
+                    });
+                }
+            }
+        }
+        self.write_raw(session_id, data)
+    }
+
+    pub fn begin_command(&self, session_id: &str, command: &str, source: &str) -> Result<JobView, String> {
+        let command = command.trim();
+        if command.is_empty() {
+            return Err("命令是空的".into());
+        }
+        if command.chars().count() > 8000 {
+            return Err("命令太长了（上限 8000 个字符）".into());
+        }
+        if command.contains('\0') || command.contains("__TS_END_") {
+            return Err("命令里不能有空字符或结果标记".into());
+        }
+        let mind = self.mind(session_id)?;
+        let shell = lock(&mind).shell;
+        if lock(&mind).job.as_ref().map(|job| !job.done).unwrap_or(false) {
+            return Err("这个终端还有一条命令在跑。先 poll_command，或 interrupt_terminal。".into());
+        }
+        let nonce = command_nonce();
+        let job_id = Uuid::new_v4().to_string();
+        let meta = self.tab_meta(session_id);
+        let redacted = self
+            .history_handle()
+            .map(|history| history.redact_text(command))
+            .unwrap_or_else(|| command.to_string());
+        let history_id = self.history_handle().and_then(|history| {
+            history.record(HistoryDraft {
+                host_id: meta.host_id.clone(),
+                alias: meta.alias.clone(),
+                session_kind: meta.kind.clone(),
+                session_id: Some(session_id.to_string()),
+                command: command.to_string(),
+                cwd: meta.cwd.clone(),
+                exit_code: None,
+                ok: None,
+                source: source.to_string(),
+            })
+        });
+        {
+            let mut mind = lock(&mind);
+            if mind.job.as_ref().map(|job| !job.done).unwrap_or(false) {
+                return Err("这个终端还有一条命令在跑。先 poll_command，或 interrupt_terminal。".into());
+            }
+            if let Some(view) = snapshot(session_id, &mind) {
+                lock(&self.finished).insert(view.job_id.clone(), view);
+            }
+            let mark = mind.screen.mark();
+            mind.job = Some(LiveJob {
+                id: job_id.clone(),
+                nonce: nonce.clone(),
+                history_id,
+                log_mark: mark,
+                command: redacted,
+                done: false,
+                cancelled: false,
+                exit_code: None,
+                cwd: None,
+            });
+        }
+        lock(&self.job_index).insert(job_id.clone(), session_id.to_string());
+        let payload = format!("{command}\r{}\r", shell.trailer(&nonce));
+        if let Err(err) = self.write_raw(session_id, &payload) {
+            let mut mind = lock(&mind);
+            if let Some(job) = mind.job.as_mut() {
+                job.done = true;
+                job.cancelled = true;
+            }
+            return Err(err);
+        }
+        self.poll_job(&job_id)
+    }
+
+    pub fn wait_job(&self, job_id: &str, timeout: Duration) -> Result<JobView, String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let view = self.poll_job(job_id)?;
+            if view.done {
+                return Ok(view);
+            }
+            if Instant::now() >= deadline {
+                let mut view = view;
+                view.timed_out = true;
+                return Ok(view);
+            }
+            std::thread::sleep(Duration::from_millis(40));
+        }
+    }
+
+    pub fn poll_job(&self, job_id: &str) -> Result<JobView, String> {
+        let session_id = lock(&self.job_index)
+            .get(job_id)
+            .cloned()
+            .ok_or_else(|| "没有这条命令。它可能属于另一个进程。".to_string())?;
+        let Some(mind) = lock(&self.screens).get(&session_id).cloned() else {
+            return lock(&self.finished)
+                .get(job_id)
+                .cloned()
+                .ok_or_else(|| "这条命令所在的终端已经关闭".to_string());
+        };
+        let finish = {
+            let mut mind = lock(&mind);
+            let finish = observe_job(&mut mind);
+            if let Some(view) = snapshot(&session_id, &mind).filter(|view| view.job_id == job_id) {
+                lock(&self.finished).insert(view.job_id.clone(), view);
+            }
+            finish
+        };
+        self.apply_finish(finish);
+        lock(&self.finished)
+            .get(job_id)
+            .cloned()
+            .ok_or_else(|| "没有这条命令".to_string())
+    }
+
+    pub fn cancel_job(&self, job_id: &str) -> Result<JobView, String> {
+        let session_id = lock(&self.job_index)
+            .get(job_id)
+            .cloned()
+            .ok_or_else(|| "没有这条命令".to_string())?;
+        let _ = self.write_raw(&session_id, "\u{3}");
+        if let Some(mind) = lock(&self.screens).get(&session_id).cloned() {
+            let finish = {
+                let mut mind = lock(&mind);
+                let finish = if let Some(job) = mind.job.as_mut().filter(|job| job.id == job_id && !job.done) {
+                    job.done = true;
+                    job.cancelled = true;
+                    job.history_id.clone().map(|id| HistoryFinish {
+                        id,
+                        exit_code: None,
+                        cwd: mind.cwd.clone(),
+                        ok: Some(false),
+                    })
+                } else {
+                    None
+                };
+                if let Some(view) = snapshot(&session_id, &mind).filter(|view| view.job_id == job_id) {
+                    lock(&self.finished).insert(view.job_id.clone(), view);
+                }
+                finish
+            };
+            self.apply_finish(finish);
+        }
+        self.poll_job(job_id)
+    }
+
+    pub fn interrupt(&self, session_id: &str) -> Result<(), String> {
+        self.write_raw(session_id, "\u{3}")?;
+        if let Some(mind) = lock(&self.screens).get(session_id).cloned() {
+            let finish = {
+                let mut mind = lock(&mind);
+                let finish = if let Some(job) = mind.job.as_mut().filter(|job| !job.done) {
+                    job.done = true;
+                    job.cancelled = true;
+                    job.history_id.clone().map(|id| HistoryFinish {
+                        id,
+                        exit_code: None,
+                        cwd: mind.cwd.clone(),
+                        ok: Some(false),
+                    })
+                } else {
+                    None
+                };
+                if let Some(view) = snapshot(session_id, &mind) {
+                    lock(&self.finished).insert(view.job_id.clone(), view);
+                }
+                finish
+            };
+            self.apply_finish(finish);
+        }
+        Ok(())
+    }
+
+    fn register_mind(
+        &self,
+        id: &str,
+        shell: ShellKind,
+        cwd: Option<String>,
+        kind: &str,
+        alias: &str,
+        host_id: Option<String>,
+    ) {
+        lock(&self.screens).insert(
+            id.to_string(),
+            Arc::new(Mutex::new(TabMind {
+                shell,
+                cwd,
+                last_exit: None,
+                screen: Screen::new(),
+                assembler: LineAssembler::new(),
+                job: None,
+                alias: alias.to_string(),
+                kind: kind.to_string(),
+                host_id,
+            })),
+        );
+    }
+
+    fn mind(&self, session_id: &str) -> Result<Arc<Mutex<TabMind>>, String> {
+        lock(&self.screens)
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| "找不到这个会话".to_string())
+    }
+
+    fn write_raw(&self, session_id: &str, data: &str) -> Result<(), String> {
+        let io = {
+            let tabs = lock(&self.tabs);
+            tabs.get(session_id)
+                .map(|tab| tab.io.clone())
+                .ok_or_else(|| "找不到这个会话".to_string())?
+        };
+        let ok = match io {
+            TabIo::Local(session) => lock(&session).write(data.as_bytes()).is_ok(),
+            TabIo::Remote(ssh) => ssh.write(data.as_bytes()),
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err("终端已经关闭".into())
+        }
+    }
+
+    fn tab_meta(&self, session_id: &str) -> TabMeta {
+        let tabs = lock(&self.tabs);
+        let screens = lock(&self.screens);
+        let cwd = screens.get(session_id).and_then(|mind| lock(mind).cwd.clone());
+        if let Some(tab) = tabs.get(session_id) {
+            TabMeta {
+                alias: Some(tab.info.alias.clone()),
+                host_id: tab.host_id.clone(),
+                kind: tab.info.kind.clone(),
+                cwd,
+            }
+        } else {
+            TabMeta {
+                alias: None,
+                host_id: None,
+                kind: "local".into(),
+                cwd,
+            }
+        }
+    }
+
+    fn history_handle(&self) -> Option<Arc<CommandHistory>> {
+        lock(&self.history).clone()
+    }
+
+    fn apply_finish(&self, finish: Option<HistoryFinish>) {
+        let Some(finish) = finish else { return };
+        if let Some(history) = self.history_handle() {
+            history.finish(&finish.id, finish.exit_code, finish.cwd, finish.ok);
         }
     }
 
@@ -271,8 +683,97 @@ impl SessionHub {
     }
 }
 
+struct TabMeta {
+    alias: Option<String>,
+    host_id: Option<String>,
+    kind: String,
+    cwd: Option<String>,
+}
+
 fn clamp_dim(value: u32, fallback: u32) -> u32 {
     if value == 0 { fallback } else { value.min(512) }
+}
+
+fn command_nonce() -> String {
+    Uuid::new_v4().simple().to_string().chars().take(8).collect()
+}
+
+fn observe_job(mind: &mut TabMind) -> Option<HistoryFinish> {
+    let (log_mark, nonce, already_done) = {
+        let job = mind.job.as_ref()?;
+        (job.log_mark, job.nonce.clone(), job.done)
+    };
+    if already_done {
+        return None;
+    }
+    let (raw, _) = mind.screen.since(log_mark);
+    let (code, cwd) = parse_end_marker(&raw, &nonce)?;
+    let history_id = {
+        let job = mind.job.as_mut()?;
+        job.done = true;
+        job.exit_code = Some(code);
+        job.cwd = Some(cwd.clone());
+        job.history_id.clone()
+    };
+    mind.cwd = Some(cwd.clone());
+    mind.last_exit = Some(code);
+    history_id.map(|id| HistoryFinish {
+        id,
+        exit_code: Some(code),
+        cwd: Some(cwd),
+        ok: Some(code == 0),
+    })
+}
+
+fn snapshot(session_id: &str, mind: &TabMind) -> Option<JobView> {
+    let job = mind.job.as_ref()?;
+    let (raw, log_cut) = mind.screen.since(job.log_mark);
+    let marker = parse_end_marker(&raw, &job.nonce);
+    let (stdout, cut) = truncate_output(transcript_before_marker(&raw, &job.nonce), 200_000);
+    Some(JobView {
+        job_id: job.id.clone(),
+        session_id: session_id.to_string(),
+        command: job.command.clone(),
+        done: job.done || marker.is_some(),
+        cancelled: job.cancelled,
+        timed_out: false,
+        exit_code: job.exit_code.or_else(|| marker.as_ref().map(|(code, _)| *code)),
+        cwd: job.cwd.clone().or_else(|| marker.map(|(_, cwd)| cwd)).or(mind.cwd.clone()),
+        stdout,
+        truncated: log_cut || cut,
+        streams: "merged".into(),
+    })
+}
+
+fn apply_terminal_output(
+    raw: &str,
+    screens: &Mutex<HashMap<String, Arc<Mutex<TabMind>>>>,
+    history: &Mutex<Option<Arc<CommandHistory>>>,
+    finished: &Mutex<HashMap<String, JobView>>,
+) {
+    let Ok(msg) = serde_json::from_str::<Value>(raw) else { return };
+    if msg.get("type").and_then(|value| value.as_str()) != Some("term:data") {
+        return;
+    }
+    let Some(session_id) = msg.get("sessionId").and_then(|value| value.as_str()) else { return };
+    let Some(data) = msg.get("data").and_then(|value| value.as_str()) else { return };
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else { return };
+    let Some(mind) = lock(screens).get(session_id).cloned() else { return };
+    let (finish, view) = {
+        let mut mind = lock(&mind);
+        mind.screen.ingest(&bytes);
+        let finish = observe_job(&mut mind);
+        let view = snapshot(session_id, &mind).filter(|view| view.done);
+        (finish, view)
+    };
+    if let Some(view) = view {
+        lock(finished).insert(view.job_id.clone(), view);
+    }
+    if let Some(finish) = finish {
+        if let Some(history) = lock(history).clone() {
+            history.finish(&finish.id, finish.exit_code, finish.cwd, finish.ok);
+        }
+    }
 }
 
 fn sample_shared(ssh: &SharedSsh) -> Result<crate::monitor::ServerMetrics, String> {

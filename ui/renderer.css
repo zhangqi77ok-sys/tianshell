@@ -814,6 +814,37 @@ button.danger {
 .snippet-card:hover {
   border-color: var(--amber);
 }
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow: auto;
+  margin-top: 8px;
+}
+.history-item {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+.history-item:hover {
+  border-color: var(--teal);
+}
+.history-meta {
+  color: var(--muted);
+  font-size: 10px;
+}
+.history-cmd {
+  font-family:
+    Consolas,
+    "Cascadia Mono",
+    monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
 dialog {
   background: var(--surface);
   color: var(--ink);

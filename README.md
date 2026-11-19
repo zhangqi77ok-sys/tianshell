@@ -136,15 +136,16 @@ npm test
 
 | 工具 | 作用 |
 | :--- | :--- |
-| `list_hosts` | 列出已保存主机、分组与跳板机关联（不含密码与私钥） |
-| `list_terminal_sessions` | 列出工作台里已经打开的交互终端。stdio 独立进程没有附着工作台时，这个列表是空的 |
-| `run_command` | 另开一条 SSH（支持 `ProxyJump`）执行命令，返回输出与退出码。不往界面终端里写 |
-| `session_status` | 查看 `run_command` 留下的记录，不含界面终端 |
-| `sftp_list` | 列出远端 POSIX 目录内容与权限 |
-| `sftp_mkdir` | 新建远端目录 |
-| `sftp_read` | 只读读取远端 UTF-8 文本/配置文件（上限 256KB） |
-| `sftp_write` | 将 UTF-8 文本写回远端文件（上限 512KB） |
-| `system_metrics` | 采样并返回目标主机 CPU / 内存 / Swap / 磁盘 / 负载 / Top 进程 |
+| `list_terminal_sessions` / `open_terminal` / `close_terminal` | 列出、打开或关闭交互终端。已有匹配标签时直接复用 |
+| `read_terminal` / `write_terminal` / `interrupt_terminal` | 读当前屏幕、cwd、上次退出码；把按键打进这个标签；Ctrl+C |
+| `run_command` | 优先打进已打开的标签并等待结果。没有标签，或 `new_session: true` 时才另开 SSH |
+| `start_command` / `poll_command` / `cancel_command` | 在已打开的标签里跑长命令，不把调用方堵在一次请求上 |
+| `search_history` | 搜索数据目录里的命令历史（时间、主机、命令、cwd、退出状态） |
+| `list_hosts` / `list_groups` / `list_snippets` / `run_snippet` / `set_host_note` | 主机、分组、快捷命令和备注。不返回密码、私钥、口令或 MCP 令牌 |
+| `list_tunnels` / `start_tunnel` / `stop_tunnel` | 查看或启停已经保存的端口转发。转发使用自己的连接 |
+| `list_bindings` / `save_binding` | 记住本地项目路径对应哪台主机的哪个远端目录 |
+| `sftp_list` / `sftp_read` / `sftp_write` / `sftp_download` / `sftp_upload` / `sftp_mkdir` | 文件操作另开一条 SSH，不占用交互终端那条线程 |
+| `session_status` / `system_metrics` / `get_settings` | 一次性执行记录、采样，以及非机密设置 |
 
 ## 目录结构
 
@@ -177,7 +178,9 @@ test          Node 版单元测试和本机 SSH/SFTP 集成测试
 - 同一个 SSH 标签的终端、SFTP 和监控共用一条连接。大文件传输会占住这条连接，传完之前终端会停一下。端口转发仍然是另一条连接。
 - 上传先收下整个请求体（上限 64MB）再写入远端；下载是分块送出的。
 - 本地转发、SOCKS5 和远程转发的代码在 Rust 里。这次的 Rust 测试没有启动 SSH 服务，所以没有做真实的远端隧道或 SFTP 往返。那些真实连接仍由 Node 测试覆盖。
-- MCP 的 `run_command` 和界面里的交互终端仍是两套会话。前者每次自己登录；后者可以用 `list_terminal_sessions` 看到，但不会被写进去。
+- 文件工具故意另开一条 SSH。交互终端、SFTP 和监控如果挤在同一条 libssh2 线程上，按键会排队；这条限制要等终端线程不再被文件和采样堵住之后，才能改成复用同一次登录。
+- 打进交互终端的命令，标准输出和标准错误混在同一份屏幕里。退出码来自一段收尾：远端和 POSIX 本机用 `$?`，Windows 本机 PowerShell 用 `$LASTEXITCODE`。`fish` / `csh` 读不懂这段收尾，这时 `exitCode` 为空，屏幕文本仍然返回。
+- 交互历史记的是 TianShell 送进终端的那一行。Windows ConPTY 里，只发生在控制台内部的行编辑（例如方向键翻历史）不会被还原成命令。
 - 本机终端在 Windows 上依赖 ConPTY。更老的、没有 ConPTY 的系统打不开本机标签，而不是退回管道。
 
 ## 许可

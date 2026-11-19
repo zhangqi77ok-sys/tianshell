@@ -39,6 +39,19 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
   return json.data;
 }
 
+export interface HistoryEntry {
+  id: string;
+  at: string;
+  hostId?: string;
+  alias?: string;
+  sessionKind: string;
+  command: string;
+  cwd?: string;
+  exitCode?: number;
+  ok?: boolean;
+  source: string;
+}
+
 export const webApi = {
   getHosts: () => apiRequest<{ hosts: PublicHost[]; groups: HostGroup[]; dataDir: string }>('/api/hosts'),
   saveHost: (draft: HostDraft) => apiRequest<PublicHost>('/api/hosts', { method: 'POST', body: JSON.stringify(draft) }),
@@ -46,6 +59,11 @@ export const webApi = {
   saveGroup: (name: string, id?: string) => apiRequest<HostGroup>('/api/groups', { method: 'POST', body: JSON.stringify({ name, id }) }),
   deleteGroup: (id: string) => apiRequest<boolean>(`/api/groups/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
+  listHistory: (query = '') => {
+    const params = new URLSearchParams({ limit: '80' });
+    if (query.trim()) params.set('q', query.trim());
+    return apiRequest<HistoryEntry[]>(`/api/history?${params.toString()}`);
+  },
   listSnippets: () => apiRequest<CommandSnippet[]>('/api/snippets'),
   saveSnippet: (draft: Omit<CommandSnippet, 'id'> & { id?: string }) =>
     apiRequest<CommandSnippet>('/api/snippets', { method: 'POST', body: JSON.stringify(draft) }),

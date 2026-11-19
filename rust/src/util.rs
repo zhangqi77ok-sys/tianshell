@@ -50,6 +50,37 @@ pub fn restrict_user_file(path: &Path) {
     }
 }
 
+pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        restrict_user_dir(parent);
+    }
+    let tmp = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+    std::fs::write(&tmp, bytes)?;
+    restrict_user_file(&tmp);
+    let mut last = None;
+    for attempt in 0..6 {
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => {
+                last = None;
+                break;
+            }
+            Err(err) => {
+                last = Some(err);
+                if attempt < 5 {
+                    std::thread::sleep(std::time::Duration::from_millis(20 * (attempt as u64 + 1)));
+                }
+            }
+        }
+    }
+    if let Some(err) = last {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    restrict_user_file(path);
+    Ok(())
+}
+
 pub fn restrict_user_dir(path: &Path) {
     #[cfg(unix)]
     {
