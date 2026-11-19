@@ -36,10 +36,9 @@ export async function build(options = { quiet: false }) {
     format: 'iife',
     outfile: path.join(dist, 'renderer.js'),
     sourcemap: false,
-    loader: { '.css': 'empty' },
+    loader: { '.css': 'css' },
   });
   copyFileSync(path.join(root, 'src/renderer/index.html'), path.join(dist, 'index.html'));
-  copyFileSync(path.join(root, 'src/renderer/styles.css'), path.join(dist, 'renderer.css'));
   const ui = path.join(root, 'ui');
   mkdirSync(ui, { recursive: true });
   copyFileSync(path.join(dist, 'index.html'), path.join(ui, 'index.html'));

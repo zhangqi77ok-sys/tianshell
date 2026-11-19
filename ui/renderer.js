@@ -6689,22 +6689,39 @@ WARNING: This link could potentially be dangerous`)) {
       this.memEl.textContent = `${formatBytes(metrics.memUsedKb * 1024)} / ${formatBytes(metrics.memTotalKb * 1024)}`;
       const swPct = metrics.swapTotalKb > 0 ? metrics.swapUsedKb / metrics.swapTotalKb * 100 : 0;
       this.setBar(this.swapBar, swPct);
-      this.swapEl.textContent = metrics.swapTotalKb > 0 ? `${formatBytes(metrics.swapUsedKb * 1024)} / ${formatBytes(metrics.swapTotalKb * 1024)}` : "\u672A\u542F\u7528";
+      this.swapEl.textContent = metrics.swapTotalKb > 0 ? `${formatBytes(metrics.swapUsedKb * 1024)} / ${formatBytes(metrics.swapTotalKb * 1024)}` : "\u2014";
       this.rxEl.textContent = `${formatBytes(metrics.net.rxBytesPerSec)}/s`;
       this.txEl.textContent = `${formatBytes(metrics.net.txBytesPerSec)}/s`;
       this.loadEl.textContent = metrics.loadAvg.map((x) => x.toFixed(2)).join("  ");
       this.disksEl.textContent = "";
       for (const d of metrics.disks.slice(0, 4)) {
         const row = document.createElement("div");
-        row.className = "mono";
-        row.textContent = `\u{1F4BD} ${d.mount} \xB7 ${d.usePercent}% (${formatBytes(d.usedKb * 1024)})`;
+        row.className = "metric-line";
+        const name = document.createElement("span");
+        name.className = "metric-name";
+        name.textContent = d.mount;
+        name.title = `${d.mount} \xB7 ${formatBytes(d.usedKb * 1024)}`;
+        const num = document.createElement("span");
+        num.className = "metric-num mono";
+        num.textContent = `${Math.round(d.usePercent)}%`;
+        row.append(name, num);
         this.disksEl.appendChild(row);
       }
       this.procsEl.textContent = "";
       for (const p of metrics.processes.slice(0, 5)) {
         const row = document.createElement("div");
-        row.className = "mono";
-        row.textContent = `\u2699 ${p.command} \xB7 CPU ${p.cpuPercent}% \xB7 MEM ${p.memPercent}%`;
+        row.className = "proc-line";
+        const name = document.createElement("span");
+        name.className = "metric-name";
+        name.textContent = p.command;
+        name.title = p.command;
+        const cpu = document.createElement("span");
+        cpu.className = "metric-num mono";
+        cpu.textContent = `${p.cpuPercent.toFixed(1)}%`;
+        const mem = document.createElement("span");
+        mem.className = "metric-num mono";
+        mem.textContent = `${p.memPercent.toFixed(1)}%`;
+        row.append(name, cpu, mem);
         this.procsEl.appendChild(row);
       }
     }
@@ -6847,6 +6864,30 @@ WARNING: This link could potentially be dangerous`)) {
   };
 
   // src/renderer/renderer.ts
+  var TERM_FONT = 'Consolas, "Cascadia Mono", "Courier New", monospace';
+  var TERM_THEME = {
+    background: "#0c0c0c",
+    foreground: "#cccccc",
+    cursor: "#f2f2f2",
+    cursorAccent: "#0c0c0c",
+    selectionBackground: "#264f78",
+    black: "#0c0c0c",
+    red: "#c50f1f",
+    green: "#13a10e",
+    yellow: "#c19c00",
+    blue: "#3b78ff",
+    magenta: "#bc3fbc",
+    cyan: "#11a8cd",
+    white: "#cccccc",
+    brightBlack: "#767676",
+    brightRed: "#e74856",
+    brightGreen: "#16c60c",
+    brightYellow: "#f9f1a5",
+    brightBlue: "#3b78ff",
+    brightMagenta: "#b4009e",
+    brightCyan: "#61d6d6",
+    brightWhite: "#f2f2f2"
+  };
   var activeId = null;
   var fontSize = 14;
   var tabs = /* @__PURE__ */ new Map();
@@ -6934,18 +6975,24 @@ WARNING: This link could potentially be dangerous`)) {
       selectTab(info.sessionId);
       return;
     }
-    const stage = document.getElementById("terminal-stage");
+    const stage2 = document.getElementById("terminal-stage");
     const slot = document.createElement("div");
     slot.className = "term-slot hidden";
-    stage.appendChild(slot);
+    stage2.appendChild(slot);
     const term = new import_xterm.Terminal({
-      fontFamily: '"Cascadia Code", "JetBrains Mono", Consolas, monospace',
+      fontFamily: TERM_FONT,
       fontSize,
+      fontWeight: 400,
+      fontWeightBold: 600,
+      lineHeight: 1.15,
+      letterSpacing: 0,
       cursorBlink: true,
-      // 本地管道终端开启换行归位；远端 SSH PTY 保留原始控制流以免影响 TUI 应用
+      cursorStyle: "bar",
+      cursorWidth: 2,
+      // 本地管道终端开启换行归位；远端 SSH PTY 自己发 CR，不能再转换以免打乱网格
       convertEol: info.kind === "local",
-      scrollback: 5e3,
-      theme: { background: "#0b0e12", foreground: "#eae4d8", cursor: "#e3a008" }
+      scrollback: 8e3,
+      theme: TERM_THEME
     });
     const fit = new import_addon_fit.FitAddon();
     term.loadAddon(fit);
@@ -6953,6 +7000,37 @@ WARNING: This link could potentially be dangerous`)) {
     term.onData((data) => sendInput(data));
     tabs.set(info.sessionId, { info, term, fit, slot, metrics: null, closed: false });
     selectTab(info.sessionId);
+  }
+  function fitTab(tab) {
+    if (tab.slot.classList.contains("hidden")) return;
+    tab.fit.fit();
+    const { cols, rows } = tab.term;
+    if (!tab.closed && cols > 1 && rows > 1 && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "term:resize", sessionId: tab.info.sessionId, cols, rows }));
+    }
+  }
+  function measureGrid() {
+    const stage2 = document.getElementById("terminal-stage");
+    if (!stage2) return { cols: 100, rows: 28 };
+    const slot = document.createElement("div");
+    slot.className = "term-slot";
+    stage2.appendChild(slot);
+    const term = new import_xterm.Terminal({
+      fontFamily: TERM_FONT,
+      fontSize,
+      lineHeight: 1.15,
+      letterSpacing: 0,
+      theme: TERM_THEME
+    });
+    const fit = new import_addon_fit.FitAddon();
+    term.loadAddon(fit);
+    term.open(slot);
+    fit.fit();
+    const cols = term.cols > 1 ? term.cols : 100;
+    const rows = term.rows > 1 ? term.rows : 28;
+    term.dispose();
+    slot.remove();
+    return { cols, rows };
   }
   function showMetricsFor(tab) {
     if (!tab || tab.closed || tab.info.kind !== "ssh") {
@@ -6979,8 +7057,7 @@ WARNING: This link could potentially be dangerous`)) {
       const isAct = id === activeId;
       tab.slot.classList.toggle("hidden", !isAct);
       if (isAct) {
-        tab.fit.fit();
-        if (!tab.closed && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "term:resize", sessionId: id, cols: tab.term.cols, rows: tab.term.rows }));
+        fitTab(tab);
         tab.term.focus();
         showMetricsFor(tab);
       }
@@ -7023,7 +7100,10 @@ WARNING: This link could potentially be dangerous`)) {
   }
   async function openSshTab(hostId) {
     try {
-      createTermInstance(await webApi.openSession({ kind: "ssh", hostId, cols: 100, rows: 30 }));
+      const grid = measureGrid();
+      createTermInstance(await webApi.openSession({ kind: "ssh", hostId, cols: grid.cols, rows: grid.rows }));
+      const tab = activeId ? tabs.get(activeId) : void 0;
+      if (tab) requestAnimationFrame(() => fitTab(tab));
     } catch (err) {
       showToast(err instanceof Error ? err.message : "\u8FDE\u63A5\u5931\u8D25");
     }
@@ -7047,7 +7127,10 @@ WARNING: This link could potentially be dangerous`)) {
     showToast(`\u672A\u627E\u5230 "${needle}"`);
   }
   function bindGlobalUi() {
-    document.getElementById("open-local")?.addEventListener("click", async () => createTermInstance(await webApi.openSession({ kind: "local" })));
+    document.getElementById("open-local")?.addEventListener("click", async () => {
+      const grid = measureGrid();
+      createTermInstance(await webApi.openSession({ kind: "local", cols: grid.cols, rows: grid.rows }));
+    });
     document.getElementById("open-tunnels")?.addEventListener("click", () => void monCtrl.openTunnelModal());
     document.getElementById("inspector-toggle")?.addEventListener("click", () => document.getElementById("inspector")?.classList.toggle("hidden"));
     document.getElementById("theme-toggle")?.addEventListener("click", async () => {
@@ -7069,9 +7152,12 @@ WARNING: This link could potentially be dangerous`)) {
       const startY = down.clientY;
       const startH = termPane.getBoundingClientRect().height;
       const onMove = (mv) => {
-        const nextH = Math.max(120, Math.min(wrap.getBoundingClientRect().height - 120, startH + (mv.clientY - startY)));
+        const nextH = Math.max(160, Math.min(wrap.getBoundingClientRect().height - 140, startH + (mv.clientY - startY)));
         termPane.style.flex = `0 0 ${nextH}px`;
-        if (activeId) tabs.get(activeId)?.fit.fit();
+        sftpPane.style.flex = "1 1 auto";
+        sftpPane.style.maxHeight = "none";
+        const tab = activeId ? tabs.get(activeId) : void 0;
+        if (tab) fitTab(tab);
       };
       const onUp = () => {
         window.removeEventListener("mousemove", onMove);
@@ -7109,11 +7195,20 @@ WARNING: This link could potentially be dangerous`)) {
     }
   });
   window.addEventListener("resize", () => {
-    const tab = activeId ? tabs.get(activeId) : null;
-    if (tab) {
-      tab.fit.fit();
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "term:resize", sessionId: activeId, cols: tab.term.cols, rows: tab.term.rows }));
-    }
+    const tab = activeId ? tabs.get(activeId) : void 0;
+    if (tab) fitTab(tab);
+  });
+  var stage = document.getElementById("terminal-stage");
+  if (stage && "ResizeObserver" in window) {
+    const observer = new ResizeObserver(() => {
+      const tab = activeId ? tabs.get(activeId) : void 0;
+      if (tab) fitTab(tab);
+    });
+    observer.observe(stage);
+  }
+  void document.fonts?.ready.then(() => {
+    const tab = activeId ? tabs.get(activeId) : void 0;
+    if (tab) fitTab(tab);
   });
   async function applySettings() {
     const s = await webApi.getSettings();

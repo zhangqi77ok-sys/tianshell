@@ -64,7 +64,7 @@ export class MonitorAndToolsController {
     this.setBar(this.swapBar, swPct);
     this.swapEl.textContent = metrics.swapTotalKb > 0
       ? `${formatBytes(metrics.swapUsedKb * 1024)} / ${formatBytes(metrics.swapTotalKb * 1024)}`
-      : '未启用';
+      : '—';
 
     this.rxEl.textContent = `${formatBytes(metrics.net.rxBytesPerSec)}/s`;
     this.txEl.textContent = `${formatBytes(metrics.net.txBytesPerSec)}/s`;
@@ -73,16 +73,33 @@ export class MonitorAndToolsController {
     this.disksEl.textContent = '';
     for (const d of metrics.disks.slice(0, 4)) {
       const row = document.createElement('div');
-      row.className = 'mono';
-      row.textContent = `💽 ${d.mount} · ${d.usePercent}% (${formatBytes(d.usedKb * 1024)})`;
+      row.className = 'metric-line';
+      const name = document.createElement('span');
+      name.className = 'metric-name';
+      name.textContent = d.mount;
+      name.title = `${d.mount} · ${formatBytes(d.usedKb * 1024)}`;
+      const num = document.createElement('span');
+      num.className = 'metric-num mono';
+      num.textContent = `${Math.round(d.usePercent)}%`;
+      row.append(name, num);
       this.disksEl.appendChild(row);
     }
 
     this.procsEl.textContent = '';
     for (const p of metrics.processes.slice(0, 5)) {
       const row = document.createElement('div');
-      row.className = 'mono';
-      row.textContent = `⚙ ${p.command} · CPU ${p.cpuPercent}% · MEM ${p.memPercent}%`;
+      row.className = 'proc-line';
+      const name = document.createElement('span');
+      name.className = 'metric-name';
+      name.textContent = p.command;
+      name.title = p.command;
+      const cpu = document.createElement('span');
+      cpu.className = 'metric-num mono';
+      cpu.textContent = `${p.cpuPercent.toFixed(1)}%`;
+      const mem = document.createElement('span');
+      mem.className = 'metric-num mono';
+      mem.textContent = `${p.memPercent.toFixed(1)}%`;
+      row.append(name, cpu, mem);
       this.procsEl.appendChild(row);
     }
   }
