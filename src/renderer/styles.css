@@ -137,6 +137,11 @@ button.danger { background: var(--danger); color: #fff; border-color: var(--dang
 .snippet-list { display: flex; flex-direction: column; gap: 6px; }
 .snippet-card { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
 .snippet-card:hover { border-color: var(--amber); }
+.history-list { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow: auto; margin-top: 8px; }
+.history-item { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; cursor: pointer; }
+.history-item:hover { border-color: var(--teal); }
+.history-meta { color: var(--muted); font-size: 10px; }
+.history-cmd { font-family: Consolas, "Cascadia Mono", monospace; font-size: 11px; white-space: pre-wrap; word-break: break-all; }
 
 dialog { background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 12px; padding: 18px; width: min(500px, 92vw); }
 dialog.wide-dialog { width: min(760px, 94vw); }

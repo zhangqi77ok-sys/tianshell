@@ -6152,6 +6152,11 @@ WARNING: This link could potentially be dangerous`)) {
     deleteHost: (id) => apiRequest(`/api/hosts/${encodeURIComponent(id)}`, { method: "DELETE" }),
     saveGroup: (name, id) => apiRequest("/api/groups", { method: "POST", body: JSON.stringify({ name, id }) }),
     deleteGroup: (id) => apiRequest(`/api/groups/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    listHistory: (query = "") => {
+      const params = new URLSearchParams({ limit: "80" });
+      if (query.trim()) params.set("q", query.trim());
+      return apiRequest(`/api/history?${params.toString()}`);
+    },
     listSnippets: () => apiRequest("/api/snippets"),
     saveSnippet: (draft) => apiRequest("/api/snippets", { method: "POST", body: JSON.stringify(draft) }),
     deleteSnippet: (id) => apiRequest(`/api/snippets/${encodeURIComponent(id)}`, { method: "DELETE" }),
@@ -6658,6 +6663,8 @@ WARNING: This link could potentially be dangerous`)) {
     disksEl = document.getElementById("mon-disks");
     procsEl = document.getElementById("mon-procs");
     snippetsEl = document.getElementById("snippet-list");
+    historyEl = document.getElementById("history-list");
+    historyQuery = "";
     tunnelDialogOpen = false;
     renderMetrics(metrics, mode = metrics ? "live" : "idle") {
       const bento = document.getElementById("mon-bento");
@@ -6730,6 +6737,43 @@ WARNING: This link could potentially be dangerous`)) {
       const safe = Math.max(0, Math.min(100, pct));
       bar.style.width = `${safe}%`;
       bar.classList.toggle("danger", safe >= 85);
+    }
+    async refreshHistory() {
+      if (!this.historyEl) return;
+      try {
+        const rows = await webApi.listHistory(this.historyQuery);
+        this.historyEl.textContent = "";
+        if (!rows.length) {
+          const empty = document.createElement("div");
+          empty.className = "empty-muted";
+          empty.textContent = "\u8FD8\u6CA1\u6709\u547D\u4EE4\u5386\u53F2\u3002\u5728\u7EC8\u7AEF\u91CC\u56DE\u8F66\uFF0C\u6216\u8BA9 MCP \u6267\u884C\u547D\u4EE4\u540E\u4F1A\u51FA\u73B0\u5728\u8FD9\u91CC\u3002";
+          this.historyEl.appendChild(empty);
+          return;
+        }
+        for (const row of rows) {
+          const card = document.createElement("button");
+          card.type = "button";
+          card.className = "history-item";
+          card.title = "\u53D1\u9001\u5230\u5F53\u524D\u7EC8\u7AEF";
+          const meta = document.createElement("div");
+          meta.className = "history-meta";
+          const where = row.alias || (row.sessionKind === "local" ? "\u672C\u673A" : row.sessionKind);
+          const status = row.exitCode === void 0 ? "" : ` \xB7 ${row.exitCode === 0 ? "\u6210\u529F" : `\u9000\u51FA ${row.exitCode}`}`;
+          meta.textContent = `${row.at.slice(0, 19).replace("T", " ")} \xB7 ${where}${status}`;
+          const cmd = document.createElement("div");
+          cmd.className = "history-cmd";
+          cmd.textContent = row.command;
+          card.append(meta, cmd);
+          card.addEventListener("click", () => this.deps.onSendCommand(`${row.command}\r`));
+          this.historyEl.appendChild(card);
+        }
+      } catch {
+        this.historyEl.textContent = "";
+        const empty = document.createElement("div");
+        empty.className = "empty-muted";
+        empty.textContent = "\u547D\u4EE4\u5386\u53F2\u7531\u5F53\u524D\u5DE5\u4F5C\u53F0\u4FDD\u5B58\u3002";
+        this.historyEl.appendChild(empty);
+      }
     }
     async refreshSnippets() {
       const list = await webApi.listSnippets();
@@ -6827,6 +6871,11 @@ WARNING: This link could potentially be dangerous`)) {
     }
     bindDialogs() {
       const snipDlg = document.getElementById("snippet-dialog");
+      document.getElementById("history-refresh")?.addEventListener("click", () => void this.refreshHistory());
+      document.getElementById("history-filter")?.addEventListener("input", (event) => {
+        this.historyQuery = event.target.value;
+        void this.refreshHistory();
+      });
       document.getElementById("add-snippet")?.addEventListener("click", () => snipDlg.showModal());
       document.getElementById("cancel-snippet")?.addEventListener("click", () => snipDlg.close());
       document.getElementById("snippet-form")?.addEventListener("submit", async (e) => {
@@ -6959,6 +7008,7 @@ WARNING: This link could potentially be dangerous`)) {
   }
   async function refreshLive(kind) {
     if (kind === "snippets" || kind === "disk") await monCtrl.refreshSnippets();
+    if (kind === "history" || kind === "disk") await monCtrl.refreshHistory();
     if (kind === "settings" || kind === "disk") await applySettings();
     if (kind === "tunnels" || kind === "disk") monCtrl.refreshTunnelsIfOpen();
     if (kind === "hosts" || kind === "disk" || kind === "") await treeCtrl.refresh();

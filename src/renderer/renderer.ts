@@ -116,6 +116,7 @@ function handleWsEvent(msg: Record<string, unknown>): void {
 
 async function refreshLive(kind: string): Promise<void> {
   if (kind === 'snippets' || kind === 'disk') await monCtrl.refreshSnippets();
+  if (kind === 'history' || kind === 'disk') await monCtrl.refreshHistory();
   if (kind === 'settings' || kind === 'disk') await applySettings();
   if (kind === 'tunnels' || kind === 'disk') monCtrl.refreshTunnelsIfOpen();
   if (kind === 'hosts' || kind === 'disk' || kind === '') await treeCtrl.refresh();

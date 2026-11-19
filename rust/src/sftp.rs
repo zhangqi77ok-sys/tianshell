@@ -103,6 +103,38 @@ pub fn write_text(sess: &Session, file_path: &str, content: &str) -> Result<(), 
     write_bytes(sess, file_path, content.as_bytes(), |_, _| true)
 }
 
+pub fn read_bytes_limited(sess: &Session, file_path: &str, max_bytes: usize) -> Result<(Vec<u8>, bool), SftpError> {
+    let limit = max_bytes.min(262_144);
+    let sftp = sess.sftp()?;
+    let mut file = sftp.open(Path::new(file_path))?;
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 8192];
+    while buf.len() <= limit {
+        let n = file.read(&mut tmp)?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if buf.len() > limit {
+            break;
+        }
+    }
+    let truncated = buf.len() > limit;
+    if truncated {
+        buf.truncate(limit);
+    }
+    if looks_like_private_key(&buf) {
+        return Err(SftpError::Rejected("拒绝返回私钥内容".into()));
+    }
+    Ok((buf, truncated))
+}
+
+fn looks_like_private_key(buf: &[u8]) -> bool {
+    let head = &buf[..buf.len().min(4096)];
+    let text = String::from_utf8_lossy(head);
+    text.contains("PRIVATE KEY") || text.contains("-----BEGIN")
+}
+
 pub fn read_text_limited(sess: &Session, file_path: &str, max_bytes: usize) -> Result<RemoteText, SftpError> {
     let limit = max_bytes.min(262_144);
     let sftp = sess.sftp()?;
@@ -125,6 +157,9 @@ pub fn read_text_limited(sess: &Session, file_path: &str, max_bytes: usize) -> R
     }
     if buf.iter().take(1024).any(|byte| *byte == 0) {
         return Err(SftpError::Rejected("检测到二进制文件，暂不支持在线文本编辑".into()));
+    }
+    if looks_like_private_key(&buf) {
+        return Err(SftpError::Rejected("拒绝返回私钥内容".into()));
     }
     Ok(RemoteText {
         content: String::from_utf8_lossy(&buf).into_owned(),

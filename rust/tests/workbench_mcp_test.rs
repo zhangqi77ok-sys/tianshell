@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tempfile::tempdir;
 use tianshell_core::http_server::{start_workbench, ServerOptions};
-use tianshell_core::mcp::{JsonRpcRequest, McpHandler};
+use tianshell_core::mcp::{tool_names, JsonRpcRequest, McpHandler};
 use tianshell_core::runtime::read_runtime;
 use tianshell_core::store::HostStore;
 use tianshell_core::vault::load_or_create_master_key;
@@ -34,20 +34,10 @@ fn mcp_handler_lists_public_hosts_and_workbench_tools() {
         })
         .unwrap();
     let tools = listed["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 9);
     let names: Vec<&str> = tools.iter().filter_map(|tool| tool["name"].as_str()).collect();
-    for name in [
-        "list_hosts",
-        "list_terminal_sessions",
-        "run_command",
-        "session_status",
-        "sftp_list",
-        "sftp_mkdir",
-        "sftp_read",
-        "sftp_write",
-        "system_metrics",
-    ] {
-        assert!(names.contains(&name), "missing {name}");
+    assert_eq!(names.len(), tool_names().len());
+    for name in tool_names() {
+        assert!(names.contains(name), "missing {name}");
     }
     let terminals = handler
         .handle_request(JsonRpcRequest {
@@ -310,6 +300,139 @@ fn decode_ws_text(buf: &mut Vec<u8>) -> String {
     out
 }
 
+#[test]
+fn hands_use_the_open_tab_and_leave_secrets_out_of_memory() {
+    let dir = tempdir().unwrap();
+    let server = start_workbench(ServerOptions {
+        data_dir: Some(dir.path().to_path_buf()),
+        port: Some(0),
+        open_browser: false,
+    })
+    .expect("workbench");
+    let headers = Some(server.token.as_str());
+    let (status, _, body) = http(
+        server.port,
+        "POST",
+        "/api/hosts",
+        headers,
+        Some(r#"{"alias":"lab","host":"10.2.2.2","username":"ops","authType":"password","secret":"hidden-password"}"#),
+    );
+    assert_eq!(status, 200, "{body}");
+    let (status, _, body) = http(server.port, "POST", "/api/sessions", headers, Some(r#"{"kind":"local"}"#));
+    assert_eq!(status, 200, "{body}");
+    let session_id = serde_json::from_str::<Value>(&body).unwrap()["data"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}"#;
+    let (status, response_headers, body) = http_with_bearer(server.port, "POST", "/mcp", &server.token, None, Some(init));
+    assert_eq!(status, 200, "{body}");
+    let mcp_session = response_headers
+        .iter()
+        .find(|(name, _)| name == "mcp-session-id")
+        .map(|(_, value)| value.clone())
+        .unwrap();
+
+    let run = format!(
+        r#"{{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{{"name":"run_command","arguments":{{"host":"local","session_id":"{session_id}","command":"printf tianshell-hands-ok","timeout_seconds":15}}}}}}"#
+    );
+    let (status, _, body) = http_with_bearer(server.port, "POST", "/mcp", &server.token, Some(&mcp_session), Some(&run));
+    assert_eq!(status, 200, "{body}");
+    let payload = tool_json(&body);
+    assert_eq!(payload["attached"], true, "{body}");
+    assert_eq!(payload["sessionId"], session_id, "{body}");
+    assert_eq!(payload["exitCode"], 0, "{body}");
+    assert!(payload["stdout"].as_str().unwrap_or("").contains("tianshell-hands-ok"), "{body}");
+
+    let listed = mcp_call(server.port, &server.token, &mcp_session, "list_terminal_sessions", "{}");
+    let sessions = listed["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "{listed}");
+    assert_eq!(sessions[0]["sessionId"], session_id);
+
+    let secret = mcp_call(
+        server.port,
+        &server.token,
+        &mcp_session,
+        "run_command",
+        &format!(r#"{{"host":"local","session_id":"{session_id}","command":"printf done-$AWS_SECRET_ACCESS_KEY; export AWS_SECRET_ACCESS_KEY=supersecretvalue","timeout_seconds":15}}"#),
+    );
+    let secret_text = secret.to_string();
+    assert!(!secret_text.contains("supersecretvalue"), "{secret_text}");
+    let raw = std::fs::read_to_string(dir.path().join("command-history.json")).unwrap();
+    assert!(raw.contains("tianshell-hands-ok"), "{raw}");
+    assert!(!raw.contains("supersecretvalue"), "{raw}");
+    assert!(!raw.contains(&server.token), "{raw}");
+
+    let pem = "-----BEGIN OPENSSH PRIVATE KEY-----\\nabc\\n-----END OPENSSH PRIVATE KEY-----";
+    let note = mcp_call(
+        server.port,
+        &server.token,
+        &mcp_session,
+        "set_host_note",
+        &format!(r#"{{"host":"lab","notes":"{pem}"}}"#),
+    );
+    assert_eq!(note["isError"], true, "{note}");
+    assert!(!note.to_string().contains("BEGIN OPENSSH"));
+    let noted = mcp_call(
+        server.port,
+        &server.token,
+        &mcp_session,
+        "set_host_note",
+        r#"{"host":"lab","notes":"postgres on 5432"}"#,
+    );
+    assert!(noted.to_string().contains("postgres on 5432"), "{noted}");
+    let hosts = mcp_call(server.port, &server.token, &mcp_session, "list_hosts", "{}");
+    let hosts_text = hosts.to_string();
+    assert!(hosts_text.contains("postgres on 5432"), "{hosts_text}");
+    assert!(!hosts_text.contains("hidden-password"), "{hosts_text}");
+
+    let (status, _, body) = http(
+        server.port,
+        "POST",
+        "/api/snippets",
+        headers,
+        Some(r#"{"name":"db","category":"ops","command":"mysql --password=sekritvalue"}"#),
+    );
+    assert_eq!(status, 200, "{body}");
+    let snippets = mcp_call(server.port, &server.token, &mcp_session, "list_snippets", "{}");
+    let snippets_text = snippets.to_string();
+    assert!(!snippets_text.contains("sekritvalue"), "{snippets_text}");
+    assert!(snippets_text.contains("[redacted]"), "{snippets_text}");
+
+    let binding = mcp_call(
+        server.port,
+        &server.token,
+        &mcp_session,
+        "save_binding",
+        r#"{"name":"api","localPath":"/src/api","host":"lab","remotePath":"/srv/api","note":"port 8080"}"#,
+    );
+    assert_eq!(binding["remotePath"], "/srv/api", "{binding}");
+    drop(server);
+    let history = tianshell_core::history::CommandHistory::open(dir.path().join("command-history.json")).unwrap();
+    let again = history.search(Some("tianshell-hands-ok"), None, 5);
+    assert_eq!(again.len(), 1);
+    assert_eq!(again[0].exit_code, Some(0));
+    assert!(again[0].cwd.is_some(), "{again:?}");
+}
+
+fn tool_json(body: &str) -> Value {
+    let envelope: Value = serde_json::from_str(body).unwrap();
+    let text = envelope["result"]["content"][0]["text"].as_str().unwrap();
+    let mut parsed: Value = serde_json::from_str(text).unwrap_or(json!({"text": text}));
+    if envelope["result"]["isError"] == true {
+        parsed["isError"] = json!(true);
+    }
+    parsed
+}
+
+fn mcp_call(port: u16, token: &str, session: &str, name: &str, arguments: &str) -> Value {
+    let body = format!(r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#);
+    let (status, _, response) = http_with_bearer(port, "POST", "/mcp", token, Some(session), Some(&body));
+    assert_eq!(status, 200, "{response}");
+    tool_json(&response)
+}
+
 fn http(port: u16, method: &str, path: &str, token: Option<&str>, body: Option<&str>) -> (u16, Vec<(String, String)>, String) {
     let mut extra = String::new();
     if let Some(token) = token {
@@ -335,7 +458,7 @@ fn http_with_bearer(
 
 fn exchange(port: u16, method: &str, path: &str, extra_headers: &str, body: Option<&str>) -> (u16, Vec<(String, String)>, String) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    let timeout = if path == "/sse" { Duration::from_millis(400) } else { Duration::from_secs(8) };
+    let timeout = if path == "/sse" { Duration::from_millis(400) } else { Duration::from_secs(25) };
     stream.set_read_timeout(Some(timeout)).ok();
     stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
     let body = body.unwrap_or("");

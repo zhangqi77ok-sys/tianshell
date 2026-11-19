@@ -138,6 +138,15 @@
           </div>
           <div id="snippet-list" class="snippet-list"></div>
         </div>
+
+        <div class="inspector-section">
+          <div class="section-head">
+            <span>命令历史</span>
+            <button id="history-refresh" type="button">刷新</button>
+          </div>
+          <input id="history-filter" type="search" placeholder="搜索命令或主机" autocomplete="off" />
+          <div id="history-list" class="history-list"></div>
+        </div>
       </aside>
     </div>
 
@@ -212,7 +221,7 @@
       </header>
       <label>Streamable HTTP<input id="mcp-url" class="mono" readonly /></label>
       <label>本机令牌<input id="mcp-token" class="mono" readonly /></label>
-      <p class="panel-note">界面里的终端、SFTP 和监控共用这一条 SSH。<code>run_command</code> 会另开一条连接，不会往当前终端里打字。已打开的标签用工具 <code>list_terminal_sessions</code> 查看。</p>
+      <p class="panel-note">编码工具应先看已打开的标签，再往这个终端里打字。文件读写另开一条 SSH，避免堵住正在输入的会话。命令历史记在本机数据目录里。</p>
       <label>Cursor（<span class="mono">~/.cursor/mcp.json</span> 或项目 <span class="mono">.cursor/mcp.json</span>）<textarea id="mcp-cursor" class="mono mcp-config" readonly></textarea></label>
       <label>Claude Code（<span class="mono">.mcp.json</span>，必须带 type）<textarea id="mcp-claude" class="mono mcp-config" readonly></textarea></label>
       <div class="dialog-actions">

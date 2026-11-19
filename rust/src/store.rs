@@ -306,6 +306,31 @@ impl HostStore {
         Ok(record.to_public())
     }
 
+    pub fn set_notes(&mut self, query: &str, notes: Option<String>) -> Result<PublicHost, StoreError> {
+        if let Some(text) = notes.as_deref() {
+            if crate::redact::contains_secret(text) {
+                return Err(StoreError::Invalid("笔记里不能保存私钥、密码或令牌".into()));
+            }
+            if text.chars().count() > 2000 {
+                return Err(StoreError::Invalid("笔记太长了".into()));
+            }
+        }
+        let needle = query.trim();
+        if needle.is_empty() {
+            return Err(StoreError::Invalid("请指定主机".into()));
+        }
+        let host = self
+            .hosts
+            .iter_mut()
+            .find(|host| host.id == needle || host.alias.eq_ignore_ascii_case(needle))
+            .ok_or_else(|| StoreError::HostNotFound(needle.to_string()))?;
+        host.notes = notes.map(|text| text.trim().to_string()).filter(|text| !text.is_empty());
+        host.updated_at = iso_now();
+        let public = host.to_public();
+        self.persist()?;
+        Ok(public)
+    }
+
     pub fn delete(&mut self, id: &str) -> Result<bool, StoreError> {
         let before = self.hosts.len();
         self.hosts.retain(|h| h.id != id);

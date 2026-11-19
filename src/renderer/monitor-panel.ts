@@ -22,6 +22,8 @@ export class MonitorAndToolsController {
   private readonly disksEl = document.getElementById('mon-disks') as HTMLElement;
   private readonly procsEl = document.getElementById('mon-procs') as HTMLElement;
   private readonly snippetsEl = document.getElementById('snippet-list') as HTMLElement;
+  private readonly historyEl = document.getElementById('history-list') as HTMLElement;
+  private historyQuery = '';
 
   constructor(private readonly deps: MonitorPanelDeps) {
     this.bindDialogs();
@@ -108,6 +110,44 @@ export class MonitorAndToolsController {
     const safe = Math.max(0, Math.min(100, pct));
     bar.style.width = `${safe}%`;
     bar.classList.toggle('danger', safe >= 85);
+  }
+
+  async refreshHistory(): Promise<void> {
+    if (!this.historyEl) return;
+    try {
+      const rows = await webApi.listHistory(this.historyQuery);
+      this.historyEl.textContent = '';
+      if (!rows.length) {
+        const empty = document.createElement('div');
+        empty.className = 'empty-muted';
+        empty.textContent = '还没有命令历史。在终端里回车，或让 MCP 执行命令后会出现在这里。';
+        this.historyEl.appendChild(empty);
+        return;
+      }
+      for (const row of rows) {
+        const card = document.createElement('button');
+        card.type = 'button';
+        card.className = 'history-item';
+        card.title = '发送到当前终端';
+        const meta = document.createElement('div');
+        meta.className = 'history-meta';
+        const where = row.alias || (row.sessionKind === 'local' ? '本机' : row.sessionKind);
+        const status = row.exitCode === undefined ? '' : ` · ${row.exitCode === 0 ? '成功' : `退出 ${row.exitCode}`}`;
+        meta.textContent = `${row.at.slice(0, 19).replace('T', ' ')} · ${where}${status}`;
+        const cmd = document.createElement('div');
+        cmd.className = 'history-cmd';
+        cmd.textContent = row.command;
+        card.append(meta, cmd);
+        card.addEventListener('click', () => this.deps.onSendCommand(`${row.command}\r`));
+        this.historyEl.appendChild(card);
+      }
+    } catch {
+      this.historyEl.textContent = '';
+      const empty = document.createElement('div');
+      empty.className = 'empty-muted';
+      empty.textContent = '命令历史由当前工作台保存。';
+      this.historyEl.appendChild(empty);
+    }
   }
 
   async refreshSnippets(): Promise<void> {
@@ -209,6 +249,11 @@ export class MonitorAndToolsController {
 
   private bindDialogs(): void {
     const snipDlg = document.getElementById('snippet-dialog') as HTMLDialogElement;
+    document.getElementById('history-refresh')?.addEventListener('click', () => void this.refreshHistory());
+    document.getElementById('history-filter')?.addEventListener('input', (event) => {
+      this.historyQuery = (event.target as HTMLInputElement).value;
+      void this.refreshHistory();
+    });
     document.getElementById('add-snippet')?.addEventListener('click', () => snipDlg.showModal());
     document.getElementById('cancel-snippet')?.addEventListener('click', () => snipDlg.close());
     document.getElementById('snippet-form')?.addEventListener('submit', async (e) => {

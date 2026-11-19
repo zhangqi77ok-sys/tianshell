@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+use crate::history::CommandHistory;
 use crate::hub::SessionHub;
 use crate::mcp::McpHandler;
 use crate::store::{HostStore, SettingsStore, SnippetStore, TunnelStore};
@@ -18,6 +19,7 @@ pub struct AppState {
     pub tunnel_rules: Arc<Mutex<TunnelStore>>,
     pub settings: Arc<Mutex<SettingsStore>>,
     pub hub: Arc<SessionHub>,
+    pub history: Arc<CommandHistory>,
     pub tunnels: Arc<TunnelManager>,
     pub mcp: Arc<McpHandler>,
     pub transfers: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
