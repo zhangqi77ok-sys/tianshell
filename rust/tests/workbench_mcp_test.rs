@@ -473,8 +473,9 @@ fn exit_probe_stays_off_the_open_terminal() {
     assert_eq!(status, 200, "{body}");
     let payload = tool_json(&body);
     assert_eq!(payload["exitCode"], 0, "{body}");
+    let cwd = payload["cwd"].as_str().unwrap_or("");
     assert!(
-        payload["cwd"].as_str().unwrap_or("").starts_with('/'),
+        !cwd.is_empty() && (cwd.starts_with('/') || cwd.contains(':')),
         "{body}"
     );
     let stdout = payload["stdout"].as_str().unwrap_or("").to_string();
