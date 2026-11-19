@@ -1,132 +1,95 @@
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::env;
 use std::time::Duration;
-use tao::{
-    dpi::LogicalSize,
-    event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
-    window::WindowBuilder,
-};
-use wry::WebViewBuilder;
+use tianshell_core::http_server::{start_workbench, ServerOptions};
+use tianshell_core::VERSION;
 
-const BACKEND_ADDR: &str = "127.0.0.1:53901";
-const BACKEND_URL: &str = "http://127.0.0.1:53901/";
-
-fn backend_ready() -> bool {
-    let addr: SocketAddr = BACKEND_ADDR.parse().expect("static listen address");
-    std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
-}
-
-fn find_server_js() -> Option<PathBuf> {
-    let mut roots = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        roots.push(cwd);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let serve_only = args.iter().any(|arg| arg == "serve" || arg == "--serve" || arg == "--no-window");
+    let no_open = args.iter().any(|arg| arg == "--no-open");
+    let mut port = None;
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--port" {
+            port = args.get(index + 1).and_then(|value| value.parse().ok());
+            index += 2;
+            continue;
+        }
+        index += 1;
     }
-    if let Ok(exe) = std::env::current_exe() {
-        let mut dir = exe.parent().map(|p| p.to_path_buf());
-        let mut hops = 0;
-        while let Some(current) = dir {
-            roots.push(current.clone());
-            dir = current.parent().map(|p| p.to_path_buf());
-            hops += 1;
-            if hops >= 8 {
-                break;
+    let running = start_workbench(ServerOptions {
+        data_dir: None,
+        port,
+        open_browser: false,
+    })?;
+    eprintln!("{}", banner(&running));
+    let use_window = cfg!(feature = "desktop") && !serve_only;
+    if use_window {
+        #[cfg(feature = "desktop")]
+        {
+            if let Err(err) = run_window(&running.url) {
+                eprintln!("原生窗口没有打开：{err}");
+                eprintln!("可以改用浏览器打开上面的地址。");
+                if !no_open {
+                    open_browser(&running.url);
+                }
+                wait_for_ctrl_c();
             }
         }
-    }
-    for root in roots {
-        let candidate = root.join("dist").join("server.js");
-        if candidate.is_file() {
-            return Some(candidate);
+    } else {
+        if !no_open {
+            open_browser(&running.url);
         }
+        wait_for_ctrl_c();
     }
-    None
+    Ok(())
 }
 
-fn spawn_backend_if_needed() -> Result<Option<Child>, String> {
-    if backend_ready() {
-        return Ok(None);
-    }
-    let script = find_server_js().ok_or_else(|| {
-        "没有找到 dist/server.js。请先在仓库根目录执行 npm install 和 npm run build。".to_string()
-    })?;
-    let cwd = script
-        .parent()
-        .and_then(|p| p.parent())
-        .ok_or_else(|| "无法确定仓库根目录".to_string())?;
-    let mut child = Command::new("node")
-        .arg(&script)
-        .arg("--no-open")
-        .env("TIANSHELL_PORT", "53901")
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|err| format!("无法启动 Node 后端（需要本机已安装 Node.js 22+）：{err}"))?;
-
-    for _ in 0..50 {
-        if backend_ready() {
-            return Ok(Some(child));
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    let _ = child.kill();
-    Err("工作台后端启动超时。请确认 Node.js 可用，并且已经执行过 npm run build。".to_string())
-}
-
-fn error_page(message: &str) -> String {
-    let escaped = message
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
+fn banner(running: &tianshell_core::http_server::RunningServer) -> String {
     format!(
-        r#"<!DOCTYPE html>
-<html lang="zh-CN">
-  <head>
-    <meta charset="utf-8" />
-    <title>TianShell</title>
-    <style>
-      body {{ font-family: sans-serif; background: #1b2228; color: #e8eef2; margin: 0; padding: 48px; }}
-      main {{ max-width: 640px; line-height: 1.6; }}
-      h1 {{ font-size: 20px; font-weight: 600; }}
-      p {{ color: #c5d0d6; }}
-    </style>
-  </head>
-  <body>
-    <main>
-      <h1>TianShell 工作台没有启动起来</h1>
-      <p>{escaped}</p>
-    </main>
-  </body>
-</html>"#
+        "TianShell {VERSION} 工作台已启动（Rust，不需要 Node.js）\n界面  {}\nMCP   {}   Streamable HTTP，随工作台自动启动\nSSE   {}   旧版 HTTP+SSE\n数据  {}\n说明  docs/mcp.md",
+        running.url, running.mcp_url, running.sse_url, running.data_dir.display()
     )
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let backend = spawn_backend_if_needed();
+fn open_browser(url: &str) {
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("cmd").args(["/c", "start", "", url]).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+}
+
+fn wait_for_ctrl_c() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    if ctrlc::set_handler(move || {
+        let _ = tx.send(());
+    })
+    .is_err()
+    {
+        loop {
+            std::thread::sleep(Duration::from_secs(3600));
+        }
+    }
+    let _ = rx.recv();
+}
+
+#[cfg(feature = "desktop")]
+fn run_window(url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use tao::dpi::LogicalSize;
+    use tao::event::{Event, WindowEvent};
+    use tao::event_loop::{ControlFlow, EventLoop};
+    use tao::window::WindowBuilder;
+    use wry::WebViewBuilder;
+
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title("TianShell · 全功能终端工作台")
         .with_inner_size(LogicalSize::new(1280.0, 800.0))
         .with_min_inner_size(LogicalSize::new(960.0, 600.0))
         .build(&event_loop)?;
-
-    let mut backend_child = None;
-    let mut builder = WebViewBuilder::new();
-    match backend {
-        Ok(child) => {
-            backend_child = child;
-            builder = builder.with_url(BACKEND_URL);
-        }
-        Err(message) => {
-            eprintln!("{message}");
-            builder = builder.with_html(error_page(&message));
-        }
-    }
-    let _webview = builder.build(&window)?;
-
+    let _webview = WebViewBuilder::new().with_url(url).build(&window)?;
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         if let Event::WindowEvent {
@@ -134,9 +97,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..
         } = event
         {
-            if let Some(ref mut child) = backend_child {
-                let _ = child.kill();
-            }
             *control_flow = ControlFlow::Exit;
         }
     });

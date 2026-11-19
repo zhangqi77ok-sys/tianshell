@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' ws://127.0.0.1:*; img-src 'self' data:"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TianShell · 全功能终端工作台</title>
+    <link rel="stylesheet" href="./renderer.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <svg class="mark" viewBox="0 0 36 36" aria-hidden="true">
+            <rect x="1.5" y="1.5" width="33" height="33" rx="9" fill="#24303a" stroke="#3d4b57" />
+            <path d="M11 13l5 5-5 5" fill="none" stroke="#3dbea5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M19 23h8" fill="none" stroke="#e3a008" stroke-width="2.2" stroke-linecap="round" />
+          </svg>
+          <div>
+            <div class="brand-name">TianShell</div>
+            <div class="brand-sub">SSH · SFTP · 监控 · 隧道 · MCP</div>
+          </div>
+        </div>
+        <div class="side-tools">
+          <input id="filter" type="search" placeholder="筛选主机 / 标签" autocomplete="off" />
+          <button id="add-host" class="primary" type="button" title="添加 SSH 主机">+ 主机</button>
+        </div>
+        <div class="side-subtools">
+          <button id="add-group" type="button">+ 分组</button>
+          <button id="open-local" type="button">+ 本机终端</button>
+          <button id="open-tunnels" type="button">隧道</button>
+        </div>
+        <div id="host-tree" class="host-tree"></div>
+        <div class="side-footer">
+          <span id="data-dir" class="data-dir"></span>
+          <button id="open-settings" type="button" title="外观与监控设置">⚙ 设置</button>
+        </div>
+      </aside>
+
+      <main class="center">
+        <header class="tabbar">
+          <div id="tabs" class="tabs"></div>
+          <div class="toolbar-actions">
+            <label class="toggle-chip" title="同步向所有已打开终端发送快捷键与命令">
+              <input id="broadcast-toggle" type="checkbox" /> 广播输入
+            </label>
+            <button id="search-toggle" type="button" title="搜索终端内容 (Ctrl+F)">查找</button>
+            <button id="theme-toggle" type="button" title="切换暗/亮主题">主题</button>
+            <button id="inspector-toggle" type="button" title="折叠/展开右侧监控">监控</button>
+          </div>
+        </header>
+
+        <section class="split-wrap" id="split-wrap">
+          <div class="terminal-pane" id="terminal-pane">
+            <div class="search-bar hidden" id="search-bar">
+              <input id="search-input" type="search" placeholder="在当前终端查找…" />
+              <button id="search-prev" type="button">上一个</button>
+              <button id="search-next" type="button">下一个</button>
+              <button id="search-close" type="button">✕</button>
+            </div>
+            <div id="terminal-stage" class="terminal-stage"></div>
+            <div id="term-empty" class="empty-state">
+              <h2>⚡ 欢迎使用 TianShell 工作台</h2>
+              <p>双击左侧 SSH 主机连接远端、点击「+ 本机终端」开启本地 Shell，或配置 MCP 交给 TianCode AI 协同运维。</p>
+            </div>
+          </div>
+
+          <div class="split-handle" id="split-handle" title="上下拖拽调整终端与 SFTP 高度"></div>
+
+          <div class="sftp-pane" id="sftp-pane">
+            <div class="sftp-bar">
+              <div class="sftp-nav">
+                <button id="sftp-up" type="button" disabled>上级</button>
+                <button id="sftp-home" type="button" disabled>/</button>
+                <input id="sftp-path" type="text" value="/" spellcheck="false" disabled />
+                <button id="sftp-go" type="button" disabled>跳转</button>
+              </div>
+              <div class="sftp-ops">
+                <button id="sftp-mkdir" type="button" disabled>新建目录</button>
+                <button id="sftp-upload" type="button" disabled>上传文件</button>
+                <input id="sftp-file-input" type="file" multiple class="hidden" />
+                <button id="sftp-refresh" type="button" disabled>刷新</button>
+              </div>
+            </div>
+            <div id="sftp-table-wrap" class="sftp-table-wrap">
+              <div id="sftp-empty" class="empty-muted">连接任意 SSH 会话后，此处自动加载 SFTP 文件管理（支持拖拽上传与双击在线编辑）。</div>
+              <table id="sftp-table" class="sftp-table hidden">
+                <thead>
+                  <tr><th>名称</th><th>权限</th><th>大小</th><th>修改时间</th><th>操作</th></tr>
+                </thead>
+                <tbody id="sftp-body"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <footer class="transfer-bar" id="transfer-bar">
+          <span id="transfer-summary">传输队列空闲</span>
+          <div id="transfer-list" class="transfer-list"></div>
+        </footer>
+      </main>
+
+      <aside class="inspector" id="inspector">
+        <div class="inspector-section">
+          <div class="section-head">
+            <span>📊 服务器实时监控</span>
+            <span id="mon-host" class="badge-muted">未连接</span>
+          </div>
+          <div id="mon-bento" class="mon-bento">
+            <div class="kpi-row"><span>CPU</span><span id="mon-cpu" class="mono">--%</span></div>
+            <div class="meter"><div id="mon-cpu-bar" class="meter-fill"></div></div>
+            <div class="kpi-row"><span>内存</span><span id="mon-mem" class="mono">-- / --</span></div>
+            <div class="meter"><div id="mon-mem-bar" class="meter-fill teal"></div></div>
+            <div class="kpi-row"><span>Swap</span><span id="mon-swap" class="mono">-- / --</span></div>
+            <div class="meter"><div id="mon-swap-bar" class="meter-fill amber"></div></div>
+            <div class="kpi-grid mono">
+              <div><small>下行 RX</small><div id="mon-rx">0 B/s</div></div>
+              <div><small>上行 TX</small><div id="mon-tx">0 B/s</div></div>
+              <div class="wide"><small>负载 LoadAvg</small><div id="mon-load">--</div></div>
+            </div>
+          </div>
+          <div id="mon-disks" class="sub-list"></div>
+          <div id="mon-procs" class="sub-list"></div>
+        </div>
+
+        <div class="inspector-section grow">
+          <div class="section-head">
+            <span>⚡ 快捷命令</span>
+            <button id="add-snippet" type="button">+ 新增</button>
+          </div>
+          <div id="snippet-list" class="snippet-list"></div>
+        </div>
+      </aside>
+    </div>
+
+    <div id="toast" class="toast" role="status"></div>
+
+    <dialog id="host-dialog">
+      <form id="host-form">
+        <header class="dialog-head"><h2 id="dialog-title">添加主机</h2><p>凭据由 Windows DPAPI 加密保管在本机。</p></header>
+        <div class="grid">
+          <label>别名<input id="field-alias" required maxlength="64" /></label>
+          <label>分组<select id="field-group"><option value="">默认未分组</option></select></label>
+          <label>主机地址<input id="field-host" required spellcheck="false" /></label>
+          <label>端口<input id="field-port" type="number" min="1" max="65535" value="22" required /></label>
+          <label>用户名<input id="field-user" required spellcheck="false" /></label>
+          <label>跳板机 (可选)<select id="field-jump"><option value="">直连 (无跳板机)</option></select></label>
+        </div>
+        <fieldset>
+          <legend>认证方式</legend>
+          <label class="radio"><input type="radio" name="auth" value="password" checked />密码</label>
+          <label class="radio"><input type="radio" name="auth" value="privateKey" />私钥</label>
+        </fieldset>
+        <label id="password-field">密码<input id="field-password" type="password" autocomplete="off" /></label>
+        <div id="key-field" class="hidden">
+          <div class="key-row"><span>私钥 (OpenSSH/PEM)</span><input id="pick-key-file" type="file" /></div>
+          <textarea id="field-key" spellcheck="false" placeholder="粘贴私钥内容或从上方选择文件"></textarea>
+          <label>私钥口令 (可空)<input id="field-passphrase" type="password" autocomplete="off" /></label>
+        </div>
+        <label>标签 (逗号分隔)<input id="field-tags" placeholder="prod, nginx" /></label>
+        <label>备注<input id="field-notes" /></label>
+        <label class="check hidden" id="clear-fp-row"><input id="field-clear-fp" type="checkbox" />清除已记住主机指纹</label>
+        <p id="form-error" class="form-error"></p>
+        <div class="dialog-actions"><button type="button" id="cancel-host">取消</button><button type="submit" class="primary">保存</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="editor-dialog" class="wide-dialog">
+      <form id="editor-form">
+        <header class="dialog-head"><h2 id="editor-title">在线编辑</h2><p id="editor-path" class="mono"></p></header>
+        <textarea id="editor-content" class="code-editor" spellcheck="false"></textarea>
+        <div class="dialog-actions"><button type="button" id="cancel-editor">关闭</button><button type="submit" class="primary">保存写回远端</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="tunnel-dialog" class="wide-dialog">
+      <div class="dialog-head"><h2>🔐 SSH 端口转发与 SOCKS5 隧道</h2></div>
+      <div id="tunnel-rows" class="tunnel-rows"></div>
+      <form id="tunnel-form" class="grid">
+        <label>规则名称<input id="tun-name" required placeholder="MySQL 映射 / SOCKS5" /></label>
+        <label>关联主机<select id="tun-host" required></select></label>
+        <label>转发模式<select id="tun-mode"><option value="local">-L 本地转发</option><option value="remote">-R 远程转发</option><option value="socks5">-D 动态 SOCKS5</option></select></label>
+        <label>监听端口<input id="tun-lport" type="number" min="1" max="65535" value="1080" required /></label>
+        <label id="tun-rhost-wrap">目标主机<input id="tun-rhost" value="127.0.0.1" /></label>
+        <label id="tun-rport-wrap">目标端口<input id="tun-rport" type="number" min="1" max="65535" value="3306" /></label>
+        <div class="dialog-actions wide"><button type="button" id="close-tunnels">关闭</button><button type="submit" class="primary">添加规则</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="snippet-dialog">
+      <form id="snippet-form">
+        <header class="dialog-head"><h2>新增快捷命令</h2></header>
+        <label>名称<input id="snip-name" required /></label>
+        <label>分类<input id="snip-cat" value="常用" /></label>
+        <label>命令内容<textarea id="snip-cmd" required spellcheck="false"></textarea></label>
+        <div class="dialog-actions"><button type="button" id="cancel-snippet">取消</button><button type="submit" class="primary">保存</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="settings-dialog">
+      <form id="settings-form">
+        <header class="dialog-head"><h2>工作台设置</h2></header>
+        <label>主题<select id="set-theme"><option value="dark">暗色工作台 (Dark)</option><option value="light">明亮工作台 (Light)</option></select></label>
+        <label>终端字号 (px)<input id="set-font" type="number" min="11" max="22" value="14" /></label>
+        <label>监控采样间隔 (ms)<input id="set-interval" type="number" min="1000" max="10000" step="500" value="2500" /></label>
+        <label class="check"><input id="set-hidden" type="checkbox" />SFTP 显示隐藏文件</label>
+        <div class="dialog-actions"><button type="button" id="cancel-settings">取消</button><button type="submit" class="primary">应用</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="prompt-dialog">
+      <form id="prompt-form">
+        <h3 id="prompt-title"></h3>
+        <input id="prompt-input" required />
+        <div class="dialog-actions"><button type="button" id="cancel-prompt">取消</button><button type="submit" class="primary">确定</button></div>
+      </form>
+    </dialog>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>

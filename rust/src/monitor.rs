@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use ssh2::Session;
 use crate::ssh::{exec_command, SshError};
@@ -39,6 +40,18 @@ pub struct ProcessStat {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetStat {
+    #[serde(rename = "rxBytesPerSec")]
+    pub rx_bytes_per_sec: f64,
+    #[serde(rename = "txBytesPerSec")]
+    pub tx_bytes_per_sec: f64,
+    #[serde(rename = "totalRxBytes")]
+    pub total_rx_bytes: u64,
+    #[serde(rename = "totalTxBytes")]
+    pub total_tx_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerMetrics {
     #[serde(rename = "sampledAt")]
     pub sampled_at: String,
@@ -58,6 +71,7 @@ pub struct ServerMetrics {
     #[serde(rename = "swapUsedKb")]
     pub swap_used_kb: u64,
     pub disks: Vec<DiskStat>,
+    pub net: NetStat,
     pub processes: Vec<ProcessStat>,
 }
 
@@ -94,18 +108,25 @@ pub fn parse_metrics_sample(raw: &str) -> ServerMetrics {
     let (mem_total_kb, mem_used_kb, swap_total_kb, swap_used_kb) = parse_mem(sec.get("MEM").unwrap_or(&Vec::new()));
     let disks = parse_df(sec.get("DF").unwrap_or(&Vec::new()));
     let processes = parse_ps(sec.get("PS").unwrap_or(&Vec::new()));
+    let (total_rx, total_tx) = net_totals(&sec);
 
     ServerMetrics {
-        sampled_at: chrono_now_iso(),
+        sampled_at: crate::util::iso_now(),
         hostname,
         uptime_seconds,
         load_avg,
-        cpu_percent: 10.0,
+        cpu_percent: 0.0,
         mem_total_kb,
         mem_used_kb,
         swap_total_kb,
         swap_used_kb,
         disks,
+        net: NetStat {
+            rx_bytes_per_sec: 0.0,
+            tx_bytes_per_sec: 0.0,
+            total_rx_bytes: total_rx,
+            total_tx_bytes: total_tx,
+        },
         processes,
     }
 }
@@ -162,12 +183,67 @@ fn parse_ps(lines: &[&str]) -> Vec<ProcessStat> {
 }
 
 pub fn sample_remote_metrics(sess: &Session) -> Result<ServerMetrics, SshError> {
-    let res = exec_command(sess, PROBE_COMMAND)?;
-    Ok(parse_metrics_sample(&res.stdout))
+    let first = exec_command(sess, PROBE_COMMAND)?;
+    let started = Instant::now();
+    std::thread::sleep(Duration::from_millis(200));
+    let second = exec_command(sess, PROBE_COMMAND)?;
+    let dt = started.elapsed().as_secs_f64().max(0.05);
+    let mut metrics = parse_metrics_sample(&second.stdout);
+    if let (Some((t1, i1)), Some((t2, i2))) = (cpu_jiffies(&first.stdout), cpu_jiffies(&second.stdout)) {
+        let total = t2.saturating_sub(t1);
+        let idle = i2.saturating_sub(i1);
+        if total > 0 {
+            metrics.cpu_percent = (100.0 * (1.0 - idle as f32 / total as f32)).clamp(0.0, 100.0);
+        }
+    }
+    let (rx1, tx1) = net_totals_raw(&first.stdout);
+    let (rx2, tx2) = net_totals_raw(&second.stdout);
+    metrics.net.rx_bytes_per_sec = rx2.saturating_sub(rx1) as f64 / dt;
+    metrics.net.tx_bytes_per_sec = tx2.saturating_sub(tx1) as f64 / dt;
+    metrics.net.total_rx_bytes = rx2;
+    metrics.net.total_tx_bytes = tx2;
+    Ok(metrics)
 }
 
-fn chrono_now_iso() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let dur = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-    format!("{}.{:03}Z", dur.as_secs(), dur.subsec_millis())
+fn cpu_jiffies(raw: &str) -> Option<(u64, u64)> {
+    let sec = split_sections(raw);
+    let line = sec.get("CPU")?.iter().find(|l| !l.trim().is_empty())?;
+    let nums: Vec<u64> = line.split_whitespace().skip(1).filter_map(|s| s.parse().ok()).collect();
+    if nums.len() < 4 {
+        return None;
+    }
+    let idle = nums[3] + nums.get(4).copied().unwrap_or(0);
+    let total: u64 = nums.iter().sum();
+    Some((total, idle))
+}
+
+fn net_totals(sec: &HashMap<String, Vec<&str>>) -> (u64, u64) {
+    sum_net(sec.get("NET").map(Vec::as_slice).unwrap_or(&[]))
+}
+
+fn net_totals_raw(raw: &str) -> (u64, u64) {
+    let sec = split_sections(raw);
+    net_totals(&sec)
+}
+
+fn sum_net(lines: &[&str]) -> (u64, u64) {
+    let mut rx = 0u64;
+    let mut tx = 0u64;
+    for line in lines {
+        let line = line.trim();
+        if !line.contains(':') || line.contains('|') {
+            continue;
+        }
+        let mut parts = line.split(':');
+        let iface = parts.next().unwrap_or("").trim();
+        if iface == "lo" || iface.is_empty() {
+            continue;
+        }
+        let nums: Vec<u64> = parts.next().unwrap_or("").split_whitespace().filter_map(|s| s.parse().ok()).collect();
+        if nums.len() >= 9 {
+            rx = rx.saturating_add(nums[0]);
+            tx = tx.saturating_add(nums[8]);
+        }
+    }
+    (rx, tx)
 }

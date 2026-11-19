@@ -24,6 +24,14 @@ pub enum SftpError {
     Io(#[from] std::io::Error),
     #[error("文本解码错误: {0}")]
     Utf8(#[from] std::string::FromUtf8Error),
+    #[error("{0}")]
+    Rejected(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteText {
+    pub content: String,
+    pub truncated: bool,
 }
 
 fn format_unix_mode(mode: u32) -> String {
@@ -92,9 +100,112 @@ pub fn read_text(sess: &Session, file_path: &str, max_bytes: usize) -> Result<St
 }
 
 pub fn write_text(sess: &Session, file_path: &str, content: &str) -> Result<(), SftpError> {
+    write_bytes(sess, file_path, content.as_bytes(), |_, _| true)
+}
+
+pub fn read_text_limited(sess: &Session, file_path: &str, max_bytes: usize) -> Result<RemoteText, SftpError> {
+    let limit = max_bytes.min(262_144);
+    let sftp = sess.sftp()?;
+    let mut file = sftp.open(Path::new(file_path))?;
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 8192];
+    while buf.len() <= limit {
+        let n = file.read(&mut tmp)?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if buf.len() > limit {
+            break;
+        }
+    }
+    let truncated = buf.len() > limit;
+    if truncated {
+        buf.truncate(limit);
+    }
+    if buf.iter().take(1024).any(|byte| *byte == 0) {
+        return Err(SftpError::Rejected("检测到二进制文件，暂不支持在线文本编辑".into()));
+    }
+    Ok(RemoteText {
+        content: String::from_utf8_lossy(&buf).into_owned(),
+        truncated,
+    })
+}
+
+pub fn mkdir(sess: &Session, dir_path: &str) -> Result<(), SftpError> {
+    let sftp = sess.sftp()?;
+    sftp.mkdir(Path::new(dir_path), 0o755)?;
+    Ok(())
+}
+
+pub fn rename(sess: &Session, old_path: &str, new_path: &str) -> Result<(), SftpError> {
+    let sftp = sess.sftp()?;
+    sftp.rename(Path::new(old_path), Path::new(new_path), None)?;
+    Ok(())
+}
+
+pub fn chmod(sess: &Session, file_path: &str, mode: u32) -> Result<(), SftpError> {
+    let sftp = sess.sftp()?;
+    let mut stat = sftp.stat(Path::new(file_path))?;
+    stat.perm = Some(mode);
+    sftp.setstat(Path::new(file_path), stat)?;
+    Ok(())
+}
+
+pub fn remove_path(sess: &Session, file_path: &str) -> Result<(), SftpError> {
+    if file_path.is_empty() || file_path == "/" {
+        return Err(SftpError::Rejected("安全拦截：禁止删除根目录 /".into()));
+    }
+    let sftp = sess.sftp()?;
+    remove_rec(&sftp, file_path)
+}
+
+fn remove_rec(sftp: &ssh2::Sftp, file_path: &str) -> Result<(), SftpError> {
+    let stat = sftp.stat(Path::new(file_path))?;
+    if stat.is_dir() {
+        for item in sftp.readdir(Path::new(file_path))? {
+            let name = item.0.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name == "." || name == ".." || name.is_empty() {
+                continue;
+            }
+            let child = format!("{}/{}", file_path.trim_end_matches('/'), name);
+            remove_rec(sftp, &child)?;
+        }
+        sftp.rmdir(Path::new(file_path))?;
+    } else {
+        sftp.unlink(Path::new(file_path))?;
+    }
+    Ok(())
+}
+
+pub fn read_chunks(sess: &Session, file_path: &str, mut on_chunk: impl FnMut(&[u8]) -> bool) -> Result<(), SftpError> {
+    let sftp = sess.sftp()?;
+    let mut file = sftp.open(Path::new(file_path))?;
+    let mut buf = [0u8; 32_768];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        if !on_chunk(&buf[..n]) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+pub fn write_bytes(sess: &Session, file_path: &str, bytes: &[u8], mut on_progress: impl FnMut(u64, u64) -> bool) -> Result<(), SftpError> {
     let sftp = sess.sftp()?;
     let mut file = sftp.create(Path::new(file_path))?;
-    file.write_all(content.as_bytes())?;
+    let total = bytes.len() as u64;
+    let mut sent = 0u64;
+    for chunk in bytes.chunks(32_768) {
+        file.write_all(chunk)?;
+        sent += chunk.len() as u64;
+        if !on_progress(sent, total) {
+            return Err(SftpError::Rejected("传输已取消".into()));
+        }
+    }
     file.flush()?;
     Ok(())
 }
