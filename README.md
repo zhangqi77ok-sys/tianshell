@@ -14,10 +14,11 @@
   - `cargo run --bin tianshell -- serve` 不启动 Node，也不再打包 Electron。
   - 凭据使用 **AES-256-GCM** 加密存储；Windows 下通过系统原生 **DPAPI (`CurrentUser`, `TS1D` 封装)** 保护 `vault.key`，POSIX 下新的钥匙文件是 `TS1R`（仅当前用户可读），旧的 `TS1D` / Node 写出的 `TS1R` 都能读。
 - **主机分组、标签与 ProxyJump 多跳跳板机**：
-  - 左侧支持自定义分组、关键词/标签搜索过滤、密码与 OpenSSH/PEM 私钥认证、TOFU 主机密钥指纹记忆与清除。
+  - 左侧支持自定义分组、关键词/标签搜索过滤、密码与私钥认证、TOFU 主机密钥指纹记忆与清除。私钥可以直接粘贴日常使用的 OpenSSH 格式（含 ed25519，可以带口令），也可以用 PKCS#8、PEM RSA 或 EC PEM。
   - 主机可配置 `jumpHostId` 跳板机链路（内置循环依赖检测），通过多跳 `forwardOut` 直达内网节点。
 - **多标签终端 & 本机 Shell & 广播输入**：
-  - 同时开启多台 SSH 终端与本机 Shell（Windows PowerShell / POSIX `$SHELL`）标签页，互不关闭。
+  - 同一个 SSH 标签里的交互终端、SFTP 和监控采样共用这一次登录。关掉标签时这条连接一起拆掉。端口转发仍然单独占一条连接，因为它要一直握着转发通道。
+  - 同时开启多台 SSH 终端与本机 Shell（Windows PowerShell / POSIX `$SHELL`）标签页，互不关闭。本机终端走系统 PTY（Windows 上是 ConPTY），窗口尺寸会跟着变。
   - 支持终端内 `Ctrl+F` 搜索、拖拽调整上下分屏比例、勾选「广播输入」将命令/快捷片段同步下发到所有已打开终端。
 - **完整 SFTP 文件管理与在线文本编辑**：
   - 支持目录浏览、面包屑导航、显示隐藏文件、新建目录、重命名、权限修改 (`chmod`)、递归删除。
@@ -53,6 +54,24 @@ cargo build --release --bin tianshell
 ```
 
 生成的是 `target/release/tianshell`（Windows 上是 `tianshell.exe`）。GitHub Actions 的 Windows 任务使用 runner 默认的 MSVC 目标。仓库里不提交 `.cargo/config.toml`，也不提交某台机器的 `linker` / `ar` 绝对路径。
+
+### Windows 安装包
+
+不需要记住 `cargo run` 的参数。在 Windows 上于仓库根目录执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1
+```
+
+脚本用默认工具链执行 `cargo build --release --locked`，打出 `dist\windows\TianShell-windows.zip`。GitHub Actions 的 `windows-package` 任务在 `windows-latest` 上做同一件事，并把 zip 留在构建产物里。
+
+解压后双击 `tianshell.exe` 就会启动工作台并打开浏览器。窗口里的控制台要留着，关掉它进程就停了。想进开始菜单：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+这会把程序复制到 `%LOCALAPPDATA%\TianShell`，并放一个「TianShell」快捷方式。快捷方式不带额外参数。
 
 本机如果只用 w64devkit、没有 MSVC，把配置写到用户目录 `%USERPROFILE%\.cargo\config.toml`，路径改成自己的安装位置。默认工具链是 MSVC 时，先执行 `rustup target add x86_64-pc-windows-gnu`。这时可执行文件在 `target/x86_64-pc-windows-gnu/release/`。
 
@@ -118,9 +137,11 @@ npm test
 | 工具 | 作用 |
 | :--- | :--- |
 | `list_hosts` | 列出已保存主机、分组与跳板机关联（不含密码与私钥） |
-| `run_command` | 连上目标主机（支持 `ProxyJump`）执行命令，返回输出与退出码 |
-| `session_status` | 查看本 MCP 进程内的命令执行会话记录 |
+| `list_terminal_sessions` | 列出工作台里已经打开的交互终端。stdio 独立进程没有附着工作台时，这个列表是空的 |
+| `run_command` | 另开一条 SSH（支持 `ProxyJump`）执行命令，返回输出与退出码。不往界面终端里写 |
+| `session_status` | 查看 `run_command` 留下的记录，不含界面终端 |
 | `sftp_list` | 列出远端 POSIX 目录内容与权限 |
+| `sftp_mkdir` | 新建远端目录 |
 | `sftp_read` | 只读读取远端 UTF-8 文本/配置文件（上限 256KB） |
 | `sftp_write` | 将 UTF-8 文本写回远端文件（上限 512KB） |
 | `system_metrics` | 采样并返回目标主机 CPU / 内存 / Swap / 磁盘 / 负载 / Top 进程 |
@@ -139,14 +160,25 @@ docs/mcp.md   给其他 MCP 客户端看的接入说明
 test          Node 版单元测试和本机 SSH/SFTP 集成测试
 ```
 
+## 私钥格式
+
+登录前会把私钥整理成 libssh2 / OpenSSL 能读的样子。直接粘贴下面这些都可以，加密的要在主机表单里填口令：
+
+- OpenSSH（`BEGIN OPENSSH PRIVATE KEY`），包括 ed25519、RSA、ECDSA P-256 / P-384 / P-521。这是 Windows 自带 `ssh-keygen` 的默认格式；`ssh-keygen -p -m PEM` 对 ed25519 往往仍写出这种格式。
+- PKCS#8（`BEGIN PRIVATE KEY`）。
+- 传统 PEM RSA（`BEGIN RSA PRIVATE KEY`）。
+- EC PEM（`BEGIN EC PRIVATE KEY`）。
+- OpenSSL 加密 PEM（`BEGIN ENCRYPTED PRIVATE KEY`，或带 `Proc-Type: 4,ENCRYPTED` 的旧 PEM）。口令交给 libssh2，不在这里解密。
+
+还不能用：PuTTY `.ppk`、FIDO / `sk-` 硬件密钥、只有证书没有私钥的文件。DSA 也不在这条路径里。
+
 ## 这一步还没有完全对齐的地方
 
-Rust 进程已经能独立把工作台和 MCP 跑起来，但下面几件事还没说成和 Node 版逐项测过：
-
-- 交互终端，以及 SFTP、监控采样，各自再开一条 SSH 连接，不是在同一条 libssh2 通道上复用。
+- 同一个 SSH 标签的终端、SFTP 和监控共用一条连接。大文件传输会占住这条连接，传完之前终端会停一下。端口转发仍然是另一条连接。
 - 上传先收下整个请求体（上限 64MB）再写入远端；下载是分块送出的。
 - 本地转发、SOCKS5 和远程转发的代码在 Rust 里。这次的 Rust 测试没有启动 SSH 服务，所以没有做真实的远端隧道或 SFTP 往返。那些真实连接仍由 Node 测试覆盖。
-- MCP 的 `run_command` 和界面里的交互终端仍是两套会话。
+- MCP 的 `run_command` 和界面里的交互终端仍是两套会话。前者每次自己登录；后者可以用 `list_terminal_sessions` 看到，但不会被写进去。
+- 本机终端在 Windows 上依赖 ConPTY。更老的、没有 ConPTY 的系统打不开本机标签，而不是退回管道。
 
 ## 许可
 

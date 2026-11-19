@@ -4,10 +4,11 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
+use crate::hub::SessionHub;
 use crate::monitor::sample_remote_metrics;
 use crate::paths::resolve_data_dir;
 use crate::runtime::MCP_PROTOCOL;
-use crate::sftp::{list_dir, read_text_limited, write_text};
+use crate::sftp::{list_dir, mkdir, read_text_limited, write_text};
 use crate::ssh::{connect_chain, exec_command, resolve_targets, truncate_output};
 use crate::state::lock;
 use crate::store::HostStore;
@@ -43,6 +44,7 @@ pub struct SessionRecord {
 pub struct McpHandler {
     hosts: Arc<Mutex<HostStore>>,
     sessions: Mutex<HashMap<String, SessionRecord>>,
+    terminals: Option<Arc<SessionHub>>,
 }
 
 impl McpHandler {
@@ -55,9 +57,14 @@ impl McpHandler {
     }
 
     pub fn from_hosts(hosts: Arc<Mutex<HostStore>>) -> Self {
+        Self::with_terminals(hosts, None)
+    }
+
+    pub fn with_terminals(hosts: Arc<Mutex<HostStore>>, terminals: Option<Arc<SessionHub>>) -> Self {
         Self {
             hosts,
             sessions: Mutex::new(HashMap::new()),
+            terminals,
         }
     }
 
@@ -97,7 +104,7 @@ impl McpHandler {
             "protocolVersion": protocol,
             "capabilities": {"tools": {"listChanged": false}},
             "serverInfo": {"name": "tianshell", "version": VERSION},
-            "instructions": "TianShell 保存了用户的 SSH 主机（支持分组和跳板机）。工作台启动时会在 127.0.0.1 上同时提供这套 MCP。先用 list_hosts 查看主机别名，再调用 run_command / sftp_list / sftp_read / sftp_write / system_metrics。不要猜测密码。"
+            "instructions": "TianShell 保存了用户的 SSH 主机（支持分组和跳板机）。工作台启动时会在 127.0.0.1 上同时提供这套 MCP。先用 list_hosts 查看主机别名，再用 run_command / sftp_list / sftp_read / sftp_write / sftp_mkdir / system_metrics。run_command 会另开一条 SSH，不会写进界面里已经打开的终端；界面终端用 list_terminal_sessions 查看。不要猜测密码。"
         })
     }
 
@@ -105,7 +112,8 @@ impl McpHandler {
         json!({
             "tools": [
                 tool_def("list_hosts", "列出本机保存的 SSH 主机（含分组与跳板机关联，不含密码私钥）。List saved SSH hosts without secrets.", json!({"type": "object", "properties": {}}), json!([])),
-                tool_def("run_command", "连接主机（支持 ProxyJump 跳板链）执行命令并返回输出与退出码。Run one command on a saved host.", json!({
+                tool_def("list_terminal_sessions", "列出工作台界面里已经打开的交互终端标签。这些不是 run_command 的记录。List interactive workbench terminal tabs.", json!({"type": "object", "properties": {}}), json!([])),
+                tool_def("run_command", "另开一条 SSH（支持 ProxyJump）执行一条命令并返回输出与退出码。不会写入界面里已打开的终端。Run one command on a saved host, separate from interactive tabs.", json!({
                     "type": "object",
                     "properties": {
                         "host": {"type": "string", "description": "主机 id 或别名"},
@@ -114,7 +122,7 @@ impl McpHandler {
                     },
                     "required": ["host", "command"]
                 }), json!(["host", "command"])),
-                tool_def("session_status", "查看当前 MCP 进程里的命令会话状态。Read exec session status for this MCP process.", json!({
+                tool_def("session_status", "查看 run_command 留下的命令记录。不含界面里的交互终端，那些用 list_terminal_sessions。Read exec records for this MCP process.", json!({
                     "type": "object",
                     "properties": {"session_id": {"type": "string", "description": "可选会话 ID"}}
                 }), json!([])),
@@ -126,6 +134,14 @@ impl McpHandler {
                     },
                     "required": ["host"]
                 }), json!(["host"])),
+                tool_def("sftp_mkdir", "通过 SFTP 新建远端目录。Create a remote directory over SFTP.", json!({
+                    "type": "object",
+                    "properties": {
+                        "host": {"type": "string", "description": "主机 id 或别名"},
+                        "path": {"type": "string", "description": "要创建的 POSIX 目录"}
+                    },
+                    "required": ["host", "path"]
+                }), json!(["host", "path"])),
                 tool_def("sftp_read", "通过 SFTP 只读读取配置/日志等 UTF-8 文本文件（上限 256KB）。Read a remote UTF-8 text file.", json!({
                     "type": "object",
                     "properties": {
@@ -162,9 +178,11 @@ impl McpHandler {
                 let text = serde_json::to_string_pretty(&hosts.list_public()).unwrap_or_else(|_| "[]".into());
                 Ok(tool_text(text, false))
             }
+            "list_terminal_sessions" => self.tool_terminal_sessions(),
             "session_status" => self.tool_session_status(args.get("session_id").and_then(|v| v.as_str())),
             "run_command" => self.tool_run_command(args),
             "sftp_list" => self.tool_sftp_list(args),
+            "sftp_mkdir" => self.tool_sftp_mkdir(args),
             "sftp_read" => self.tool_sftp_read(args),
             "sftp_write" => self.tool_sftp_write(args),
             "system_metrics" => self.tool_system_metrics(args),
@@ -301,6 +319,29 @@ impl McpHandler {
         }
     }
 
+    fn tool_terminal_sessions(&self) -> Result<Value, String> {
+        let Some(hub) = &self.terminals else {
+            return Ok(tool_text(
+                serde_json::to_string_pretty(&json!({
+                    "attached": false,
+                    "sessions": [],
+                    "note": "这个 MCP 进程没有附着到工作台，看不到界面里的交互终端。请连接工作台的 Streamable HTTP，或用 tianshell-mcp --attach。"
+                }))
+                .unwrap_or_default(),
+                false,
+            ));
+        };
+        Ok(tool_text(
+            serde_json::to_string_pretty(&json!({
+                "attached": true,
+                "sessions": hub.list_sessions(),
+                "note": "这些是界面里的交互终端。run_command 和 session_status 是另一批一次性命令记录，不会写进这些终端，也不会复用它们的 SSH 连接。"
+            }))
+            .unwrap_or_default(),
+            false,
+        ))
+    }
+
     fn tool_session_status(&self, sid: Option<&str>) -> Result<Value, String> {
         let map = lock(&self.sessions);
         if let Some(id) = sid {
@@ -318,6 +359,17 @@ impl McpHandler {
         let session = self.connect(host)?;
         let entries = list_dir(&session, path).map_err(|err| format!("SFTP 列目录错误: {err}"))?;
         Ok(tool_text(serde_json::to_string_pretty(&entries).unwrap_or_default(), false))
+    }
+
+    fn tool_sftp_mkdir(&self, args: Value) -> Result<Value, String> {
+        let host = args.get("host").and_then(|v| v.as_str()).ok_or("缺少 host 参数")?;
+        let path = args.get("path").and_then(|v| v.as_str()).ok_or("缺少 path 参数")?;
+        if path.is_empty() || path == "/" {
+            return Err("不会创建空路径或根目录".into());
+        }
+        let session = self.connect(host)?;
+        mkdir(&session, path).map_err(|err| format!("SFTP 建目录错误: {err}"))?;
+        Ok(tool_text(format!("已创建目录 {path}"), false))
     }
 
     fn tool_sftp_read(&self, args: Value) -> Result<Value, String> {

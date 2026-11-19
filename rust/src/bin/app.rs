@@ -47,8 +47,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn banner(running: &tianshell_core::http_server::RunningServer) -> String {
     format!(
-        "TianShell {VERSION} 工作台已启动（Rust，不需要 Node.js）\n界面  {}\nMCP   {}   Streamable HTTP，随工作台自动启动\nSSE   {}   旧版 HTTP+SSE\n数据  {}\n说明  docs/mcp.md",
-        running.url, running.mcp_url, running.sse_url, running.data_dir.display()
+        "TianShell {version} 工作台已启动（Rust，不需要 Node.js）\n界面  http://127.0.0.1:{port}/\nMCP   {mcp}   Streamable HTTP，随工作台自动启动\nSSE   {sse}   旧版 HTTP+SSE\n数据  {data}\n连接  打开界面后点左下角「连接 MCP」。令牌不写在这行日志里。\n说明  docs/mcp.md",
+        version = VERSION,
+        port = running.port,
+        mcp = running.mcp_url,
+        sse = running.sse_url,
+        data = running.data_dir.display()
     )
 }
 

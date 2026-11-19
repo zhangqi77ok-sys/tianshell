@@ -6185,7 +6185,8 @@ WARNING: This link could potentially be dangerous`)) {
       `/api/sessions/${encodeURIComponent(sid)}/sftp/upload?path=${encodeURIComponent(targetPath)}&total=${file.size}`,
       { method: "POST", body: file }
     ),
-    cancelTransfer: (tid) => apiRequest(`/api/transfers/${encodeURIComponent(tid)}/cancel`, { method: "POST" })
+    cancelTransfer: (tid) => apiRequest(`/api/transfers/${encodeURIComponent(tid)}/cancel`, { method: "POST" }),
+    mcpInfo: () => apiRequest("/api/mcp")
   };
   function connectWs(onEvent, onOpen) {
     let socket = null;
@@ -7228,8 +7229,69 @@ WARNING: This link could potentially be dangerous`)) {
       tab.fit.fit();
     }
   }
+  function mcpConfigs(url, token) {
+    const cursor = {
+      mcpServers: {
+        tianshell: {
+          url,
+          headers: { Authorization: `Bearer ${token}` }
+        }
+      }
+    };
+    const claude = {
+      mcpServers: {
+        tianshell: {
+          type: "http",
+          url,
+          headers: { Authorization: `Bearer ${token}` }
+        }
+      }
+    };
+    return { cursor: JSON.stringify(cursor, null, 2), claude: JSON.stringify(claude, null, 2) };
+  }
+  async function copyText(text, ok) {
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast(ok);
+    } catch {
+      showToast("\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u5728\u5BF9\u8BDD\u6846\u91CC\u624B\u52A8\u9009\u62E9");
+    }
+  }
+  async function showMcpDialog() {
+    const dlg = document.getElementById("mcp-dialog");
+    const info = await webApi.mcpInfo();
+    const token = resolveClientToken();
+    const configs = mcpConfigs(info.url, token);
+    document.getElementById("mcp-url").value = info.url;
+    document.getElementById("mcp-token").value = token;
+    document.getElementById("mcp-cursor").value = configs.cursor;
+    document.getElementById("mcp-claude").value = configs.claude;
+    const status = document.getElementById("mcp-status");
+    if (status) status.textContent = info.url.replace(/^https?:\/\//, "");
+    dlg.showModal();
+  }
   async function boot() {
     bindGlobalUi();
+    document.getElementById("open-mcp")?.addEventListener("click", () => void showMcpDialog().catch((err) => {
+      showToast(err instanceof Error ? err.message : "\u8BFB\u4E0D\u5230 MCP \u5730\u5740");
+    }));
+    document.getElementById("close-mcp")?.addEventListener("click", () => {
+      document.getElementById("mcp-dialog").close();
+    });
+    document.getElementById("copy-cursor")?.addEventListener("click", () => {
+      void copyText(document.getElementById("mcp-cursor").value, "\u5DF2\u590D\u5236 Cursor \u914D\u7F6E");
+    });
+    document.getElementById("copy-claude")?.addEventListener("click", () => {
+      void copyText(document.getElementById("mcp-claude").value, "\u5DF2\u590D\u5236 Claude Code \u914D\u7F6E");
+    });
+    try {
+      const info = await webApi.mcpInfo();
+      const status = document.getElementById("mcp-status");
+      if (status) status.textContent = info.url.replace(/^https?:\/\//, "");
+    } catch {
+      const status = document.getElementById("mcp-status");
+      if (status) status.textContent = "MCP \u5730\u5740\u6682\u65F6\u8BFB\u4E0D\u5230";
+    }
     await refreshLive("disk");
   }
   void boot();

@@ -63,6 +63,10 @@ button.danger { background: var(--danger); color: #fff; border-color: var(--dang
 .host-actions { display: flex; gap: 4px; opacity: 0.75; }
 .host-item:hover .host-actions { opacity: 1; }
 .host-actions button { padding: 2px 6px; font-size: 11px; }
+.mcp-strip { display: flex; align-items: center; gap: 8px; padding: 8px 10px 0; }
+.mcp-strip button { flex: none; }
+.mcp-status { color: var(--teal); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: Consolas, "Cascadia Mono", monospace; }
+.mcp-config { min-height: 148px; font-size: 11px; line-height: 1.45; }
 .side-footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 10px; border-top: 1px solid var(--line); }
 
 .center { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }

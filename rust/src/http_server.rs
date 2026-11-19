@@ -77,6 +77,7 @@ pub fn start_workbench(options: ServerOptions) -> Result<RunningServer, String> 
     let settings = SettingsStore::load(data_dir.join("settings.json")).map_err(|err| err.to_string())?;
     let interval = settings.get().monitor_interval_ms;
     let token = load_token(&data_dir);
+    let hub = SessionHub::new(interval);
     let state = AppState {
         token: token.clone(),
         data_dir: data_dir.clone(),
@@ -87,9 +88,9 @@ pub fn start_workbench(options: ServerOptions) -> Result<RunningServer, String> 
             TunnelStore::load(data_dir.join("tunnels.json")).map_err(|err| err.to_string())?,
         )),
         settings: Arc::new(std::sync::Mutex::new(settings)),
-        hub: SessionHub::new(interval),
+        hub: hub.clone(),
         tunnels: Arc::new(TunnelManager::new()),
-        mcp: Arc::new(McpHandler::from_hosts(hosts)),
+        mcp: Arc::new(McpHandler::with_terminals(hosts, Some(hub))),
         transfers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         sse: Arc::new(SseHub::default()),
         mcp_sessions: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -461,7 +462,9 @@ async fn put_settings(_auth: Authed, State(state): State<AppState>, Json(body): 
 async fn open_session(_auth: Authed, State(state): State<AppState>, Json(body): Json<Value>) -> Response {
     let kind = body.get("kind").and_then(|v| v.as_str()).unwrap_or("ssh");
     if kind == "local" {
-        return match state.hub.open_local() {
+        let cols = body.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u32;
+        let rows = body.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u32;
+        return match state.hub.open_local(cols, rows) {
             Ok(info) => json_ok(json!(info)),
             Err(err) => json_err(StatusCode::BAD_REQUEST, err),
         };
@@ -483,14 +486,8 @@ async fn close_session(_auth: Authed, State(state): State<AppState>, IdPath(id):
 }
 
 async fn session_metrics(_auth: Authed, State(state): State<AppState>, IdPath(id): IdPath<String>) -> Response {
-    let state = state.clone();
-    match block(move || {
-        with_ssh(&state, &id, |session| {
-            crate::monitor::sample_remote_metrics(session).map_err(|err| err.to_string())
-        })
-    })
-    .await
-    {
+    let hub = state.hub.clone();
+    match block(move || hub.sample_metrics(&id)).await {
         Ok(metrics) => json_ok(json!(metrics)),
         Err(err) => json_err(StatusCode::BAD_REQUEST, err),
     }
@@ -498,7 +495,7 @@ async fn session_metrics(_auth: Authed, State(state): State<AppState>, IdPath(id
 
 async fn sftp_list(_auth: Authed, State(state): State<AppState>, IdPath(id): IdPath<String>, Query(query): Query<PathQuery>) -> Response {
     let path = query.path.unwrap_or_else(|| "/".into());
-    match block(move || with_ssh(&state, &id, |session| list_dir(session, &path).map_err(|err| err.to_string()))).await {
+    match block(move || with_ssh(&state, &id, move |session| list_dir(session, &path).map_err(|err| err.to_string()))).await {
         Ok(entries) => json_ok(json!(entries)),
         Err(err) => json_err(StatusCode::BAD_REQUEST, err),
     }
@@ -507,7 +504,7 @@ async fn sftp_list(_auth: Authed, State(state): State<AppState>, IdPath(id): IdP
 async fn sftp_read(_auth: Authed, State(state): State<AppState>, IdPath(id): IdPath<String>, Query(query): Query<PathQuery>) -> Response {
     let path = query.path.unwrap_or_default();
     match block(move || {
-        with_ssh(&state, &id, |session| {
+        with_ssh(&state, &id, move |session| {
             let text = read_text_limited(session, &path, 256 * 1024).map_err(|err| err.to_string())?;
             Ok(json!({"content": text.content, "truncated": text.truncated}))
         })
@@ -523,7 +520,7 @@ async fn sftp_write(_auth: Authed, State(state): State<AppState>, IdPath(id): Id
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let content = body.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
     match block(move || {
-        with_ssh(&state, &id, |session| {
+        with_ssh(&state, &id, move |session| {
             sftp::write_text(session, &path, &content).map_err(|err| err.to_string())
         })
     })
@@ -583,17 +580,23 @@ async fn sftp_download(_auth: Authed, State(state): State<AppState>, IdPath(id):
     let slot = ready_slot.clone();
     let state_for_task = state.clone();
     tokio::task::spawn_blocking(move || {
-        let outcome = with_ssh(&state_for_task, &session_id, |session| {
+        let hub_job = hub.clone();
+        let slot_job = slot.clone();
+        let session_job = session_id.clone();
+        let remote_job = remote_path.clone();
+        let fname_job = fname.clone();
+        let tid_job = tid_progress.clone();
+        let outcome = with_ssh(&state_for_task, &session_id, move |session| {
             let sftp = session.sftp().map_err(|err| err.to_string())?;
-            let mut file = sftp.open(Path::new(&remote_path)).map_err(|err| err.to_string())?;
-            if let Some(sender) = lock(&slot).take() {
+            let mut file = sftp.open(Path::new(&remote_job)).map_err(|err| err.to_string())?;
+            if let Some(sender) = lock(&slot_job).take() {
                 let _ = sender.send(Ok(()));
             }
             let mut buf = [0u8; 32_768];
             let mut sent = 0u64;
             loop {
                 if cancel.load(Ordering::Relaxed) {
-                    hub.broadcast(json!({"type": "transfer:progress", "task": transfer_task(&tid_progress, &session_id, "download", &fname, &remote_path, sent, sent, "cancelled", None)}));
+                    hub_job.broadcast(json!({"type": "transfer:progress", "task": transfer_task(&tid_job, &session_job, "download", &fname_job, &remote_job, sent, sent, "cancelled", None)}));
                     return Ok(());
                 }
                 let n = file.read(&mut buf).map_err(|err| err.to_string())?;
@@ -604,9 +607,9 @@ async fn sftp_download(_auth: Authed, State(state): State<AppState>, IdPath(id):
                 if chunk_tx.blocking_send(Ok(Bytes::copy_from_slice(&buf[..n]))).is_err() {
                     return Ok(());
                 }
-                hub.broadcast(json!({"type": "transfer:progress", "task": transfer_task(&tid_progress, &session_id, "download", &fname, &remote_path, sent, 0, "running", None)}));
+                hub_job.broadcast(json!({"type": "transfer:progress", "task": transfer_task(&tid_job, &session_job, "download", &fname_job, &remote_job, sent, 0, "running", None)}));
             }
-            hub.broadcast(json!({"type": "transfer:progress", "task": transfer_task(&tid_progress, &session_id, "download", &fname, &remote_path, sent, sent.max(1), "done", None)}));
+            hub_job.broadcast(json!({"type": "transfer:progress", "task": transfer_task(&tid_job, &session_job, "download", &fname_job, &remote_job, sent, sent.max(1), "done", None)}));
             Ok(())
         });
         if let Err(err) = outcome {
@@ -658,22 +661,28 @@ async fn sftp_upload(
     let tid_progress = tid.clone();
     let state_for_task = state.clone();
     let result = block(move || {
-        hub.broadcast(json!({"type": "transfer:progress", "task": transfer_task(&tid_progress, &session_id, "upload", &fname, &remote_path, 0, bytes.len() as u64, "running", None)}));
-        let outcome = with_ssh(&state_for_task, &session_id, |session| {
-            write_bytes(session, &remote_path, &bytes, |sent, total| {
+        let total = bytes.len() as u64;
+        hub.broadcast(json!({"type": "transfer:progress", "task": transfer_task(&tid_progress, &session_id, "upload", &fname, &remote_path, 0, total, "running", None)}));
+        let hub_job = hub.clone();
+        let session_job = session_id.clone();
+        let remote_job = remote_path.clone();
+        let fname_job = fname.clone();
+        let tid_job = tid_progress.clone();
+        let outcome = with_ssh(&state_for_task, &session_id, move |session| {
+            write_bytes(session, &remote_job, &bytes, |sent, total| {
                 if cancel.load(Ordering::Relaxed) {
                     return false;
                 }
-                hub.broadcast(json!({"type": "transfer:progress", "task": transfer_task(&tid_progress, &session_id, "upload", &fname, &remote_path, sent, total, "running", None)}));
+                hub_job.broadcast(json!({"type": "transfer:progress", "task": transfer_task(&tid_job, &session_job, "upload", &fname_job, &remote_job, sent, total, "running", None)}));
                 true
             })
             .map_err(|err| err.to_string())
         });
         match &outcome {
-            Ok(()) => hub.broadcast(json!({"type": "transfer:progress", "task": transfer_task(&tid_progress, &session_id, "upload", &fname, &remote_path, bytes.len() as u64, bytes.len() as u64, "done", None)})),
+            Ok(()) => hub.broadcast(json!({"type": "transfer:progress", "task": transfer_task(&tid_progress, &session_id, "upload", &fname, &remote_path, total, total, "done", None)})),
             Err(err) => {
                 let status = if err.contains("取消") { "cancelled" } else { "error" };
-                hub.broadcast(json!({"type": "transfer:progress", "task": transfer_task(&tid_progress, &session_id, "upload", &fname, &remote_path, 0, bytes.len() as u64, status, Some(err.clone()))}));
+                hub.broadcast(json!({"type": "transfer:progress", "task": transfer_task(&tid_progress, &session_id, "upload", &fname, &remote_path, 0, total, status, Some(err.clone()))}));
             }
         }
         lock(&state_for_task.transfers).remove(&tid_progress);
@@ -702,26 +711,16 @@ async fn mcp_info(_auth: Authed, State(state): State<AppState>) -> Response {
         "sseUrl": format!("http://127.0.0.1:{port}/sse"),
         "messageUrl": format!("http://127.0.0.1:{port}/message"),
         "authorization": "Bearer",
-        "tools": ["list_hosts", "run_command", "session_status", "sftp_list", "sftp_read", "sftp_write", "system_metrics"]
+        "tools": ["list_hosts", "list_terminal_sessions", "run_command", "session_status", "sftp_list", "sftp_mkdir", "sftp_read", "sftp_write", "system_metrics"]
     }))
 }
 
-fn with_ssh<T>(state: &AppState, session_id: &str, op: impl FnOnce(&ssh2::Session) -> Result<T, String>) -> Result<T, String> {
-    let host_id = state.hub.host_id(session_id)?.ok_or_else(|| "会话未连接到 SSH 主机".to_string())?;
-    let chain = {
-        let hosts = lock(&state.hosts);
-        resolve_targets(&hosts, &host_id)?
-    };
-    let (session, learned) = crate::ssh::connect_chain(&chain).map_err(|err| err.to_string())?;
-    {
-        let mut hosts = lock(&state.hosts);
-        for (id, fingerprint) in learned {
-            if !fingerprint.is_empty() {
-                let _ = hosts.remember_fingerprint(&id, &fingerprint);
-            }
-        }
-    }
-    op(&session)
+fn with_ssh<T: Send + 'static>(
+    state: &AppState,
+    session_id: &str,
+    op: impl FnOnce(&ssh2::Session) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    state.hub.with_ssh(session_id, op)
 }
 
 async fn block<T: Send + 'static>(op: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {

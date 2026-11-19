@@ -1,17 +1,17 @@
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use base64::Engine;
+use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::{json, Value};
-use ssh2::{Channel, Session};
+use ssh2::Session;
 use tokio::sync::broadcast;
 use uuid::Uuid;
+use crate::monitor::{metrics_from_samples, PROBE_COMMAND};
 use crate::pty::LocalShellSession;
-use crate::ssh::{connect_chain, SshTarget};
+use crate::shared_ssh::{emit_data, SharedSsh};
+use crate::ssh::{connect_chain, exec_command};
 use crate::state::lock;
 use crate::store::HostStore;
 
@@ -26,16 +26,10 @@ pub struct ConnectInfo {
     pub kind: String,
 }
 
-enum ShellCmd {
-    Write(Vec<u8>),
-    Resize(u32, u32),
-    Close,
-}
-
 #[derive(Clone)]
 enum TabIo {
     Local(Arc<Mutex<LocalShellSession>>),
-    Remote(mpsc::Sender<ShellCmd>),
+    Remote(SharedSsh),
 }
 
 struct Tab {
@@ -83,9 +77,8 @@ impl SessionHub {
         Ok(tab.host_id.clone())
     }
 
-    pub fn open_local(&self) -> Result<ConnectInfo, String> {
-        let (mut session, mut reader) = LocalShellSession::spawn(None).map_err(|err| err.to_string())?;
-        let stderr = session.take_stderr();
+    pub fn open_local(&self, cols: u32, rows: u32) -> Result<ConnectInfo, String> {
+        let (session, mut reader) = LocalShellSession::open(None, cols, rows).map_err(|err| err.to_string())?;
         let session = Arc::new(Mutex::new(session));
         let id = Uuid::new_v4().to_string();
         let events = self.events.clone();
@@ -101,19 +94,6 @@ impl SessionHub {
             }
             let _ = events.send(json!({"type": "term:closed", "sessionId": id_reader}).to_string());
         });
-        if let Some(mut stderr) = stderr {
-            let events = self.events.clone();
-            let id_err = id.clone();
-            std::thread::spawn(move || {
-                let mut buf = [0u8; 2048];
-                loop {
-                    match stderr.read(&mut buf) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => emit_data(&events, &id_err, &buf[..n]),
-                    }
-                }
-            });
-        }
         let info = ConnectInfo {
             session_id: id.clone(),
             alias: "本机终端".into(),
@@ -158,21 +138,17 @@ impl SessionHub {
             .request_pty("xterm-256color", None, Some((cols, rows, 0, 0)))
             .map_err(|err| format!("无法打开远程终端: {err}"))?;
         channel.shell().map_err(|err| format!("无法启动远程 Shell: {err}"))?;
-        session.set_blocking(false);
 
         let id = Uuid::new_v4().to_string();
-        let (tx, rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
-        let events = self.events.clone();
-        let actor_id = id.clone();
-        let actor_stop = stop.clone();
-        std::thread::spawn(move || ssh_actor(session, channel, rx, events, actor_id, actor_stop));
+        let shared = SharedSsh::spawn(session, channel, self.events.clone(), id.clone(), stop.clone());
 
+        let metrics = shared.clone();
         let metrics_id = id.clone();
         let metrics_stop = stop.clone();
         let metrics_events = self.events.clone();
         let interval = self.interval.clone();
-        std::thread::spawn(move || metrics_loop(chain, metrics_events, metrics_stop, interval, metrics_id));
+        std::thread::spawn(move || metrics_loop(metrics, metrics_events, metrics_stop, interval, metrics_id));
 
         let info = ConnectInfo {
             session_id: id.clone(),
@@ -187,7 +163,7 @@ impl SessionHub {
             Tab {
                 info: info.clone(),
                 host_id: Some(leaf.id),
-                io: TabIo::Remote(tx),
+                io: TabIo::Remote(shared),
                 stop,
             },
         );
@@ -204,9 +180,7 @@ impl SessionHub {
             TabIo::Local(session) => {
                 let _ = lock(&session).kill();
             }
-            TabIo::Remote(tx) => {
-                let _ = tx.send(ShellCmd::Close);
-            }
+            TabIo::Remote(ssh) => ssh.close(),
         }
     }
 
@@ -255,7 +229,7 @@ impl SessionHub {
         };
         match io {
             Some(TabIo::Local(session)) => lock(&session).write(data.as_bytes()).is_ok(),
-            Some(TabIo::Remote(tx)) => tx.send(ShellCmd::Write(data.as_bytes().to_vec())).is_ok(),
+            Some(TabIo::Remote(ssh)) => ssh.write(data.as_bytes()),
             None => false,
         }
     }
@@ -265,8 +239,34 @@ impl SessionHub {
             let tabs = lock(&self.tabs);
             tabs.get(session_id).map(|tab| tab.io.clone())
         };
-        if let Some(TabIo::Remote(tx)) = io {
-            let _ = tx.send(ShellCmd::Resize(clamp_dim(cols, 80), clamp_dim(rows, 24)));
+        match io {
+            Some(TabIo::Remote(ssh)) => ssh.resize(clamp_dim(cols, 80), clamp_dim(rows, 24)),
+            Some(TabIo::Local(session)) => {
+                let _ = lock(&session).resize(clamp_dim(cols, 80), clamp_dim(rows, 24));
+            }
+            None => {}
+        }
+    }
+
+    pub fn with_ssh<T: Send + 'static>(
+        &self,
+        session_id: &str,
+        op: impl FnOnce(&Session) -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
+        let ssh = self.remote(session_id)?;
+        ssh.call(op)?
+    }
+
+    pub fn sample_metrics(&self, session_id: &str) -> Result<crate::monitor::ServerMetrics, String> {
+        sample_shared(&self.remote(session_id)?)
+    }
+
+    fn remote(&self, session_id: &str) -> Result<SharedSsh, String> {
+        let tabs = lock(&self.tabs);
+        let tab = tabs.get(session_id).ok_or_else(|| "找不到这个会话".to_string())?;
+        match &tab.io {
+            TabIo::Remote(ssh) => Ok(ssh.clone()),
+            TabIo::Local(_) => Err("会话未连接到 SSH 主机".into()),
         }
     }
 }
@@ -275,96 +275,27 @@ fn clamp_dim(value: u32, fallback: u32) -> u32 {
     if value == 0 { fallback } else { value.min(512) }
 }
 
-fn emit_data(events: &broadcast::Sender<String>, session_id: &str, bytes: &[u8]) {
-    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
-    let _ = events.send(json!({"type": "term:data", "sessionId": session_id, "data": data}).to_string());
-}
-
-fn is_retry(err: &std::io::Error) -> bool {
-    matches!(
-        err.kind(),
-        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted
-    ) || err.to_string().to_ascii_lowercase().contains("eagain")
-        || err.to_string().to_ascii_lowercase().contains("would block")
-}
-
-fn ssh_actor(
-    session: Session,
-    mut channel: Channel,
-    rx: mpsc::Receiver<ShellCmd>,
-    events: broadcast::Sender<String>,
-    id: String,
-    stop: Arc<AtomicBool>,
-) {
-    let mut buf = [0u8; 8192];
-    loop {
-        if stop.load(Ordering::Relaxed) {
-            break;
-        }
-        let mut eof = false;
-        loop {
-            match channel.read(&mut buf) {
-                Ok(0) => {
-                    eof = true;
-                    break;
-                }
-                Ok(n) => emit_data(&events, &id, &buf[..n]),
-                Err(err) if is_retry(&err) => break,
-                Err(_) => {
-                    eof = true;
-                    break;
-                }
-            }
-        }
-        if eof {
-            break;
-        }
-        {
-            let mut stderr = channel.stderr();
-            match stderr.read(&mut buf) {
-                Ok(n) if n > 0 => emit_data(&events, &id, &buf[..n]),
-                Ok(_) => {}
-                Err(err) if is_retry(&err) => {}
-                Err(_) => {}
-            }
-        }
-        match rx.recv_timeout(Duration::from_millis(12)) {
-            Ok(ShellCmd::Write(data)) => {
-                session.set_blocking(true);
-                let _ = channel.write_all(&data);
-                let _ = channel.flush();
-                session.set_blocking(false);
-            }
-            Ok(ShellCmd::Resize(cols, rows)) => {
-                session.set_blocking(true);
-                let _ = channel.request_pty_size(cols, rows, None, None);
-                session.set_blocking(false);
-            }
-            Ok(ShellCmd::Close) => break,
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => break,
-        }
-    }
-    session.set_blocking(true);
-    let _ = channel.close();
-    let _ = events.send(json!({"type": "term:closed", "sessionId": id}).to_string());
+fn sample_shared(ssh: &SharedSsh) -> Result<crate::monitor::ServerMetrics, String> {
+    let started = Instant::now();
+    let first = ssh.call(|session| exec_command(session, PROBE_COMMAND).map(|item| item.stdout).map_err(|err| err.to_string()))??;
+    std::thread::sleep(Duration::from_millis(200));
+    let second = ssh.call(|session| exec_command(session, PROBE_COMMAND).map(|item| item.stdout).map_err(|err| err.to_string()))??;
+    Ok(metrics_from_samples(&first, &second, started.elapsed().as_secs_f64()))
 }
 
 fn metrics_loop(
-    chain: Vec<SshTarget>,
+    ssh: SharedSsh,
     events: broadcast::Sender<String>,
     stop: Arc<AtomicBool>,
     interval: Arc<AtomicU64>,
     session_id: String,
 ) {
     while !stop.load(Ordering::Relaxed) {
-        if let Ok((session, _)) = connect_chain(&chain) {
-            if let Ok(metrics) = crate::monitor::sample_remote_metrics(&session) {
-                if let Ok(value) = serde_json::to_value(&metrics) {
-                    let _ = events.send(
-                        json!({"type": "metrics:update", "sessionId": session_id, "metrics": value}).to_string(),
-                    );
-                }
+        if let Ok(metrics) = sample_shared(&ssh) {
+            if let Ok(value) = serde_json::to_value(&metrics) {
+                let _ = events.send(
+                    json!({"type": "metrics:update", "sessionId": session_id, "metrics": value}).to_string(),
+                );
             }
         }
         let wait = interval.load(Ordering::Relaxed).max(1000);

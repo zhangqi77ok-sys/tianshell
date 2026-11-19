@@ -34,6 +34,10 @@
           <button id="open-tunnels" type="button">隧道</button>
         </div>
         <div id="host-tree" class="host-tree"></div>
+        <div class="mcp-strip">
+          <button id="open-mcp" type="button" title="把 Cursor、Claude Code 接到这个工作台">连接 MCP</button>
+          <span id="mcp-status" class="mcp-status">正在读取本机 MCP 地址…</span>
+        </div>
         <div class="side-footer">
           <span id="data-dir" class="data-dir"></span>
           <button id="open-settings" type="button" title="外观与监控设置">⚙ 设置</button>
@@ -158,7 +162,7 @@
         <label id="password-field">密码<input id="field-password" type="password" autocomplete="off" /></label>
         <div id="key-field" class="hidden">
           <div class="key-row"><span>私钥 (OpenSSH/PEM)</span><input id="pick-key-file" type="file" /></div>
-          <textarea id="field-key" spellcheck="false" placeholder="粘贴私钥内容或从上方选择文件"></textarea>
+          <textarea id="field-key" spellcheck="false" placeholder="粘贴 OpenSSH ed25519、PKCS#8 或 PEM 私钥。加密私钥请填写下面的口令"></textarea>
           <label>私钥口令 (可空)<input id="field-passphrase" type="password" autocomplete="off" /></label>
         </div>
         <label>标签 (逗号分隔)<input id="field-tags" placeholder="prod, nginx" /></label>
@@ -199,6 +203,23 @@
         <label>命令内容<textarea id="snip-cmd" required spellcheck="false"></textarea></label>
         <div class="dialog-actions"><button type="button" id="cancel-snippet">取消</button><button type="submit" class="primary">保存</button></div>
       </form>
+    </dialog>
+
+    <dialog id="mcp-dialog" class="wide-dialog">
+      <header class="dialog-head">
+        <h2>把 TianShell 接到 Cursor / Claude Code</h2>
+        <p>工作台已经在本机提供 MCP。保持这个进程开着，把下面的配置贴进客户端。令牌只在这台电脑的界面里显示。</p>
+      </header>
+      <label>Streamable HTTP<input id="mcp-url" class="mono" readonly /></label>
+      <label>本机令牌<input id="mcp-token" class="mono" readonly /></label>
+      <p class="panel-note">界面里的终端、SFTP 和监控共用这一条 SSH。<code>run_command</code> 会另开一条连接，不会往当前终端里打字。已打开的标签用工具 <code>list_terminal_sessions</code> 查看。</p>
+      <label>Cursor（<span class="mono">~/.cursor/mcp.json</span> 或项目 <span class="mono">.cursor/mcp.json</span>）<textarea id="mcp-cursor" class="mono mcp-config" readonly></textarea></label>
+      <label>Claude Code（<span class="mono">.mcp.json</span>，必须带 type）<textarea id="mcp-claude" class="mono mcp-config" readonly></textarea></label>
+      <div class="dialog-actions">
+        <button type="button" id="copy-cursor">复制 Cursor 配置</button>
+        <button type="button" id="copy-claude">复制 Claude Code 配置</button>
+        <button type="button" id="close-mcp">关闭</button>
+      </div>
     </dialog>
 
     <dialog id="settings-dialog">
