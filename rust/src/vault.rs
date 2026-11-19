@@ -141,6 +141,33 @@ pub fn dpapi_unprotect(data: &[u8]) -> Result<Vec<u8>, VaultError> {
     Ok(data.to_vec())
 }
 
+fn decode_key_bytes(decrypted: &[u8]) -> Result<[u8; KEY_LEN], VaultError> {
+    if decrypted.len() == KEY_LEN {
+        let mut key = [0u8; KEY_LEN];
+        key.copy_from_slice(decrypted);
+        return Ok(key);
+    }
+    if decrypted.len() == KEY_LEN * 2 {
+        let hex_str = std::str::from_utf8(decrypted).map_err(|_| VaultError::CorruptedKeyFile)?;
+        let mut key = [0u8; KEY_LEN];
+        for i in 0..KEY_LEN {
+            let byte = u8::from_str_radix(&hex_str[i * 2..i * 2 + 2], 16)
+                .map_err(|_| VaultError::CorruptedKeyFile)?;
+            key[i] = byte;
+        }
+        return Ok(key);
+    }
+    Err(VaultError::CorruptedKeyFile)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
 pub fn load_or_create_master_key(key_path: &Path) -> Result<[u8; KEY_LEN], VaultError> {
     if key_path.exists() {
         let raw = fs::read(key_path)?;
@@ -151,12 +178,7 @@ pub fn load_or_create_master_key(key_path: &Path) -> Result<[u8; KEY_LEN], Vault
             return Err(VaultError::CorruptedKeyFile);
         }
         let decrypted = dpapi_unprotect(&raw[TS1D_HEADER.len()..])?;
-        if decrypted.len() != KEY_LEN {
-            return Err(VaultError::CorruptedKeyFile);
-        }
-        let mut key = [0u8; KEY_LEN];
-        key.copy_from_slice(&decrypted);
-        return Ok(key);
+        return decode_key_bytes(&decrypted);
     }
 
     if let Some(parent) = key_path.parent() {
@@ -164,7 +186,8 @@ pub fn load_or_create_master_key(key_path: &Path) -> Result<[u8; KEY_LEN], Vault
     }
     let mut key = [0u8; KEY_LEN];
     rand::thread_rng().fill_bytes(&mut key);
-    let protected = dpapi_protect(&key)?;
+    let hex_key = hex_encode(&key);
+    let protected = dpapi_protect(hex_key.as_bytes())?;
     let mut file_bytes = Vec::with_capacity(TS1D_HEADER.len() + protected.len());
     file_bytes.extend_from_slice(TS1D_HEADER);
     file_bytes.extend_from_slice(&protected);
