@@ -1,6 +1,8 @@
 # TianShell
 
-一个**纯 Node.js（零 Electron）**的跨平台全功能 SSH/SFTP 协同工作台，内置标准 **MCP (Model Context Protocol)** 服务。既可在浏览器/独立应用窗中作为桌面工作台管理多台服务器，也可直接由支持 MCP 的 AI 助手（TianCode / Cursor / Claude Desktop）通过 `stdio` 协同排查与运维。
+一个跨平台的 SSH/SFTP 协同工作台，内置标准 **MCP (Model Context Protocol)** 服务。既可以在浏览器或原生窗口里管理多台服务器，也可以让支持 MCP 的 AI 助手（TianCode / Cursor / Claude Desktop）通过 `stdio` 协同排查与运维。
+
+工作台本身是 **纯 Node.js 22**（已经不再依赖 Electron）。Windows 上还可以再用 Rust 编一个原生窗口，窗口里仍然打开同一套工作台。另有一个纯 Rust 的 MCP 入口，可与 Node 版二选一。
 
 作者是 zq（[zhangqi77ok-sys](https://github.com/zhangqi77ok-sys)）。
 
@@ -34,18 +36,45 @@ npm install
 npm start
 ```
 
-`npm start` 会自动编译构建并启动本地工作台（绑定 `127.0.0.1` + 一次性会话 Token 鉴权）并打开浏览器访问。仅构筑不拉起浏览器可执行 `node dist/server.js --no-open`。
+`npm start` 会自动编译构建并启动本地工作台（绑定 `127.0.0.1` + 一次性会话 Token 鉴权）并打开浏览器访问。只构建、不打开浏览器可执行 `node dist/server.js --no-open`。
+
+### 原生窗口（Windows）
+
+先构建工作台，再启动桌面窗口。窗口会自动拉起同一套本地服务；如果找不到 `dist/server.js` 或本机没有 Node.js，会在窗口里说明原因，而不是停在空白页。
+
+```bash
+npm install
+npm run build
+cargo run --bin tianshell
+```
+
+发布用的可执行文件：
+
+```bash
+cargo build --release --bin tianshell
+```
+
+生成的是 `target/release/tianshell.exe`（本机若使用 GNU 工具链，路径可能带目标三元组）。
+
+### 纯 Rust MCP
+
+```bash
+cargo run --bin tianshell-mcp
+```
+
+它和 `node scripts/mcp.mjs` 一样走 stdio，读取同一套本机主机数据。两边不要同时抢同一个数据目录里的写入。
 
 ## 测试与类型检查
 
 ```bash
 npm run typecheck
 npm test
+cargo test
 ```
 
-## MCP 服务接入（纯 Node stdio）
+## MCP 服务接入
 
-在支持 MCP 的客户端（如 TianCode / Cursor）中添加：
+在支持 MCP 的客户端（如 TianCode / Cursor）中，可以用 Node 入口：
 
 ```json
 {
@@ -54,6 +83,18 @@ npm test
       "command": "node",
       "args": ["scripts/mcp.mjs"],
       "cwd": "C:\\path\\to\\tianshell"
+    }
+  }
+}
+```
+
+也可以改成 Rust 入口（先 `cargo build --release --bin tianshell-mcp`）：
+
+```json
+{
+  "mcpServers": {
+    "tianshell": {
+      "command": "C:\\path\\to\\tianshell\\target\\release\\tianshell-mcp.exe"
     }
   }
 }
@@ -81,6 +122,7 @@ src/ssh       SSH 连接/ProxyJump 链路、SFTP 流式操作、系统监控采�
 src/mcp       纯 Node MCP 工具注册与 stdio CLI 入口
 src/web       纯 Node HTTP REST API、原生 RFC 6455 WebSocket Hub 与服务入口
 src/renderer  四区复刻工作台前端 UI (xterm.js + SFTP/监控/隧道/多标签控制)
+rust          原生窗口、纯 Rust MCP，以及与 Node 共用的主机库/加密实现
 test          单元与真实本地 SSH/SFTP/WebSocket/MCP 集成测试
 ```
 

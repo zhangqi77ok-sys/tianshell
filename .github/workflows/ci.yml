@@ -17,3 +17,11 @@ jobs:
       - run: npm test
       - run: npm run typecheck
       - run: npm run build
+
+  rust-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked

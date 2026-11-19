@@ -85,7 +85,7 @@ test('lists hosts and the three tools without secrets', async () => {
     await withClient(deps, async (client) => {
       const tools = await client.listTools();
       const names = tools.tools.map((tool) => tool.name).sort();
-      assert.deepEqual(names, ['list_hosts', 'run_command', 'session_status']);
+      assert.deepEqual(names, ['list_hosts', 'run_command', 'session_status', 'sftp_list', 'sftp_read', 'sftp_write', 'system_metrics']);
       const listed = await client.callTool({ name: 'list_hosts', arguments: {} });
       const body = textOf(listed);
       assert.match(body, /dev/);
