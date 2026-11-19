@@ -8,7 +8,6 @@
 //! login, not a second tab — and a separate actor. A probe, a directory
 //! listing, or a transfer can occupy only that second actor.
 
-use base64::Engine;
 use serde_json::json;
 use ssh2::{Channel, Session};
 use std::io::{Read, Write};
@@ -45,6 +44,7 @@ impl PtySsh {
     pub fn spawn(
         session: Session,
         channel: Channel,
+        raw_tx: TermRawTx,
         events: broadcast::Sender<String>,
         id: String,
         stop: Arc<AtomicBool>,
@@ -56,6 +56,7 @@ impl PtySsh {
                 let shell = SshShell {
                     session,
                     channel,
+                    raw_tx,
                     events,
                     id,
                     buf: [0u8; 8192],
@@ -108,10 +109,13 @@ impl SideSsh {
     }
 }
 
-pub(crate) fn emit_data(events: &broadcast::Sender<String>, session_id: &str, bytes: &[u8]) {
-    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
-    let _ = events
-        .send(json!({"type": "term:data", "sessionId": session_id, "data": data}).to_string());
+pub(crate) type TermRawTx = std::sync::mpsc::Sender<(String, Vec<u8>)>;
+
+/// Raw PTY bytes go to one screen thread. That thread is what the browser sees,
+/// after the exit-code probe has been removed. Broadcasting the raw chunk here
+/// would paint the probe before it could be filtered.
+pub(crate) fn emit_data(raw_tx: &TermRawTx, session_id: &str, bytes: &[u8]) {
+    let _ = raw_tx.send((session_id.to_string(), bytes.to_vec()));
 }
 
 trait ShellIo {
@@ -125,6 +129,7 @@ trait ShellIo {
 struct SshShell {
     session: Session,
     channel: Channel,
+    raw_tx: TermRawTx,
     events: broadcast::Sender<String>,
     id: String,
     buf: [u8; 8192],
@@ -136,7 +141,7 @@ impl ShellIo for SshShell {
     }
 
     fn drain(&mut self) -> bool {
-        drain_shell(&mut self.channel, &mut self.buf, &self.events, &self.id)
+        drain_shell(&mut self.channel, &mut self.buf, &self.raw_tx, &self.id)
     }
 
     fn write_all(&mut self, data: &[u8]) {
@@ -203,20 +208,20 @@ fn side_actor_loop<J>(rx: Receiver<ActorMsg<J>>, mut run: impl FnMut(J)) {
 fn drain_shell(
     channel: &mut Channel,
     buf: &mut [u8],
-    events: &broadcast::Sender<String>,
+    raw_tx: &TermRawTx,
     id: &str,
 ) -> bool {
     loop {
         match channel.read(buf) {
             Ok(0) => return false,
-            Ok(n) => emit_data(events, id, &buf[..n]),
+            Ok(n) => emit_data(raw_tx, id, &buf[..n]),
             Err(err) if is_retry(&err) => break,
             Err(_) => return false,
         }
     }
     let mut stderr = channel.stderr();
     match stderr.read(buf) {
-        Ok(n) if n > 0 => emit_data(events, id, &buf[..n]),
+        Ok(n) if n > 0 => emit_data(raw_tx, id, &buf[..n]),
         Ok(_) => {}
         Err(err) if is_retry(&err) => {}
         Err(_) => {}

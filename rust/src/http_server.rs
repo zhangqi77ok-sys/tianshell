@@ -21,7 +21,7 @@ use crate::bindings::BindingStore;
 use crate::history::CommandHistory;
 use crate::hub::SessionHub;
 use crate::mcp::{tool_names, McpHandler, WorkbenchMcp};
-use crate::mcp_http::{self, TokenQuery};
+use crate::mcp_http::{self, cursor_attach_spec, merge_cursor_mcp, TokenQuery};
 use crate::paths::resolve_data_dir;
 use crate::runtime::{self, remove_runtime, write_runtime};
 use crate::sftp::{self, chmod, list_dir, mkdir, read_text_limited, remove_path, rename, write_bytes};
@@ -29,7 +29,7 @@ use crate::ssh::resolve_targets;
 use crate::state::{lock, AppState, SseHub};
 use crate::store::{HostStore, SettingsStore, SnippetStore, TunnelStore};
 use crate::tunnel::TunnelManager;
-use crate::util::{hex_encode, restrict_user_dir, restrict_user_file};
+use crate::util::{hex_encode, restrict_user_dir, restrict_user_file, write_private_atomic};
 use crate::vault::load_or_create_master_key;
 
 pub struct ServerOptions {
@@ -236,6 +236,7 @@ fn router(state: AppState) -> Router {
         .route("/api/sessions/:id/sftp/upload", post(sftp_upload))
         .route("/api/transfers/:id/cancel", post(cancel_transfer))
         .route("/api/mcp", get(mcp_info))
+        .route("/api/mcp/cursor", post(install_cursor_mcp))
         .fallback(fallback)
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(state)
@@ -738,6 +739,7 @@ async fn cancel_transfer(_auth: Authed, State(state): State<AppState>, IdPath(id
 
 async fn mcp_info(_auth: Authed, State(state): State<AppState>) -> Response {
     let port = state.port.load(Ordering::Relaxed);
+    let (command, args) = cursor_attach_spec();
     json_ok(json!({
         "transport": "streamable-http",
         "protocolVersion": runtime::MCP_PROTOCOL,
@@ -745,7 +747,30 @@ async fn mcp_info(_auth: Authed, State(state): State<AppState>) -> Response {
         "sseUrl": format!("http://127.0.0.1:{port}/sse"),
         "messageUrl": format!("http://127.0.0.1:{port}/message"),
         "authorization": "Bearer",
-        "tools": tool_names()
+        "tools": tool_names(),
+        "cursorAttach": { "command": command, "args": args }
+    }))
+}
+
+async fn install_cursor_mcp(_auth: Authed) -> Response {
+    let (command, args) = cursor_attach_spec();
+    let Some(home) = dirs::home_dir() else {
+        return json_err(StatusCode::BAD_REQUEST, "找不到用户主目录，无法写入 Cursor 配置");
+    };
+    let path = home.join(".cursor").join("mcp.json");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let merged = match merge_cursor_mcp(&existing, &command) {
+        Ok(text) => text,
+        Err(err) => return json_err(StatusCode::BAD_REQUEST, err),
+    };
+    if let Err(err) = write_private_atomic(&path, merged.as_bytes()) {
+        return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("写入 Cursor 配置失败: {err}"));
+    }
+    json_ok(json!({
+        "path": path.to_string_lossy(),
+        "installed": true,
+        "command": command,
+        "args": args
     }))
 }
 

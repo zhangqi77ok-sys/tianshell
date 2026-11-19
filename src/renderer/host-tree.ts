@@ -112,9 +112,37 @@ export class HostTreeController {
     (document.getElementById('field-notes') as HTMLInputElement).value = host?.notes ?? '';
     (document.getElementById('field-password') as HTMLInputElement).value = '';
     (document.getElementById('field-key') as HTMLTextAreaElement).value = '';
+    (document.getElementById('field-passphrase') as HTMLInputElement).value = '';
+    (document.getElementById('field-clear-fp') as HTMLInputElement).checked = false;
     (document.getElementById('form-error') as HTMLElement).textContent = '';
     document.getElementById('clear-fp-row')?.classList.toggle('hidden', !host?.fingerprint);
+    this.setAuth(host?.authType === 'privateKey' ? 'privateKey' : 'password');
+    this.sealHostFields(dlg);
     dlg.showModal();
+    const focused = document.activeElement;
+    if (focused instanceof HTMLElement && focused !== dlg) focused.blur();
+    dlg.focus();
+  }
+
+  private setAuth(mode: 'password' | 'privateKey'): void {
+    document.querySelectorAll<HTMLInputElement>('input[name="auth"]').forEach((radio) => {
+      radio.checked = radio.value === mode;
+    });
+    const isKey = mode === 'privateKey';
+    document.getElementById('password-field')?.classList.toggle('hidden', isKey);
+    document.getElementById('key-field')?.classList.toggle('hidden', !isKey);
+    const hint = document.getElementById('auth-hint');
+    if (!hint) return;
+    if (!this.editingHost) hint.textContent = '';
+    else if (this.editingHost.authType === mode) hint.textContent = isKey ? '留空则保留原私钥' : '留空则保留原密码';
+    else hint.textContent = isKey ? '改成私钥后必须填写私钥' : '改成密码后必须填写密码';
+  }
+
+  private sealHostFields(dlg: HTMLDialogElement): void {
+    dlg.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input, textarea').forEach((field) => {
+      if (field.type === 'radio' || field.type === 'checkbox' || field.type === 'file' || field.type === 'hidden') return;
+      field.readOnly = true;
+    });
   }
 
   private fillSelect(id: string, defaultLabel: string, opts: Array<{ value: string; label: string }>): void {
@@ -136,14 +164,28 @@ export class HostTreeController {
     document.getElementById('filter')?.addEventListener('input', () => this.render());
     document.getElementById('add-host')?.addEventListener('click', () => this.openModal(null));
     document.getElementById('cancel-host')?.addEventListener('click', () => (document.getElementById('host-dialog') as HTMLDialogElement).close());
+    const hostDlg = document.getElementById('host-dialog') as HTMLDialogElement | null;
+    hostDlg?.addEventListener('pointerdown', (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const field = target.closest('input, textarea');
+      if (!(field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement)) return;
+      if (field.type === 'radio' || field.type === 'checkbox' || field.type === 'file') return;
+      field.readOnly = false;
+    });
+    hostDlg?.addEventListener('keydown', (event) => {
+      const target = event.target;
+      if ((target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) && target.readOnly) {
+        event.preventDefault();
+      }
+    });
     document.getElementById('add-group')?.addEventListener('click', async () => {
       const name = await this.deps.promptText('输入新分组名称');
       if (name) { await webApi.saveGroup(name); await this.refresh(); }
     });
     document.querySelectorAll<HTMLInputElement>('input[name="auth"]').forEach((r) => r.addEventListener('change', () => {
       const isKey = (document.querySelector('input[name="auth"]:checked') as HTMLInputElement).value === 'privateKey';
-      document.getElementById('password-field')?.classList.toggle('hidden', isKey);
-      document.getElementById('key-field')?.classList.toggle('hidden', !isKey);
+      this.setAuth(isKey ? 'privateKey' : 'password');
     }));
     const pickFile = document.getElementById('pick-key-file') as HTMLInputElement;
     pickFile?.addEventListener('change', async () => {

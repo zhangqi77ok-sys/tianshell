@@ -15,6 +15,7 @@ interface TabState {
   slot: HTMLDivElement;
   metrics: ServerMetrics | null;
   closed: boolean;
+  broadcastSelected: boolean;
 }
 
 const TERM_FONT = 'Consolas, "Cascadia Mono", "Courier New", monospace';
@@ -126,8 +127,20 @@ const ws = connectWs(handleWsEvent, () => { void refreshLive('disk'); });
 
 function sendInput(data: string): void {
   if (!activeId || ws.readyState !== WebSocket.OPEN) return;
-  const broadcast = (document.getElementById('broadcast-toggle') as HTMLInputElement).checked;
-  ws.send(JSON.stringify(broadcast ? { type: 'term:broadcast', sessionIds: Array.from(tabs.keys()), data } : { type: 'term:input', sessionId: activeId, data }));
+  const enabled = (document.getElementById('broadcast-toggle') as HTMLInputElement | null)?.checked === true;
+  if (!enabled) {
+    ws.send(JSON.stringify({ type: 'term:input', sessionId: activeId, data }));
+    return;
+  }
+  const ids = new Set<string>([activeId]);
+  for (const [id, tab] of tabs) {
+    if (tab.broadcastSelected && !tab.closed) ids.add(id);
+  }
+  if (ids.size === 1) {
+    ws.send(JSON.stringify({ type: 'term:input', sessionId: activeId, data }));
+    return;
+  }
+  ws.send(JSON.stringify({ type: 'term:broadcast', sessionIds: Array.from(ids), data }));
 }
 
 function createTermInstance(info: ConnectInfo): void {
@@ -159,7 +172,7 @@ function createTermInstance(info: ConnectInfo): void {
   term.loadAddon(fit);
   term.open(slot);
   term.onData((data) => sendInput(data));
-  tabs.set(info.sessionId, { info, term, fit, slot, metrics: null, closed: false });
+  tabs.set(info.sessionId, { info, term, fit, slot, metrics: null, closed: false, broadcastSelected: false });
   selectTab(info.sessionId);
 }
 
@@ -243,12 +256,19 @@ function renderTabs(): void {
     dot.className = 'tab-dot';
     const label = document.createElement('span');
     label.textContent = tab.info.kind === 'local' ? '本机' : tab.info.alias;
+    const cast = document.createElement('input');
+    cast.type = 'checkbox';
+    cast.className = 'tab-cast';
+    cast.title = '把这个终端加入广播';
+    cast.checked = tab.broadcastSelected;
+    cast.addEventListener('click', (e) => e.stopPropagation());
+    cast.addEventListener('change', () => { tab.broadcastSelected = cast.checked; });
     const closeBtn = document.createElement('button');
     closeBtn.type = 'button';
     closeBtn.textContent = '×';
     closeBtn.style.padding = '0 4px';
     closeBtn.addEventListener('click', (e) => { e.stopPropagation(); void closeTab(id); });
-    chip.append(dot, label, closeBtn);
+    chip.append(dot, label, cast, closeBtn);
     chip.addEventListener('click', () => selectTab(id));
     bar.appendChild(chip);
   }
@@ -264,14 +284,34 @@ async function closeTab(sessionId: string): Promise<void> {
   selectTab(Array.from(tabs.keys()).pop() ?? null);
 }
 
+function setConnectStatus(text: string, failed = false): void {
+  const el = document.getElementById('connect-status');
+  if (!el) return;
+  el.textContent = text;
+  el.classList.toggle('hidden', text.length === 0);
+  el.classList.toggle('error', failed);
+}
+
+let connectGeneration = 0;
+
 async function openSshTab(hostId: string): Promise<void> {
+  const generation = ++connectGeneration;
+  const host = treeCtrl.hosts.find((item) => item.id === hostId);
+  const jump = host?.jumpHostId ? treeCtrl.hosts.find((item) => item.id === host.jumpHostId) : undefined;
+  if (host && jump) setConnectStatus(`正在经跳板机「${jump.alias}」连接「${host.alias}」…`);
   try {
     const grid = measureGrid();
-    createTermInstance(await webApi.openSession({ kind: 'ssh', hostId, cols: grid.cols, rows: grid.rows }));
+    const info = await webApi.openSession({ kind: 'ssh', hostId, cols: grid.cols, rows: grid.rows });
+    if (generation !== connectGeneration) return;
+    createTermInstance(info);
+    if (jump) setConnectStatus('');
     const tab = activeId ? tabs.get(activeId) : undefined;
     if (tab) requestAnimationFrame(() => fitTab(tab));
   } catch (err) {
-    showToast(err instanceof Error ? err.message : '连接失败');
+    if (generation !== connectGeneration) return;
+    const message = err instanceof Error ? err.message : '连接失败';
+    if (jump) setConnectStatus(message, true);
+    showToast(message);
   }
 }
 
@@ -400,8 +440,20 @@ async function applySettings(): Promise<void> {
   }
 }
 
-function mcpConfigs(url: string, token: string): { cursor: string; claude: string } {
+function mcpConfigs(
+  url: string,
+  token: string,
+  attach?: { command: string; args: string[] },
+): { cursor: string; cursorHttp: string; claude: string } {
   const cursor = {
+    mcpServers: {
+      tianshell: {
+        command: attach?.command ?? 'tianshell',
+        args: attach?.args ?? ['mcp', '--attach'],
+      },
+    },
+  };
+  const cursorHttp = {
     mcpServers: {
       tianshell: {
         url,
@@ -418,7 +470,11 @@ function mcpConfigs(url: string, token: string): { cursor: string; claude: strin
       },
     },
   };
-  return { cursor: JSON.stringify(cursor, null, 2), claude: JSON.stringify(claude, null, 2) };
+  return {
+    cursor: JSON.stringify(cursor, null, 2),
+    cursorHttp: JSON.stringify(cursorHttp, null, 2),
+    claude: JSON.stringify(claude, null, 2),
+  };
 }
 
 async function copyText(text: string, ok: string): Promise<void> {
@@ -434,10 +490,11 @@ async function showMcpDialog(): Promise<void> {
   const dlg = document.getElementById('mcp-dialog') as HTMLDialogElement;
   const info = await webApi.mcpInfo();
   const token = resolveClientToken();
-  const configs = mcpConfigs(info.url, token);
+  const configs = mcpConfigs(info.url, token, info.cursorAttach);
   (document.getElementById('mcp-url') as HTMLInputElement).value = info.url;
   (document.getElementById('mcp-token') as HTMLInputElement).value = token;
   (document.getElementById('mcp-cursor') as HTMLTextAreaElement).value = configs.cursor;
+  (document.getElementById('mcp-cursor-http') as HTMLTextAreaElement).value = configs.cursorHttp;
   (document.getElementById('mcp-claude') as HTMLTextAreaElement).value = configs.claude;
   const status = document.getElementById('mcp-status');
   if (status) status.textContent = info.url.replace(/^https?:\/\//, '');
@@ -451,6 +508,13 @@ async function boot(): Promise<void> {
   }));
   document.getElementById('close-mcp')?.addEventListener('click', () => {
     (document.getElementById('mcp-dialog') as HTMLDialogElement).close();
+  });
+  document.getElementById('install-cursor')?.addEventListener('click', () => {
+    void webApi.installCursor().then((result) => {
+      showToast(`已写入 ${result.path}`);
+    }).catch((err: unknown) => {
+      showToast(err instanceof Error ? err.message : '写入 Cursor 配置失败');
+    });
   });
   document.getElementById('copy-cursor')?.addEventListener('click', () => {
     void copyText((document.getElementById('mcp-cursor') as HTMLTextAreaElement).value, '已复制 Cursor 配置');

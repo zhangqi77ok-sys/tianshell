@@ -76,6 +76,9 @@ button.danger { background: var(--danger); color: #fff; border-color: var(--dang
 .tab-chip.active { border-color: var(--amber); background: var(--elevated); font-weight: 600; }
 .tab-chip.closed { opacity: 0.55; }
 .tab-chip.closed .tab-dot { background: var(--muted); }
+.tab-cast { margin: 0; accent-color: var(--amber); }
+.connect-status { margin: 0 8px 6px; padding: 6px 10px; border-radius: 6px; background: var(--elevated); border: 1px solid var(--amber); font-size: 12px; }
+.connect-status.error { border-color: var(--danger); color: var(--danger); }
 .tab-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--teal); }
 .toolbar-actions { display: flex; gap: 6px; align-items: center; flex: none; }
 .toggle-chip { display: flex; align-items: center; gap: 4px; font-size: 12px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }

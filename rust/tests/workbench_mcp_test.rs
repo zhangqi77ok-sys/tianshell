@@ -1,3 +1,4 @@
+use base64::Engine;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
@@ -414,6 +415,174 @@ fn hands_use_the_open_tab_and_leave_secrets_out_of_memory() {
     assert_eq!(again.len(), 1);
     assert_eq!(again[0].exit_code, Some(0));
     assert!(again[0].cwd.is_some(), "{again:?}");
+}
+
+#[test]
+fn exit_probe_stays_off_the_open_terminal() {
+    let dir = tempdir().unwrap();
+    let server = start_workbench(ServerOptions {
+        data_dir: Some(dir.path().to_path_buf()),
+        port: Some(0),
+        open_browser: false,
+    })
+    .expect("workbench");
+    let mut sock = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+    sock.set_read_timeout(Some(Duration::from_millis(200))).ok();
+    let upgrade = format!(
+        "GET /ws?token={} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+        server.token,
+        port = server.port
+    );
+    sock.write_all(upgrade.as_bytes()).unwrap();
+    let mut pending = Vec::new();
+    let header = read_http_head(&mut sock, &mut pending);
+    assert!(header.contains("101"), "{header}");
+
+    let (status, _, body) = http(
+        server.port,
+        "POST",
+        "/api/sessions",
+        Some(&server.token),
+        Some(r#"{"kind":"local"}"#),
+    );
+    assert_eq!(status, 200, "{body}");
+    let session_id = serde_json::from_str::<Value>(&body).unwrap()["data"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}"#;
+    let (status, response_headers, body) =
+        http_with_bearer(server.port, "POST", "/mcp", &server.token, None, Some(init));
+    assert_eq!(status, 200, "{body}");
+    let mcp_session = response_headers
+        .iter()
+        .find(|(name, _)| name == "mcp-session-id")
+        .map(|(_, value)| value.clone())
+        .unwrap();
+    let run = format!(
+        r#"{{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{{"name":"run_command","arguments":{{"host":"local","session_id":"{session_id}","command":"printf tianshell-probe-ok","timeout_seconds":15}}}}}}"#
+    );
+    let (status, _, body) = http_with_bearer(
+        server.port,
+        "POST",
+        "/mcp",
+        &server.token,
+        Some(&mcp_session),
+        Some(&run),
+    );
+    assert_eq!(status, 200, "{body}");
+    let payload = tool_json(&body);
+    assert_eq!(payload["exitCode"], 0, "{body}");
+    let cwd = payload["cwd"].as_str().unwrap_or("");
+    assert!(
+        !cwd.is_empty() && (cwd.starts_with('/') || cwd.contains(':')),
+        "{body}"
+    );
+    let stdout = payload["stdout"].as_str().unwrap_or("").to_string();
+    assert!(stdout.contains("tianshell-probe-ok"), "{stdout}");
+    assert_probe_hidden(&stdout);
+
+    let mut screen = String::new();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut raw = String::new();
+    loop {
+        raw.push_str(&decode_ws_text(&mut pending));
+        if Instant::now() >= deadline {
+            break;
+        }
+        let mut buf = [0u8; 8192];
+        match sock.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => pending.extend_from_slice(&buf[..n]),
+            Err(_) if Instant::now() >= deadline => break,
+            Err(_) => {}
+        }
+    }
+    raw.push_str(&decode_ws_text(&mut pending));
+    let stream = serde_json::Deserializer::from_str(&raw).into_iter::<Value>();
+    for msg in stream.flatten() {
+        if msg.get("type").and_then(|value| value.as_str()) != Some("term:data") {
+            continue;
+        }
+        if msg.get("sessionId").and_then(|value| value.as_str()) != Some(session_id.as_str()) {
+            continue;
+        }
+        let Some(data) = msg.get("data").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
+            continue;
+        };
+        screen.push_str(&String::from_utf8_lossy(&bytes));
+    }
+    assert!(
+        screen.contains("tianshell-probe-ok"),
+        "the person should see the command output: {screen:?}"
+    );
+    assert_probe_hidden(&screen);
+    drop(server);
+}
+
+fn assert_probe_hidden(text: &str) {
+    assert!(!text.contains("__TS_END_"), "exit marker leaked: {text:?}");
+    assert!(!text.contains("__ts_ec"), "probe variable leaked: {text:?}");
+    assert!(!text.contains("stty"), "echo toggle leaked: {text:?}");
+    assert!(!text.contains("ec=$?"), "quiet probe leaked: {text:?}");
+}
+
+#[test]
+fn note_only_host_edit_keeps_auth_and_secret() {
+    let dir = tempdir().unwrap();
+    let server = start_workbench(ServerOptions {
+        data_dir: Some(dir.path().to_path_buf()),
+        port: Some(0),
+        open_browser: false,
+    })
+    .expect("workbench");
+    let (status, _, body) = http(
+        server.port,
+        "POST",
+        "/api/hosts",
+        Some(&server.token),
+        Some(
+            r#"{"alias":"lab","host":"127.0.0.1","username":"ops","authType":"password","secret":"hidden-password","notes":"old"}"#,
+        ),
+    );
+    assert_eq!(status, 200, "{body}");
+    let saved: Value = serde_json::from_str(&body).unwrap();
+    let id = saved["data"]["id"].as_str().unwrap();
+    assert_eq!(saved["data"]["authType"], "password");
+    let edit = format!(
+        r#"{{"id":"{id}","alias":"lab","host":"127.0.0.1","username":"ops","authType":"password","secret":"","notes":"only the note"}}"#
+    );
+    let (status, _, body) = http(
+        server.port,
+        "POST",
+        "/api/hosts",
+        Some(&server.token),
+        Some(&edit),
+    );
+    assert_eq!(status, 200, "{body}");
+    let edited: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(edited["data"]["notes"], "only the note", "{body}");
+    assert_eq!(edited["data"]["authType"], "password", "{body}");
+    let switched = format!(
+        r#"{{"id":"{id}","alias":"lab","host":"127.0.0.1","username":"ops","authType":"privateKey","secret":"","notes":"only the note"}}"#
+    );
+    let (status, _, body) = http(
+        server.port,
+        "POST",
+        "/api/hosts",
+        Some(&server.token),
+        Some(&switched),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("请填写私钥"), "{body}");
+    let key = load_or_create_master_key(&dir.path().join("vault.key")).unwrap();
+    let store = HostStore::load(dir.path().join("hosts.json"), key).unwrap();
+    let host = store.list().iter().find(|item| item.id == id).unwrap();
+    assert_eq!(store.open_secret(&host.secret).unwrap(), "hidden-password");
+    drop(server);
 }
 
 fn tool_json(body: &str) -> Value {
