@@ -625,7 +625,8 @@ impl ProbeConceal {
         }
         self.strip_complete();
         if let Some(pos) = self.earliest_probe() {
-            self.buf.truncate(pos);
+            let start = line_start(&self.buf, pos);
+            self.buf.truncate(start);
         }
         self.armed = false;
         self.follow_sent = false;
@@ -639,6 +640,26 @@ impl ProbeConceal {
         }
         for needle in &self.line_needles {
             found = earlier(found, find_subslice(&self.buf, needle));
+        }
+        found
+    }
+
+    /// A probe fragment that has not reached its newline yet.
+    fn incomplete_probe(&self) -> Option<usize> {
+        let mut found = None;
+        let mut consider = |pos: Option<usize>| {
+            let Some(pos) = pos else { return };
+            if self.buf[pos..].contains(&b'\n') {
+                return;
+            }
+            found = Some(found.map_or(pos, |cur: usize| cur.min(pos)));
+        };
+        consider(find_subslice(&self.buf, &self.marker));
+        if !self.quiet.is_empty() {
+            consider(find_subslice(&self.buf, &self.quiet));
+        }
+        for needle in &self.line_needles {
+            consider(find_subslice(&self.buf, needle));
         }
         found
     }
@@ -684,33 +705,33 @@ impl ProbeConceal {
         }
         strip_nonce_oscs(&mut self.buf, &self.nonce);
         for needle in self.line_needles.clone() {
-            while let Some(pos) = find_subslice(&self.buf, &needle) {
-                let Some(rel) = self.buf[pos..].iter().position(|byte| *byte == b'\n') else {
-                    break;
-                };
-                self.buf.drain(pos..pos + rel + 1);
-            }
+            self.strip_through_line(&needle);
         }
-        while let Some(pos) = find_subslice(&self.buf, &self.marker) {
+        let marker = self.marker.clone();
+        self.strip_through_line(&marker);
+    }
+
+    /// Drop a finished probe line, including the cursor-addressed redraw in front of it.
+    fn strip_through_line(&mut self, needle: &[u8]) {
+        if needle.is_empty() {
+            return;
+        }
+        while let Some(pos) = find_subslice(&self.buf, needle) {
             let Some(rel) = self.buf[pos..].iter().position(|byte| *byte == b'\n') else {
                 break;
             };
-            self.buf.drain(pos..pos + rel + 1);
+            let start = line_start(&self.buf, pos);
+            self.buf.drain(start..pos + rel + 1);
         }
     }
 
     fn hold_len(&self) -> usize {
-        if let Some(pos) = find_subslice(&self.buf, &self.marker) {
-            if !self.buf[pos..].contains(&b'\n') {
-                return self.buf.len() - pos;
-            }
-        }
-        for needle in &self.line_needles {
-            if let Some(pos) = find_subslice(&self.buf, needle) {
-                if !self.buf[pos..].contains(&b'\n') {
-                    return self.buf.len() - pos;
-                }
-            }
+        // The marker often arrives before the newline, and it sits after
+        // `$global:__ts_ec` on the same PowerShell line. Holding only from the
+        // marker paints the variable. Hold the whole unfinished line instead.
+        if let Some(pos) = self.incomplete_probe() {
+            let start = line_start(&self.buf, pos);
+            return self.buf.len() - start;
         }
         if let Some(esc) = incomplete_escape_start(&self.buf) {
             return self.buf.len() - esc;
@@ -728,6 +749,14 @@ impl Default for ProbeConceal {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn line_start(buf: &[u8], pos: usize) -> usize {
+    buf[..pos]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map(|index| index + 1)
+        .unwrap_or(0)
 }
 
 fn earlier(left: Option<usize>, right: Option<usize>) -> Option<usize> {
@@ -940,6 +969,31 @@ mod tests {
             text.trim_end().ends_with('$') || text.contains("$ "),
             "{text}"
         );
+    }
+
+    #[test]
+    fn powershell_variable_is_held_with_the_marker() {
+        let nonce = "59e148db";
+        let shell = ShellKind::PowerShell;
+        let mut conceal = ProbeConceal::new();
+        conceal.arm(nonce, &shell.trailer(nonce), None, &shell.line_needles());
+        let open = format!(
+            "tianshell-probe-ok\r\nPS C:\\Users\\runneradmin> \u{1b}[?25l\u{1b}[91m\u{1b}[3;24H> \u{1b}[92m$global:__ts_ec \u{1b}[90m= \u{1b}[92mif ($null -ne $LASTEXITCODE) {{ $LASTEXITCODE }}; \u{1b}[93mWrite-Output \u{1b}[36m\"__TS_END_{nonce}__ ec="
+        );
+        let (visible, _) = conceal.push(open.as_bytes());
+        let shown = String::from_utf8_lossy(&visible);
+        assert!(shown.contains("tianshell-probe-ok"), "{shown:?}");
+        assert!(!shown.contains("__ts_ec"), "{shown:?}");
+        assert!(!shown.contains("__TS_END_"), "{shown:?}");
+        let (rest, _) = conceal.push(b"0 cwd=C:\\Users\\runneradmin\r\nPS C:\\Users\\runneradmin> ");
+        let mut all = visible;
+        all.extend(rest);
+        let text = String::from_utf8_lossy(&all);
+        assert!(text.contains("tianshell-probe-ok"), "{text:?}");
+        assert!(text.contains("PS C:\\Users\\runneradmin>"), "{text:?}");
+        assert!(!text.contains("__ts_ec"), "{text:?}");
+        assert!(!text.contains("__TS_END_"), "{text:?}");
+        assert!(!text.contains("LASTEXITCODE"), "{text:?}");
     }
 
     #[test]
