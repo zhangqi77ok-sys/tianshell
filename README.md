@@ -54,7 +54,18 @@ cargo run --bin tianshell
 cargo build --release --bin tianshell
 ```
 
-生成的是 `target/release/tianshell.exe`（本机若使用 GNU 工具链，路径可能带目标三元组）。
+生成的是 `target/release/tianshell.exe`。GitHub Actions 的 Windows 任务使用 runner 默认的 MSVC 目标，仓库里不提交链接器路径。
+
+本机如果只用 w64devkit、没有 MSVC，把下面的配置写到用户目录 `%USERPROFILE%\.cargo\config.toml`，路径改成自己的安装位置，不要提交进仓库。默认工具链是 MSVC 时，先执行 `rustup target add x86_64-pc-windows-gnu`。这时可执行文件在 `target/x86_64-pc-windows-gnu/release/`。
+
+```toml
+[build]
+target = "x86_64-pc-windows-gnu"
+
+[target.x86_64-pc-windows-gnu]
+linker = "C:\\path\\to\\w64devkit\\bin\\gcc.exe"
+ar = "C:\\path\\to\\w64devkit\\bin\\ar.exe"
+```
 
 ### 纯 Rust MCP
 
