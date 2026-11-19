@@ -1,0 +1,33 @@
+[package]
+name = "tianshell"
+version = "0.2.0"
+edition = "2021"
+authors = ["zq (zhangqi77ok-sys)"]
+description = "TianShell: 纯 Rust 全功能 SSH/SFTP/监控/隧道桌面工作台与零 Electron MCP 服务"
+
+[lib]
+name = "tianshell_core"
+path = "rust/src/lib.rs"
+
+[[bin]]
+name = "tianshell-mcp"
+path = "rust/src/bin/mcp.rs"
+
+[[test]]
+name = "vault_store_test"
+path = "rust/tests/vault_store_test.rs"
+
+[dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Security_Cryptography", "Win32_Foundation", "Win32_System_Memory"] }
+aes-gcm = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rand = "0.8"
+uuid = { version = "1.10", features = ["v4", "serde"] }
+dirs = "5.0"
+base64 = "0.22"
+thiserror = "2.0"
+tokio = { version = "1.40", features = ["full"] }
+
+[dev-dependencies]
+tempfile = "3.12"
