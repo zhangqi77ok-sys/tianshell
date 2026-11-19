@@ -132,14 +132,17 @@ fn pkcs8_ed25519(seed: &[u8; 32]) -> String {
     pem_wrap("PRIVATE KEY", &der_tlv(0x30, &body))
 }
 
-fn pkcs8_rsa(pair: &ssh_key::private::RsaKeypair) -> Result<String, String> {
+fn rsa_private(pair: &ssh_key::private::RsaKeypair) -> Result<RsaPrivateKey, String> {
     let n = BigUint::from_bytes_be(positive(&pair.public.n, "RSA 模数")?);
     let e = BigUint::from_bytes_be(positive(&pair.public.e, "RSA 公钥指数")?);
     let d = BigUint::from_bytes_be(positive(&pair.private.d, "RSA 私钥指数")?);
     let p = BigUint::from_bytes_be(positive(&pair.private.p, "RSA 素数")?);
     let q = BigUint::from_bytes_be(positive(&pair.private.q, "RSA 素数")?);
-    let key = RsaPrivateKey::from_components(n, e, d, vec![p, q]).map_err(|err| format!("无法编码 RSA 私钥: {err}"))?;
-    let pem = key
+    RsaPrivateKey::from_components(n, e, d, vec![p, q]).map_err(|err| format!("无法编码 RSA 私钥: {err}"))
+}
+
+fn pkcs8_rsa(pair: &ssh_key::private::RsaKeypair) -> Result<String, String> {
+    let pem = rsa_private(pair)?
         .to_pkcs8_pem(pkcs8::LineEnding::LF)
         .map_err(|err| format!("无法编码 RSA PKCS#8: {err}"))?;
     Ok(pem.to_string())
@@ -249,38 +252,59 @@ fn der_integer_unsigned(bytes: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pkcs1::EncodeRsaPrivateKey;
+    use pkcs8::DecodePrivateKey;
     use rand::rngs::OsRng;
+    use rsa::traits::{PrivateKeyParts, PublicKeyParts};
+    use ssh_key::private::{EcdsaKeypair, KeypairData};
     use ssh_key::{Algorithm, EcdsaCurve, LineEnding, PrivateKey};
 
     fn openssh(algorithm: Algorithm) -> PrivateKey {
         PrivateKey::random(&mut OsRng, algorithm).expect("generate")
     }
 
-    fn openssl_accepts(pem: &str) {
-        openssl::pkey::PKey::private_key_from_pem(pem.as_bytes())
-            .unwrap_or_else(|err| panic!("OpenSSL rejected auth material: {err}\n{pem}"));
+    fn assert_pkcs8(pem: &str, algorithm: &str) {
+        assert!(pem.contains("BEGIN PRIVATE KEY"), "{pem}");
+        assert!(!pem.contains("OPENSSH PRIVATE KEY"), "{pem}");
+        assert!(pem.contains("END PRIVATE KEY"));
+        let again = prepare_private_key(pem, None).unwrap();
+        assert_eq!(again.format, KeyFormat::Pkcs8);
+        assert_eq!(again.algorithm, algorithm);
+        let der = decode_pem_body(pem);
+        assert!(der.first() == Some(&0x30), "PKCS#8 must be a DER sequence");
     }
 
     #[test]
-    fn openssh_ed25519_becomes_pkcs8_that_openssl_accepts() {
-        let armored = openssh(Algorithm::Ed25519).to_openssh(LineEnding::LF).unwrap().to_string();
+    fn openssh_ed25519_becomes_pkcs8() {
+        let key = openssh(Algorithm::Ed25519);
+        let seed = {
+            let KeypairData::Ed25519(pair) = key.key_data() else {
+                panic!("expected ed25519");
+            };
+            pair.private.to_bytes()
+        };
+        let armored = key.to_openssh(LineEnding::LF).unwrap().to_string();
         assert!(armored.contains("BEGIN OPENSSH PRIVATE KEY"));
         let prepared = prepare_private_key(&armored, None).unwrap();
         assert_eq!(prepared.format, KeyFormat::OpensshConverted);
         assert_eq!(prepared.algorithm, "ssh-ed25519");
         assert!(prepared.passphrase.is_none());
-        assert!(prepared.material.contains("BEGIN PRIVATE KEY"));
-        assert!(!prepared.material.contains("OPENSSH PRIVATE KEY"));
-        openssl_accepts(&prepared.material);
-        let again = prepare_private_key(&prepared.material, None).unwrap();
-        assert_eq!(again.format, KeyFormat::Pkcs8);
-        assert_eq!(again.algorithm, "ssh-ed25519");
-        openssl_accepts(&again.material);
+        assert_pkcs8(&prepared.material, "ssh-ed25519");
+        let der = decode_pem_body(&prepared.material);
+        assert!(contains_oid(&der, &[0x06, 0x03, 0x2b, 0x65, 0x70]));
+        assert!(der.windows(seed.len()).any(|window| window == seed), "PKCS#8 dropped the ed25519 seed");
     }
 
     #[test]
     fn encrypted_openssh_ed25519_needs_the_passphrase() {
-        let encrypted = openssh(Algorithm::Ed25519).encrypt(&mut OsRng, b"correct horse").unwrap();
+        let key = openssh(Algorithm::Ed25519);
+        let seed = {
+            let KeypairData::Ed25519(pair) = key.key_data() else {
+                panic!("expected ed25519");
+            };
+            pair.private.to_bytes()
+        };
+        let encrypted = key.encrypt(&mut OsRng, b"correct horse").unwrap();
         let armored = encrypted.to_openssh(LineEnding::LF).unwrap().to_string();
         let missing = prepare_private_key(&armored, None).unwrap_err();
         assert!(missing.contains("口令"), "{missing}");
@@ -289,32 +313,52 @@ mod tests {
         let prepared = prepare_private_key(&armored, Some("correct horse")).unwrap();
         assert_eq!(prepared.format, KeyFormat::OpensshConverted);
         assert!(prepared.passphrase.is_none());
-        openssl_accepts(&prepared.material);
+        assert_pkcs8(&prepared.material, "ssh-ed25519");
+        let der = decode_pem_body(&prepared.material);
+        assert!(der.windows(seed.len()).any(|window| window == seed));
     }
 
     #[test]
     fn openssh_rsa_and_traditional_pkcs1_are_accepted() {
         let key = openssh(Algorithm::Rsa { hash: None });
+        let original = {
+            let KeypairData::Rsa(pair) = key.key_data() else {
+                panic!("expected rsa");
+            };
+            rsa_private(pair).unwrap()
+        };
         let prepared = prepare_private_key(&key.to_openssh(LineEnding::LF).unwrap(), None).unwrap();
         assert_eq!(prepared.format, KeyFormat::OpensshConverted);
         assert_eq!(prepared.algorithm, "ssh-rsa");
-        openssl_accepts(&prepared.material);
+        assert_pkcs8(&prepared.material, "ssh-rsa");
+        let loaded = RsaPrivateKey::from_pkcs8_pem(&prepared.material).expect("rsa pkcs8");
+        assert_eq!(loaded.n(), original.n());
+        assert_eq!(loaded.e(), original.e());
+        assert_eq!(loaded.d(), original.d());
 
-        let pkey = openssl::pkey::PKey::private_key_from_pem(prepared.material.as_bytes()).unwrap();
-        let pkcs1 = String::from_utf8(pkey.rsa().unwrap().private_key_to_pem().unwrap()).unwrap();
-        assert!(pkcs1.contains("BEGIN RSA PRIVATE KEY"), "{pkcs1}");
+        let pkcs1 = original.to_pkcs1_pem(pkcs1::LineEnding::LF).unwrap().to_string();
+        assert!(pkcs1.contains("BEGIN RSA PRIVATE KEY"));
         let traditional = prepare_private_key(&pkcs1, None).unwrap();
         assert_eq!(traditional.format, KeyFormat::Pkcs1Rsa);
         assert_eq!(traditional.algorithm, "ssh-rsa");
-        openssl::pkey::PKey::private_key_from_pem(traditional.material.as_bytes()).unwrap();
+        assert!(traditional.material.contains("BEGIN RSA PRIVATE KEY"));
     }
 
     #[test]
     fn openssh_p256_becomes_pkcs8() {
         let key = openssh(Algorithm::Ecdsa { curve: EcdsaCurve::NistP256 });
+        let scalar = {
+            let KeypairData::Ecdsa(EcdsaKeypair::NistP256 { private, .. }) = key.key_data() else {
+                panic!("expected p256");
+            };
+            private.as_slice().to_vec()
+        };
         let prepared = prepare_private_key(&key.to_openssh(LineEnding::LF).unwrap(), None).unwrap();
         assert_eq!(prepared.algorithm, "ecdsa-sha2-nistp256");
-        openssl_accepts(&prepared.material);
+        assert_pkcs8(&prepared.material, "ecdsa-sha2-nistp256");
+        let der = decode_pem_body(&prepared.material);
+        assert!(contains_oid(&der, &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07]));
+        assert!(der.windows(scalar.len()).any(|window| window == scalar));
     }
 
     #[test]

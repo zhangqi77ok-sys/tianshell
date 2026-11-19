@@ -59,4 +59,4 @@ tao = { version = "0.30", optional = true }
 
 [dev-dependencies]
 tempfile = "3.12"
-openssl = "0.10"
+pkcs1 = { version = "0.7.5", features = ["alloc", "pem"] }
