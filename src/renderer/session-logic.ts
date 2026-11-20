@@ -183,14 +183,24 @@ export function clearScreenInput(): string {
   return '\u000c';
 }
 
+export type QuickCommandShell = 'posix' | 'powershell';
+
 /**
- * 快捷命令要单独执行。Ctrl+U 丢掉还没回车的半行，再送出命令和换行。
- * 命令汇编器同样把 Ctrl+U 当成清掉未提交输入。不发送 Ctrl+C，避免打断正在跑的程序。
+ * 快捷命令要单独成行。Bash readline 的 Ctrl+U 只删光标左边，
+ * 光标停在半行中间时，右边的字还会留下来和命令拼在一起。
+ * 所以先 Ctrl+E 到行尾，再 Ctrl+U 删掉整行。
+ *
+ * 本机 PowerShell 的 Windows 模式不绑定这两个键。再送 Ctrl+A 选中整行，
+ * 命令文字会替换选区。Emacs 模式已经被前两个键清掉，Ctrl+A 只回到空行行首。
+ * SSH 不走这套：Ctrl+Home 一类序列在 bash 里清不掉行尾。
+ * 不发送 Ctrl+C，避免打断正在跑的程序。
  */
-export function quickCommandInput(command: string): string {
+export function quickCommandInput(command: string, shell: QuickCommandShell = 'posix'): string {
   const text = command.replace(/[\r\n]+$/, '');
   if (!text.trim()) return '';
-  return `\u0015${text}\n`;
+  const clearWholeLine = '\u0005\u0015';
+  if (shell === 'powershell') return `${clearWholeLine}\u0001${text}\n`;
+  return `${clearWholeLine}${text}\n`;
 }
 
 export type InputDelivery = 'send' | 'no-terminal' | 'link-down';

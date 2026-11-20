@@ -529,8 +529,12 @@ mod tests {
         assert_eq!(wiped.feed("\r"), Vec::<String>::new());
         let mut replaced = LineAssembler::new();
         replaced.feed("echo PARTIAL");
-        let submitted = replaced.feed("\u{15}uptime && free -h\n");
+        let submitted = replaced.feed("\u{5}\u{15}uptime && free -h\n");
         assert_eq!(submitted, vec!["uptime && free -h".to_string()]);
+        let mut powershell = LineAssembler::new();
+        powershell.feed("echo PARTIAL");
+        let ps_line = powershell.feed("\u{5}\u{15}\u{1}Get-Date\n");
+        assert_eq!(ps_line, vec!["Get-Date".to_string()]);
     }
 
     #[test]

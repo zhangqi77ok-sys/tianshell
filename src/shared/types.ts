@@ -53,6 +53,7 @@ export interface ConnectInfo {
   host: string;
   port: number;
   kind?: 'ssh' | 'local';
+  shell?: 'posix' | 'powershell';
 }
 
 export interface PrivateKeyPick {
