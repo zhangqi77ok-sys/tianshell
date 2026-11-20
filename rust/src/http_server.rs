@@ -1,6 +1,6 @@
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -20,7 +20,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 use crate::auth::{authorize, host_is_local, origin_ok};
 use crate::bindings::BindingStore;
-use crate::download_grant::{DownloadGrants, DownloadKind};
+use crate::download_grant::{archive_failure, archive_request, DownloadGrants, DownloadKind};
 use crate::mcp_config::{cursor_user_mcp_path, write_cursor_mcp_file};
 use crate::history::CommandHistory;
 use crate::hub::SessionHub;
@@ -728,21 +728,12 @@ async fn sftp_archive_download(
 }
 
 async fn stream_archive_download(state: AppState, id: String, remote: String) -> Response {
-    if remote.is_empty() {
-        return json_err(StatusCode::BAD_REQUEST, "缺少 path 参数");
-    }
-    if remote.chars().any(|c| matches!(c, ';' | '|' | '&' | '$' | '>' | '<' | '`' | '\n' | '\r')) {
-        return json_err(StatusCode::BAD_REQUEST, "路径包含非法字符");
-    }
-
-    let norm = if remote == "/" { "/" } else { remote.trim_end_matches('/') };
-    let (parent, dirname) = match norm.rfind('/') {
-        Some(0) => ("/".to_string(), norm[1..].to_string()),
-        Some(idx) => (norm[..idx].to_string(), norm[idx + 1..].to_string()),
-        None => (".".to_string(), norm.to_string()),
+    let packed = match archive_request(&remote) {
+        Ok(packed) => packed,
+        Err(message) => return json_err(StatusCode::BAD_REQUEST, message),
     };
-    let dirname = if dirname.is_empty() { "root".to_string() } else { dirname };
-    let filename = format!("{dirname}.tar.gz");
+    let filename = packed.filename.clone();
+    let command = packed.command;
 
     let tid = Uuid::new_v4().to_string();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -768,38 +759,92 @@ async fn stream_archive_download(state: AppState, id: String, remote: String) ->
         let outcome = with_ssh(&state_for_task, &session_id, move |session| {
             session.set_blocking(true);
             let mut channel = session.channel_session().map_err(|err| err.to_string())?;
-            let escaped_parent = parent.replace('\'', "'\\''");
-            let escaped_dirname = dirname.replace('\'', "'\\''");
-            let cmd = format!("tar -czf - -C '{escaped_parent}' '{escaped_dirname}'");
-            channel.exec(&cmd).map_err(|err| format!("执行远端打包失败: {err}"))?;
-
-            if let Some(sender) = lock(&slot_job).take() {
-                let _ = sender.send(Ok(()));
-            }
+            channel.exec(&command).map_err(|err| format!("执行远端打包失败: {err}"))?;
+            session.set_blocking(false);
             let mut buf = [0u8; 32_768];
+            let mut err_buf = [0u8; 1024];
+            let mut stderr = String::new();
             let mut sent = 0u64;
+            let mut started = false;
             loop {
                 if cancel.load(Ordering::Relaxed) {
+                    session.set_blocking(true);
                     hub_job.broadcast(json!({
                         "type": "transfer:progress",
                         "task": transfer_task(&tid_job, &session_job, "download", &fname_job, &remote_job, sent, sent, "cancelled", None)
                     }));
                     return Ok(());
                 }
-                let n = channel.read(&mut buf).map_err(|err| err.to_string())?;
-                if n == 0 {
+                let mut idle = true;
+                match channel.read(&mut buf) {
+                    Ok(0) => {}
+                    Ok(n) => {
+                        idle = false;
+                        if !started {
+                            started = true;
+                            if let Some(sender) = lock(&slot_job).take() {
+                                let _ = sender.send(Ok(()));
+                            }
+                        }
+                        sent += n as u64;
+                        if chunk_tx.blocking_send(Ok(Bytes::copy_from_slice(&buf[..n]))).is_err() {
+                            session.set_blocking(true);
+                            return Ok(());
+                        }
+                        hub_job.broadcast(json!({
+                            "type": "transfer:progress",
+                            "task": transfer_task(&tid_job, &session_job, "download", &fname_job, &remote_job, sent, 0, "running", None)
+                        }));
+                    }
+                    Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+                    Err(err) => {
+                        session.set_blocking(true);
+                        return Err(err.to_string());
+                    }
+                }
+                {
+                    let mut stderr_stream = channel.stderr();
+                    match stderr_stream.read(&mut err_buf) {
+                        Ok(0) => {}
+                        Ok(n) => {
+                            idle = false;
+                            if stderr.len() < 1024 {
+                                let take = n.min(1024 - stderr.len());
+                                stderr.push_str(&String::from_utf8_lossy(&err_buf[..take]));
+                            }
+                        }
+                        Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+                        Err(err) => {
+                            session.set_blocking(true);
+                            return Err(err.to_string());
+                        }
+                    }
+                }
+                if channel.eof() && idle {
                     break;
                 }
-                sent += n as u64;
-                if chunk_tx.blocking_send(Ok(Bytes::copy_from_slice(&buf[..n]))).is_err() {
-                    return Ok(());
+                if idle {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+            session.set_blocking(true);
+            channel.wait_close().ok();
+            let exit_code = channel.exit_status().unwrap_or(-1);
+            if let Some(message) = archive_failure(exit_code, &stderr) {
+                if !started {
+                    return Err(message);
                 }
                 hub_job.broadcast(json!({
                     "type": "transfer:progress",
-                    "task": transfer_task(&tid_job, &session_job, "download", &fname_job, &remote_job, sent, 0, "running", None)
+                    "task": transfer_task(&tid_job, &session_job, "download", &fname_job, &remote_job, sent, sent, "error", Some(message))
                 }));
+                return Ok(());
             }
-            channel.wait_close().ok();
+            if !started {
+                if let Some(sender) = lock(&slot_job).take() {
+                    let _ = sender.send(Ok(()));
+                }
+            }
             hub_job.broadcast(json!({
                 "type": "transfer:progress",
                 "task": transfer_task(&tid_job, &session_job, "download", &fname_job, &remote_job, sent, sent.max(1), "done", None)
@@ -1052,8 +1097,10 @@ async fn issue_download_grant(
         Some("file") | None => DownloadKind::File,
         Some(_) => return json_err(StatusCode::BAD_REQUEST, "kind 只能是 file 或 archive"),
     };
-    if kind == DownloadKind::Archive && archive_path_rejected(&remote) {
-        return json_err(StatusCode::BAD_REQUEST, "路径包含非法字符");
+    if kind == DownloadKind::Archive {
+        if let Err(message) = archive_request(&remote) {
+            return json_err(StatusCode::BAD_REQUEST, message);
+        }
     }
     if state.hub.host_id(&id).is_err() {
         return json_err(StatusCode::BAD_REQUEST, "找不到这个会话");
@@ -1125,10 +1172,6 @@ async fn write_cursor_mcp(_auth: Authed, State(state): State<AppState>, Json(bod
         })),
         Err(message) => json_err(StatusCode::BAD_REQUEST, message),
     }
-}
-
-fn archive_path_rejected(remote: &str) -> bool {
-    remote.chars().any(|c| matches!(c, ';' | '|' | '&' | '$' | '>' | '<' | '`' | '\n' | '\r'))
 }
 
 fn render_index(token: &str) -> String {
