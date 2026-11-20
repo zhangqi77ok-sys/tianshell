@@ -28,7 +28,7 @@ pub struct ConnectInfo {
     pub host: String,
     pub port: u16,
     pub kind: String,
-    /// posix：Ctrl+E 再 Ctrl+U。powershell：另外再 Ctrl+A，因为 Windows 模式不绑定 Ctrl+U。
+    /// posix：Ctrl+E 再 Ctrl+U。powershell：Escape 撤销未提交的整行，再 Ctrl+U。
     pub shell: String,
     #[serde(rename = "hostId", skip_serializing_if = "Option::is_none")]
     pub host_id: Option<String>,

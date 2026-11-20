@@ -6645,10 +6645,8 @@ WARNING: This link could potentially be dangerous`)) {
   function quickCommandInput(command, shell = "posix") {
     const text = command.replace(/[\r\n]+$/, "");
     if (!text.trim()) return "";
-    const clearWholeLine = "";
-    if (shell === "powershell") return `${clearWholeLine}${text}
-`;
-    return `${clearWholeLine}${text}
+    if (shell === "powershell") return `\x1B${text}\r`;
+    return `${text}
 `;
   }
   var LINK_DOWN_NOTICE_GAP_MS = 4e3;

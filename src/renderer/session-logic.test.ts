@@ -148,9 +148,9 @@ test('快捷命令先到行尾再清掉整行，避免光标中间的后半段�
   assert.equal(quickCommandInput(''), '');
   assert.equal(quickCommandInput('   \n', 'posix'), '');
   const powershell = quickCommandInput('Get-Date', 'powershell');
-  assert.equal(powershell, '\u0005\u0015\u0001Get-Date\n');
+  assert.equal(powershell, '\u001b\u0015Get-Date\r');
   assert.equal(powershell.includes('\u0003'), false);
-  assert.equal(powershell.includes('\u001b'), false);
+  assert.equal(powershell.includes('\u0001'), false);
 });
 
 test('清空屏幕送给 shell，而不是本地擦除', () => {

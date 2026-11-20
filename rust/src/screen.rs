@@ -368,6 +368,35 @@ impl Default for LineAssembler {
     }
 }
 
+/// 工作台快捷命令发给 shell 的按键。必须和 `quickCommandInput` 保持同一串字节。
+///
+/// posix 先 Ctrl+E 再 Ctrl+U：Bash 的 Ctrl+U 只删光标左边。
+/// powershell 先 Escape 再 Ctrl+U：PSReadLine 默认的 Windows 模式不绑定 Ctrl+U，
+/// Ctrl+A 也不会把随后的文字换成整行。Escape 撤销还没提交的编辑。
+/// Ctrl+U 留在后面，是为了让命令汇编器丢掉半行；空行上它不再改内容。
+/// PowerShell 用 CR 提交，因为那是 Enter。posix 用 LF，和已经验证过的 bash 一致。
+/// 不发送 Ctrl+C。
+pub fn quick_command_input(command: &str, powershell: bool) -> String {
+    let text = command.trim_end_matches(['\r', '\n']);
+    if text.trim().is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    if powershell {
+        out.push('\u{1b}');
+        out.push('\u{15}');
+        out.push_str(text);
+        // PSReadLine 的 Enter 是 CR。LF 在 Windows 控制台上不一定提交。
+        out.push('\r');
+    } else {
+        out.push('\u{5}');
+        out.push('\u{15}');
+        out.push_str(text);
+        out.push('\n');
+    }
+    out
+}
+
 pub fn is_trailer_line(line: &str) -> bool {
     let trimmed = line.trim();
     trimmed.contains("__TS_END_")
@@ -528,13 +557,17 @@ mod tests {
         wiped.feed("\u{7f}");
         assert_eq!(wiped.feed("\r"), Vec::<String>::new());
         let mut replaced = LineAssembler::new();
-        replaced.feed("echo PARTIAL");
-        let submitted = replaced.feed("\u{5}\u{15}uptime && free -h\n");
-        assert_eq!(submitted, vec!["uptime && free -h".to_string()]);
+        replaced.feed("echo PENDINGMID");
+        replaced.feed("\u{2}\u{2}");
+        let submitted = replaced.feed(&quick_command_input("printf 'RAN:%s\\n' MIDOK", false));
+        assert_eq!(submitted, vec!["printf 'RAN:%s\\n' MIDOK".to_string()]);
         let mut powershell = LineAssembler::new();
-        powershell.feed("echo PARTIAL");
-        let ps_line = powershell.feed("\u{5}\u{15}\u{1}Get-Date\n");
-        assert_eq!(ps_line, vec!["Get-Date".to_string()]);
+        powershell.feed("echo PENDINGMID");
+        powershell.feed("\u{1b}[D");
+        let ps_line = powershell.feed(&quick_command_input("Write-Output ('RAN:' + 'MIDOK')", true));
+        assert_eq!(ps_line, vec!["Write-Output ('RAN:' + 'MIDOK')".to_string()]);
+        assert!(!quick_command_input("Get-Date", true).contains('\u{3}'));
+        assert_eq!(quick_command_input("   \n", false), "");
     }
 
     #[test]
