@@ -9,7 +9,7 @@ import { MonitorAndToolsController } from './monitor-panel.js';
 import { SftpController } from './sftp-panel.js';
 
 interface TabState {
-  info: ConnectInfo;
+  info: ConnectInfo & { hostId?: string };
   term: Terminal;
   fit: FitAddon;
   slot: HTMLDivElement;
@@ -43,6 +43,8 @@ const TERM_THEME = {
 };
 
 type SplitMode = 'single' | 'horizontal' | 'vertical';
+type ViewMode = 'terminal' | 'sftp' | 'monitor';
+let currentView: ViewMode = 'terminal';
 let currentSplitMode: SplitMode = 'single';
 let secondaryId: string | null = null;
 let activeId: string | null = null;
@@ -180,6 +182,8 @@ async function renderQuickOpsBar(): Promise<void> {
       }
       sendInput(`${op.command}\n`);
       showToast(`已发送: ${op.name}`);
+      document.getElementById('nav-ops-menu')?.classList.add('hidden');
+      switchView('terminal');
     });
     container.appendChild(chip);
   }
@@ -336,12 +340,22 @@ function createTermInstance(info: ConnectInfo): void {
   selectTab(info.sessionId);
 }
 
+function isTerminalViewActive(): boolean {
+  const viewTerm = document.getElementById('view-terminal');
+  return Boolean(viewTerm && viewTerm.classList.contains('active'));
+}
+
 function fitTab(tab: TabState): void {
-  if (tab.slot.classList.contains('hidden')) return;
+  // 门禁 1：若终端主视图未激活或槽位隐藏，坚决不执行 fit 和向远端发送 resize
+  if (!isTerminalViewActive() || tab.slot.classList.contains('hidden')) return;
+
+  const stage = document.getElementById('terminal-stage');
+  if (!stage || stage.clientWidth < 100 || stage.clientHeight < 50) return;
+
   tab.fit.fit();
   const { cols, rows } = tab.term;
-  // 尺寸门禁：严禁在容器尚未完成渲染或过渡态时发送异常极小尺寸（如 xterm 兜底的 2 列）
-  if (!tab.closed && cols >= 20 && rows >= 5 && ws.readyState === WebSocket.OPEN) {
+  // 尺寸门禁：严禁在容器尚未完成渲染或过渡态时发送异常极小尺寸（必须 >= 30 列且 >= 6 行）
+  if (!tab.closed && cols >= 30 && rows >= 6 && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'term:resize', sessionId: tab.info.sessionId, cols, rows }));
   }
 }
@@ -370,6 +384,66 @@ function measureGrid(): { cols: number; rows: number } {
   return { cols: 100, rows: 28 };
 }
 
+function updateNavHostBadge(tab: TabState | undefined): void {
+  const dot = document.getElementById('nav-host-dot');
+  const aliasEl = document.getElementById('nav-host-alias');
+  const ipEl = document.getElementById('nav-host-ip');
+  if (!dot || !aliasEl || !ipEl) return;
+
+  if (!tab) {
+    dot.className = 'status-dot disconnected';
+    aliasEl.textContent = '未连接主机';
+    ipEl.textContent = '';
+    return;
+  }
+
+  if (tab.closed) {
+    dot.className = 'status-dot closed';
+    aliasEl.textContent = tab.info.kind === 'local' ? '本机终端' : tab.info.alias;
+    ipEl.textContent = tab.info.kind === 'local' ? '(Local - 已断开)' : `(${tab.info.host} - 已断开)`;
+  } else {
+    dot.className = 'status-dot connected';
+    aliasEl.textContent = tab.info.kind === 'local' ? '本机终端' : tab.info.alias;
+    ipEl.textContent = tab.info.kind === 'local' ? '(Local)' : `(${tab.info.host})`;
+  }
+}
+
+function switchView(view: ViewMode): void {
+  currentView = view;
+  const btnTerm = document.getElementById('nav-btn-terminal');
+  const btnSftp = document.getElementById('nav-btn-sftp');
+  const btnMon = document.getElementById('nav-btn-monitor');
+  const viewTerm = document.getElementById('view-terminal');
+  const viewSftp = document.getElementById('view-sftp');
+  const viewMon = document.getElementById('view-monitor');
+
+  btnTerm?.classList.toggle('active', view === 'terminal');
+  btnSftp?.classList.toggle('active', view === 'sftp');
+  btnMon?.classList.toggle('active', view === 'monitor');
+
+  viewTerm?.classList.toggle('active', view === 'terminal');
+  viewSftp?.classList.toggle('active', view === 'sftp');
+  viewMon?.classList.toggle('active', view === 'monitor');
+
+  if (view === 'terminal') {
+    requestAnimationFrame(() => {
+      fitVisibleTabs();
+      if (activeId) {
+        const tab = tabs.get(activeId);
+        if (tab && !tab.closed) {
+          tab.term.focus();
+          tab.term.refresh(0, tab.term.rows - 1);
+        }
+      }
+    });
+  } else if (view === 'sftp') {
+    sftpCtrl.syncSession();
+  } else if (view === 'monitor') {
+    const tab = activeId ? tabs.get(activeId) : undefined;
+    showMetricsFor(tab);
+  }
+}
+
 function showMetricsFor(tab: TabState | undefined): void {
   if (!tab || tab.closed || tab.info.kind !== 'ssh') {
     monCtrl.renderMetrics(null, 'idle');
@@ -386,6 +460,7 @@ function markClosed(sessionId: string): void {
   if (activeId === sessionId) {
     showMetricsFor(tab);
     sftpCtrl.syncSession();
+    updateNavHostBadge(tab);
   }
   renderTabs();
 }
@@ -407,6 +482,7 @@ function updateSplitControls(): void {
 }
 
 function fitVisibleTabs(): void {
+  if (!isTerminalViewActive()) return;
   if (activeId) {
     const tab = tabs.get(activeId);
     if (tab) fitTab(tab);
@@ -472,6 +548,7 @@ function selectTab(sessionId: string | null): void {
     updateSplitControls();
     document.getElementById('term-empty')?.classList.remove('hidden');
     monCtrl.renderMetrics(null, 'idle');
+    updateNavHostBadge(undefined);
     renderTabs();
     sftpCtrl.syncSession();
     return;
@@ -501,13 +578,16 @@ function selectTab(sessionId: string | null): void {
       tab.slot.classList.toggle('active-pane', isAct);
       if (isAct) {
         fitTab(tab);
-        tab.term.focus();
+        if (currentView === 'terminal') {
+          tab.term.focus();
+        }
         showMetricsFor(tab);
       }
     }
     renderTabs();
     sftpCtrl.syncSession();
   }
+  updateNavHostBadge(tabs.get(sessionId));
 }
 
 function renderTabs(): void {
@@ -585,6 +665,13 @@ async function closeTab(sessionId: string): Promise<void> {
 }
 
 async function openSshTab(hostId: string): Promise<void> {
+  const existingTab = Array.from(tabs.values()).find((t) => t.info.hostId === hostId && !t.closed);
+  if (existingTab) {
+    selectTab(existingTab.info.sessionId);
+    switchView('terminal');
+    showToast(`已切换至: ${existingTab.info.alias}`);
+    return;
+  }
   if (pendingConnections.has(hostId)) return;
   const host = treeCtrl.hosts.find((h) => h.id === hostId);
   const alias = host ? host.alias : '远程主机';
@@ -608,7 +695,7 @@ async function openSshTab(hostId: string): Promise<void> {
 
   try {
     const grid = measureGrid();
-    const info = await webApi.openSession({ kind: 'ssh', hostId, cols: grid.cols, rows: grid.rows });
+    const info = (await webApi.openSession({ kind: 'ssh', hostId, cols: grid.cols, rows: grid.rows })) as ConnectInfo & { hostId?: string };
     if (!info.hostId) info.hostId = hostId;
     pendingConnections.delete(hostId);
     hostEl?.classList.remove('connecting');
@@ -649,25 +736,60 @@ function findInActiveTerm(needle: string, forward = false): void {
 }
 
 function bindGlobalUi(): void {
-  document.getElementById('open-local')?.addEventListener('click', async () => {
+  // 核心三合一全局视图切换
+  document.getElementById('nav-btn-terminal')?.addEventListener('click', () => switchView('terminal'));
+  document.getElementById('nav-btn-sftp')?.addEventListener('click', () => switchView('sftp'));
+  document.getElementById('nav-btn-monitor')?.addEventListener('click', () => switchView('monitor'));
+
+  // 顶部导航：悬浮运维动作下拉
+  const navOpsToggle = document.getElementById('nav-ops-toggle');
+  const navOpsMenu = document.getElementById('nav-ops-menu');
+  navOpsToggle?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    navOpsMenu?.classList.toggle('hidden');
+  });
+  window.addEventListener('click', (e) => {
+    if (navOpsMenu && !navOpsMenu.classList.contains('hidden') && !navOpsMenu.contains(e.target as Node) && e.target !== navOpsToggle) {
+      navOpsMenu.classList.add('hidden');
+    }
+  });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && navOpsMenu && !navOpsMenu.classList.contains('hidden')) {
+      navOpsMenu.classList.add('hidden');
+    }
+  });
+
+  // 左侧栏收起 / 展开
+  const sidebar = document.getElementById('sidebar');
+  const sideToggleBtn = document.getElementById('sidebar-toggle-btn');
+  sideToggleBtn?.addEventListener('click', () => {
+    if (!sidebar) return;
+    const isCollapsed = sidebar.classList.toggle('collapsed');
+    sideToggleBtn.textContent = isCollapsed ? '▶' : '◀';
+    sideToggleBtn.title = isCollapsed ? '展开左侧栏' : '收起左侧栏';
+    requestAnimationFrame(() => fitVisibleTabs());
+  });
+
+  // 顶部活动主机指示徽标点击联动切换至当前活跃终端
+  document.getElementById('nav-host-badge')?.addEventListener('click', () => {
+    if (activeId) switchView('terminal');
+  });
+
+  // 打开新终端（顶部栏与侧栏）
+  const handleOpenLocal = async () => {
     const grid = measureGrid();
     createTermInstance(await webApi.openSession({ kind: 'local', cols: grid.cols, rows: grid.rows }));
-  });
+  };
+  document.getElementById('open-local')?.addEventListener('click', handleOpenLocal);
+  document.getElementById('new-tab-local')?.addEventListener('click', handleOpenLocal);
+
   document.getElementById('split-single')?.addEventListener('click', () => setSplitMode('single'));
   document.getElementById('split-horizontal')?.addEventListener('click', () => setSplitMode('horizontal'));
   document.getElementById('split-vertical')?.addEventListener('click', () => setSplitMode('vertical'));
-  document.getElementById('quick-ops-toggle')?.addEventListener('click', () => {
-    const bar = document.getElementById('quick-ops-bar');
-    const btn = document.getElementById('quick-ops-toggle');
-    const isHidden = bar?.classList.toggle('hidden');
-    btn?.classList.toggle('active', !isHidden);
-    fitVisibleTabs();
-  });
   document.getElementById('quick-ops-add')?.addEventListener('click', () => {
     (document.getElementById('snippet-dialog') as HTMLDialogElement)?.showModal();
   });
   document.getElementById('open-tunnels')?.addEventListener('click', () => void monCtrl.openTunnelModal());
-  document.getElementById('inspector-toggle')?.addEventListener('click', () => document.getElementById('inspector')?.classList.toggle('hidden'));
   document.getElementById('theme-toggle')?.addEventListener('click', async () => {
     const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
     document.documentElement.setAttribute('data-theme', next);
@@ -705,6 +827,7 @@ function bindGlobalUi(): void {
 
   const setDlg = document.getElementById('settings-dialog') as HTMLDialogElement;
   document.getElementById('open-settings')?.addEventListener('click', () => setDlg.showModal());
+  document.getElementById('open-settings-top')?.addEventListener('click', () => setDlg.showModal());
   document.getElementById('cancel-settings')?.addEventListener('click', () => setDlg.close());
   document.getElementById('settings-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -799,17 +922,17 @@ window.addEventListener('keydown', (e) => {
 });
 
 window.addEventListener('resize', () => {
-  fitVisibleTabs();
+  if (isTerminalViewActive()) fitVisibleTabs();
 });
 const stage = document.getElementById('terminal-stage');
 if (stage && 'ResizeObserver' in window) {
   const observer = new ResizeObserver(() => {
-    fitVisibleTabs();
+    if (isTerminalViewActive()) fitVisibleTabs();
   });
   observer.observe(stage);
 }
 void document.fonts?.ready.then(() => {
-  fitVisibleTabs();
+  if (isTerminalViewActive()) fitVisibleTabs();
 });
 
 async function applySettings(): Promise<void> {
@@ -877,6 +1000,8 @@ async function showMcpDialog(): Promise<void> {
 
 async function boot(): Promise<void> {
   bindGlobalUi();
+  switchView('terminal');
+  updateNavHostBadge(undefined);
   document.getElementById('open-mcp')?.addEventListener('click', () => void showMcpDialog().catch((err: unknown) => {
     showToast(err instanceof Error ? err.message : '读不到 MCP 地址');
   }));

@@ -6279,17 +6279,17 @@ WARNING: This link could potentially be dangerous`)) {
       }
     }
     renderHostRow(h) {
-      const isOnline = Boolean(this.deps.getActiveHostIds?.().has(h.id));
       const item = document.createElement("div");
       item.className = "host-item";
       item.id = `host-${h.id}`;
+      const isOnline = Boolean(this.deps.getActiveHostIds?.().has(h.id));
       const left = document.createElement("div");
       const alias = document.createElement("div");
       alias.className = "host-alias";
       if (isOnline) {
         const dot = document.createElement("span");
         dot.className = "online-dot";
-        dot.title = "在线活跃连接中";
+        dot.title = "\u5728\u7EBF\u6D3B\u8DC3\u8FDE\u63A5\u4E2D";
         alias.appendChild(dot);
       }
       const aliasText = document.createTextNode(`${h.jumpHostId ? "\u{1F500} " : ""}${h.alias}`);
@@ -6303,8 +6303,8 @@ WARNING: This link could potentially be dangerous`)) {
       const connectBtn = document.createElement("button");
       connectBtn.type = "button";
       connectBtn.className = "host-connect-btn";
-      connectBtn.textContent = "连接";
-      connectBtn.title = "连接此远程主机";
+      connectBtn.textContent = "\u8FDE\u63A5";
+      connectBtn.title = "\u8FDE\u63A5\u6B64\u8FDC\u7A0B\u4E3B\u673A";
       connectBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         this.deps.onOpenHost(h.id);
@@ -6313,7 +6313,7 @@ WARNING: This link could potentially be dangerous`)) {
       editBtn.type = "button";
       editBtn.className = "host-btn-icon";
       editBtn.textContent = "\u270F\uFE0F";
-      editBtn.title = "编辑主机配置";
+      editBtn.title = "\u7F16\u8F91\u4E3B\u673A\u914D\u7F6E";
       editBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         this.openModal(h);
@@ -6322,7 +6322,7 @@ WARNING: This link could potentially be dangerous`)) {
       delBtn.type = "button";
       delBtn.className = "host-btn-icon";
       delBtn.textContent = "\u{1F5D1}\uFE0F";
-      delBtn.title = "删除主机";
+      delBtn.title = "\u5220\u9664\u4E3B\u673A";
       delBtn.addEventListener("click", async (e) => {
         e.stopPropagation();
         await webApi.deleteHost(h.id);
@@ -6436,17 +6436,54 @@ WARNING: This link could potentially be dangerous`)) {
     const dot = name.lastIndexOf(".");
     const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
     switch (ext) {
-      case "sh": case "bash": case "zsh": case "bat": case "cmd": case "ps1":
+      case "sh":
+      case "bash":
+      case "zsh":
+      case "bat":
+      case "cmd":
+      case "ps1":
         return { icon: "\u26A1", cls: "file-sh" };
-      case "conf": case "config": case "yaml": case "yml": case "json": case "toml": case "ini": case "env": case "xml":
+      case "conf":
+      case "config":
+      case "yaml":
+      case "yml":
+      case "json":
+      case "toml":
+      case "ini":
+      case "env":
+      case "xml":
         return { icon: "\u2699\uFE0F", cls: "file-conf" };
-      case "tar": case "gz": case "zip": case "tgz": case "7z": case "rar": case "xz": case "bz2":
+      case "tar":
+      case "gz":
+      case "zip":
+      case "tgz":
+      case "7z":
+      case "rar":
+      case "xz":
+      case "bz2":
         return { icon: "\u{1F4E6}", cls: "file-archive" };
-      case "log": case "out": case "err":
+      case "log":
+      case "out":
+      case "err":
         return { icon: "\u{1F4DD}", cls: "file-log" };
-      case "key": case "pem": case "pub": case "crt": case "cer": case "p12":
+      case "key":
+      case "pem":
+      case "pub":
+      case "crt":
+      case "cer":
+      case "p12":
         return { icon: "\u{1F511}", cls: "file-key" };
-      case "py": case "rs": case "js": case "ts": case "go": case "java": case "c": case "cpp": case "h": case "html": case "css":
+      case "py":
+      case "rs":
+      case "js":
+      case "ts":
+      case "go":
+      case "java":
+      case "c":
+      case "cpp":
+      case "h":
+      case "html":
+      case "css":
         return { icon: "\u{1F4BB}", cls: "file-code" };
       default:
         return { icon: "\u{1F4C4}", cls: "file-default" };
@@ -6516,7 +6553,6 @@ WARNING: This link could potentially be dangerous`)) {
       this.breadcrumbsEl.textContent = "";
       const norm = dirPath === "/" ? "/" : dirPath.replace(/\/+$/, "");
       const parts = norm.split("/").filter(Boolean);
-
       const rootChip = document.createElement("span");
       rootChip.className = `breadcrumb-chip ${parts.length === 0 ? "active" : ""}`;
       rootChip.textContent = "\u{1F3E0} /";
@@ -6526,19 +6562,16 @@ WARNING: This link could potentially be dangerous`)) {
         void this.load("/");
       });
       this.breadcrumbsEl.appendChild(rootChip);
-
       let accum = "";
       for (let i = 0; i < parts.length; i++) {
         const seg = parts[i];
         accum += `/${seg}`;
         const targetPath = accum;
         const isLast = i === parts.length - 1;
-
         const sep = document.createElement("span");
         sep.className = "breadcrumb-sep";
         sep.textContent = "\u203A";
         this.breadcrumbsEl.appendChild(sep);
-
         const chip = document.createElement("span");
         chip.className = `breadcrumb-chip ${isLast ? "active" : ""}`;
         chip.textContent = seg;
@@ -6605,8 +6638,6 @@ WARNING: This link could potentially be dangerous`)) {
         nameBtn.textContent = `${meta.icon} ${entry.name}`;
         nameBtn.style.cursor = "pointer";
         nameBtn.className = `sftp-item-name ${meta.cls}`;
-        nameBtn.style.cursor = "pointer";
-        nameBtn.className = "sftp-item-name";
         nameTd.appendChild(nameBtn);
         tr.appendChild(nameTd);
         for (const val of [entry.permissions, isDir ? "--" : formatBytes(entry.size), entry.mtimeMs ? new Date(entry.mtimeMs).toLocaleString() : "--"]) {
@@ -6628,7 +6659,6 @@ WARNING: This link could potentially be dangerous`)) {
         this.addOpBtn(opsTd, "\u6743\u9650", () => void this.chmodItem(entry));
         this.addOpBtn(opsTd, "\u5220", () => void this.deleteItem(entry));
         tr.appendChild(opsTd);
-
         const handleOpen = () => {
           if (isDir) {
             void this.load(entry.path);
@@ -6638,7 +6668,6 @@ WARNING: This link could potentially be dangerous`)) {
             void this.load(entry.path).catch(() => void this.openEditor(entry.path));
           }
         };
-
         nameBtn.addEventListener("click", (e) => {
           e.stopPropagation();
           handleOpen();
@@ -6668,10 +6697,10 @@ WARNING: This link could potentially be dangerous`)) {
       try {
         const res = await webApi.sftpReadText(sid, remotePath);
         this.editingPath = remotePath;
-        const fileName = remotePath.split("/").pop() || "文件";
+        const fileName = remotePath.split("/").pop() || "\u6587\u4EF6";
         const meta = getFileMeta(fileName, false);
         if (this.editorFileIcon) this.editorFileIcon.textContent = meta.icon;
-        this.editorPathEl.textContent = res.truncated ? `${remotePath}（仅预览前 256KB）` : remotePath;
+        this.editorPathEl.textContent = res.truncated ? `${remotePath}\uFF08\u4EC5\u9884\u89C8\u524D 256KB\uFF09` : remotePath;
         this.editorPathEl.title = remotePath;
         this.editorContent.value = res.content;
         this.editorOriginalContent = res.content;
@@ -6681,7 +6710,7 @@ WARNING: This link could potentially be dangerous`)) {
         this.editorDlg.showModal();
         requestAnimationFrame(() => this.editorContent.focus());
       } catch (err) {
-        this.deps.toast(err instanceof Error ? err.message : "读取文件失败");
+        this.deps.toast(err instanceof Error ? err.message : "\u8BFB\u53D6\u6587\u4EF6\u5931\u8D25");
       }
     }
     updateEditorGutter() {
@@ -6693,8 +6722,8 @@ WARNING: This link could potentially be dangerous`)) {
         nums += (i === 1 ? "" : "\n") + i;
       }
       this.editorGutter.textContent = nums;
-      if (this.editorLineCount) this.editorLineCount.textContent = `共 ${count} 行`;
-      if (this.editorCharCount) this.editorCharCount.textContent = `${this.editorContent.value.length} 字符`;
+      if (this.editorLineCount) this.editorLineCount.textContent = `\u5171 ${count} \u884C`;
+      if (this.editorCharCount) this.editorCharCount.textContent = `${this.editorContent.value.length} \u5B57\u7B26`;
     }
     updateEditorCursorInfo() {
       if (!this.editorCursorPos) return;
@@ -6703,14 +6732,14 @@ WARNING: This link could potentially be dangerous`)) {
       const lines = textBefore.split("\n");
       const lineNum = lines.length;
       const colNum = lines[lines.length - 1].length + 1;
-      this.editorCursorPos.textContent = `行 ${lineNum}, 列 ${colNum}`;
+      this.editorCursorPos.textContent = `\u884C ${lineNum}, \u5217 ${colNum}`;
     }
     checkEditorDirty() {
       if (!this.editorDirtyBadge) return;
       const dirty = this.editorContent.value !== this.editorOriginalContent;
       this.isEditorDirty = dirty;
       this.editorDirtyBadge.className = `editor-dirty-badge ${dirty ? "dirty" : "clean"}`;
-      this.editorDirtyBadge.textContent = dirty ? "● 未保存" : "✓ 已保存";
+      this.editorDirtyBadge.textContent = dirty ? "\u25CF \u672A\u4FDD\u5B58" : "\u2713 \u5DF2\u4FDD\u5B58";
     }
     async saveEditorContent() {
       const sid = this.deps.getActiveSshId();
@@ -6719,17 +6748,17 @@ WARNING: This link could potentially be dangerous`)) {
         await webApi.sftpWriteText(sid, this.editingPath, this.editorContent.value);
         this.editorOriginalContent = this.editorContent.value;
         this.checkEditorDirty();
-        this.deps.toast(`已写回远端文件: ${this.editingPath.split("/").pop()}`);
+        this.deps.toast(`\u5DF2\u5199\u56DE\u8FDC\u7AEF\u6587\u4EF6: ${this.editingPath.split("/").pop()}`);
         void this.load(this.currentDir, true);
         return true;
       } catch (err) {
-        this.deps.toast(err instanceof Error ? `保存失败: ${err.message}` : "保存失败");
+        this.deps.toast(err instanceof Error ? `\u4FDD\u5B58\u5931\u8D25: ${err.message}` : "\u4FDD\u5B58\u5931\u8D25");
         return false;
       }
     }
     handleCloseEditor() {
       if (this.isEditorDirty) {
-        if (!window.confirm("当前文件存在未保存的修改，确定放弃修改并关闭吗？")) {
+        if (!window.confirm("\u5F53\u524D\u6587\u4EF6\u5B58\u5728\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u786E\u5B9A\u653E\u5F03\u4FEE\u6539\u5E76\u5173\u95ED\u5417\uFF1F")) {
           return;
         }
       }
@@ -6750,7 +6779,7 @@ WARNING: This link could potentially be dangerous`)) {
       if (!sid) return;
       const a = document.createElement("a");
       a.href = webApi.sftpArchiveDownloadUrl(sid, remotePath);
-      const name = remotePath === "/" ? "root" : (remotePath.split("/").filter(Boolean).pop() || "archive");
+      const name = remotePath === "/" ? "root" : remotePath.split("/").filter(Boolean).pop() || "archive";
       a.download = `${name}.tar.gz`;
       document.body.appendChild(a);
       a.click();
@@ -6907,7 +6936,7 @@ WARNING: This link could potentially be dangerous`)) {
             const fullBlock = val.substring(lineStart, end);
             const lines = fullBlock.split("\n");
             if (e.shiftKey) {
-              const outdented = lines.map((l) => (l.startsWith("  ") ? l.slice(2) : l.startsWith(" ") ? l.slice(1) : l)).join("\n");
+              const outdented = lines.map((l) => l.startsWith("  ") ? l.slice(2) : l.startsWith(" ") ? l.slice(1) : l).join("\n");
               this.editorContent.value = val.substring(0, lineStart) + outdented + after;
               this.editorContent.selectionStart = start;
               this.editorContent.selectionEnd = lineStart + outdented.length;
@@ -6926,22 +6955,19 @@ WARNING: This link could potentially be dangerous`)) {
           this.handleCloseEditor();
         }
       });
-
       this.editorMaximizeBtn?.addEventListener("click", () => {
         const isMax = this.editorDlg.classList.toggle("maximized");
         if (this.editorMaximizeBtn) {
-          this.editorMaximizeBtn.textContent = isMax ? "❐ 还原" : "⛶ 最大化";
+          this.editorMaximizeBtn.textContent = isMax ? "\u2750 \u8FD8\u539F" : "\u26F6 \u6700\u5927\u5316";
         }
       });
-
       this.editorReloadBtn?.addEventListener("click", () => {
         if (!this.editingPath) return;
-        if (this.isEditorDirty && !window.confirm("重新载入将覆盖未保存的修改，确定继续吗？")) {
+        if (this.isEditorDirty && !window.confirm("\u91CD\u65B0\u8F7D\u5165\u5C06\u8986\u76D6\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u786E\u5B9A\u7EE7\u7EED\u5417\uFF1F")) {
           return;
         }
         void this.openEditor(this.editingPath);
       });
-
       document.getElementById("cancel-editor")?.addEventListener("click", () => this.handleCloseEditor());
       this.closeEditorBtn?.addEventListener("click", () => this.handleCloseEditor());
       document.getElementById("editor-form")?.addEventListener("submit", async (e) => {
@@ -6953,19 +6979,6 @@ WARNING: This link could potentially be dangerous`)) {
   };
 
   // src/renderer/monitor-panel.ts
-  function formatHistoryTime(iso) {
-    try {
-      const d = new Date(iso);
-      if (isNaN(d.getTime())) return iso.slice(5, 16).replace("T", " ");
-      const m = String(d.getMonth() + 1).padStart(2, "0");
-      const day = String(d.getDate()).padStart(2, "0");
-      const h = String(d.getHours()).padStart(2, "0");
-      const min = String(d.getMinutes()).padStart(2, "0");
-      return `${m}-${day} ${h}:${min}`;
-    } catch {
-      return iso.slice(5, 16).replace("T", " ");
-    }
-  }
   var MonitorAndToolsController = class {
     constructor(deps) {
       this.deps = deps;
@@ -7075,7 +7088,7 @@ WARNING: This link could potentially be dangerous`)) {
           const card = document.createElement("button");
           card.type = "button";
           card.className = "history-item";
-          card.title = `发送到终端: ${row.command}`;
+          card.title = `\u53D1\u9001\u5230\u7EC8\u7AEF: ${row.command}`;
           const meta = document.createElement("div");
           meta.className = "history-meta";
           const metaLeft = document.createElement("div");
@@ -7093,22 +7106,20 @@ WARNING: This link could potentially be dangerous`)) {
             statusSpan.textContent = row.exitCode === 0 ? "\u6210\u529F" : `\u9000\u51FA ${row.exitCode}`;
           }
           meta.append(metaLeft, statusSpan);
-
           const copyBtn = document.createElement("button");
           copyBtn.type = "button";
           copyBtn.className = "history-copy-btn";
-          copyBtn.title = "复制命令到剪贴板";
-          copyBtn.textContent = "📋 复制";
+          copyBtn.title = "\u590D\u5236\u547D\u4EE4\u5230\u526A\u8D34\u677F";
+          copyBtn.textContent = "\u{1F4CB} \u590D\u5236";
           copyBtn.addEventListener("click", async (e) => {
             e.stopPropagation();
             try {
               await navigator.clipboard.writeText(row.command);
-              this.deps.toast("已复制命令到剪贴板");
+              this.deps.toast("\u5DF2\u590D\u5236\u547D\u4EE4\u5230\u526A\u8D34\u677F");
             } catch {
-              this.deps.toast("复制失败");
+              this.deps.toast("\u590D\u5236\u5931\u8D25");
             }
           });
-
           const cmd = document.createElement("div");
           cmd.className = "history-cmd";
           cmd.textContent = row.command;
@@ -7265,6 +7276,19 @@ WARNING: This link could potentially be dangerous`)) {
       });
     }
   };
+  function formatHistoryTime(iso) {
+    try {
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return iso.slice(5, 16).replace("T", " ");
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      const h = String(d.getHours()).padStart(2, "0");
+      const min = String(d.getMinutes()).padStart(2, "0");
+      return `${m}-${day} ${h}:${min}`;
+    } catch {
+      return iso.slice(5, 16).replace("T", " ");
+    }
+  }
 
   // src/renderer/renderer.ts
   var TERM_FONT = 'Consolas, "Cascadia Mono", "Courier New", monospace';
@@ -7291,6 +7315,7 @@ WARNING: This link could potentially be dangerous`)) {
     brightCyan: "#61d6d6",
     brightWhite: "#f2f2f2"
   };
+  var currentView = "terminal";
   var currentSplitMode = "single";
   var secondaryId = null;
   var activeId = null;
@@ -7364,57 +7389,54 @@ WARNING: This link could potentially be dangerous`)) {
     }
   }
   var BUILTIN_QUICK_OPS = [
-    { icon: "📊", name: "负载/内存", category: "诊断", command: "uptime && free -h", isBuiltin: true },
-    { icon: "🔌", name: "监听端口", category: "网络", command: "ss -tulnp 2>/dev/null || netstat -tlpn", isBuiltin: true },
-    { icon: "💾", name: "磁盘空间", category: "磁盘", command: "df -hT", isBuiltin: true },
-    { icon: "⚡", name: "内存Top10", category: "进程", command: "ps aux --sort=-%mem | head -n 11", isBuiltin: true },
-    { icon: "🚨", name: "系统错误", category: "日志", command: "journalctl -p 3 -xb -n 30 --no-pager 2>/dev/null || dmesg | tail -n 30", isBuiltin: true },
-    { icon: "🐳", name: "Docker状态", category: "容器", command: "docker ps -a 2>/dev/null || podman ps -a", isBuiltin: true }
+    { icon: "\u{1F4CA}", name: "\u8D1F\u8F7D/\u5185\u5B58", category: "\u8BCA\u65AD", command: "uptime && free -h", isBuiltin: true },
+    { icon: "\u{1F50C}", name: "\u76D1\u542C\u7AEF\u53E3", category: "\u7F51\u7EDC", command: "ss -tulnp 2>/dev/null || netstat -tlpn", isBuiltin: true },
+    { icon: "\u{1F4BE}", name: "\u78C1\u76D8\u7A7A\u95F4", category: "\u78C1\u76D8", command: "df -hT", isBuiltin: true },
+    { icon: "\u26A1", name: "\u5185\u5B58Top10", category: "\u8FDB\u7A0B", command: "ps aux --sort=-%mem | head -n 11", isBuiltin: true },
+    { icon: "\u{1F6A8}", name: "\u7CFB\u7EDF\u9519\u8BEF", category: "\u65E5\u5FD7", command: "journalctl -p 3 -xb -n 30 --no-pager 2>/dev/null || dmesg | tail -n 30", isBuiltin: true },
+    { icon: "\u{1F433}", name: "Docker\u72B6\u6001", category: "\u5BB9\u5668", command: "docker ps -a 2>/dev/null || podman ps -a", isBuiltin: true }
   ];
   async function renderQuickOpsBar() {
     const container = document.getElementById("quick-ops-list");
     if (!container) return;
     container.textContent = "";
-
     let userSnippets = [];
     try {
       userSnippets = await webApi.listSnippets();
     } catch {
-      // fallback
     }
-
     const items = [...BUILTIN_QUICK_OPS];
     for (const s of userSnippets) {
       items.push({
-        icon: "⚡",
+        icon: "\u26A1",
         name: s.name,
-        category: s.category || "自定义",
+        category: s.category || "\u81EA\u5B9A\u4E49",
         command: s.command,
         isBuiltin: false
       });
     }
-
     for (const op of items) {
       const chip = document.createElement("div");
       chip.className = "quick-chip";
-      chip.title = `${op.name} [${op.category}]:\n${op.command}`;
-
+      chip.title = `${op.name} [${op.category}]:
+${op.command}`;
       const iconSpan = document.createElement("span");
       iconSpan.className = "chip-icon";
       iconSpan.textContent = op.icon;
-
       const nameSpan = document.createElement("span");
       nameSpan.className = "chip-name";
       nameSpan.textContent = op.name;
-
       chip.append(iconSpan, nameSpan);
       chip.addEventListener("click", () => {
         if (!activeId) {
-          showToast("请先打开或选中一个终端会话");
+          showToast("\u8BF7\u5148\u6253\u5F00\u6216\u9009\u4E2D\u4E00\u4E2A\u7EC8\u7AEF\u4F1A\u8BDD");
           return;
         }
-        sendInput(`${op.command}\n`);
-        showToast(`已发送: ${op.name}`);
+        sendInput(`${op.command}
+`);
+        showToast(`\u5DF2\u53D1\u9001: ${op.name}`);
+        document.getElementById("nav-ops-menu")?.classList.add("hidden");
+        switchView("terminal");
       });
       container.appendChild(chip);
     }
@@ -7441,13 +7463,11 @@ WARNING: This link could potentially be dangerous`)) {
     const menu = document.getElementById("terminal-context-menu");
     const tab = tabs.get(sessionId);
     if (!menu || !tab) return;
-
     const copyItem = document.getElementById("ctx-copy");
     if (copyItem) {
       const hasSel = tab.term.hasSelection();
       copyItem.classList.toggle("disabled", !hasSel);
     }
-
     menu.classList.remove("hidden");
     const menuWidth = 200;
     const menuHeight = 220;
@@ -7463,24 +7483,20 @@ WARNING: This link could potentially be dangerous`)) {
     try {
       text = await navigator.clipboard.readText();
     } catch {
-      showToast("无法读取系统剪贴板，请使用快捷键 Ctrl+V");
+      showToast("\u65E0\u6CD5\u8BFB\u53D6\u7CFB\u7EDF\u526A\u8D34\u677F\uFF0C\u8BF7\u4F7F\u7528\u5FEB\u6377\u952E Ctrl+V");
       return;
     }
     if (!text) return;
-
     const hasNewline = text.includes("\n") || text.includes("\r");
     const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-
     if (hasNewline && lines.length > 1) {
       const dlg = document.getElementById("paste-confirm-dialog");
       const preview = document.getElementById("paste-confirm-preview");
       const hint = document.getElementById("paste-confirm-hint");
       const form = document.getElementById("paste-confirm-form");
       const cancelBtn = document.getElementById("cancel-paste-btn");
-
-      if (hint) hint.textContent = `检测到剪贴板包含 ${lines.length} 行文本/命令，直接粘贴将立即向终端提交执行：`;
+      if (hint) hint.textContent = `\u68C0\u6D4B\u5230\u526A\u8D34\u677F\u5305\u542B ${lines.length} \u884C\u6587\u672C/\u547D\u4EE4\uFF0C\u76F4\u63A5\u7C98\u8D34\u5C06\u7ACB\u5373\u5411\u7EC8\u7AEF\u63D0\u4EA4\u6267\u884C\uFF1A`;
       if (preview) preview.textContent = text;
-
       const onConfirm = (e) => {
         e.preventDefault();
         cleanup();
@@ -7518,21 +7534,18 @@ WARNING: This link could potentially be dangerous`)) {
         selectTab(info.sessionId);
       }
     });
-
-    // 划选即复制 (Copy-on-select)
     slot.addEventListener("mouseup", () => {
       const t = tabs.get(info.sessionId);
       if (t && t.term.hasSelection()) {
         const sel = t.term.getSelection();
         if (sel && sel.trim().length > 0) {
           void navigator.clipboard.writeText(sel).then(() => {
-            showToast(`已自动复制 ${sel.length} 字符`);
-          }).catch(() => {});
+            showToast(`\u5DF2\u81EA\u52A8\u590D\u5236 ${sel.length} \u5B57\u7B26`);
+          }).catch(() => {
+          });
         }
       }
     });
-
-    // 极客右键智能上下文菜单
     slot.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       if (activeId !== info.sessionId) {
@@ -7540,7 +7553,6 @@ WARNING: This link could potentially be dangerous`)) {
       }
       showTerminalContextMenu(e.clientX, e.clientY, info.sessionId);
     });
-
     stage2.appendChild(slot);
     const term = new import_xterm.Terminal({
       fontFamily: TERM_FONT,
@@ -7565,28 +7577,29 @@ WARNING: This link could potentially be dangerous`)) {
     treeCtrl.render();
     selectTab(info.sessionId);
   }
+  function isTerminalViewActive() {
+    const viewTerm = document.getElementById("view-terminal");
+    return Boolean(viewTerm && viewTerm.classList.contains("active"));
+  }
   function fitTab(tab) {
-    if (tab.slot.classList.contains("hidden")) return;
+    if (!isTerminalViewActive() || tab.slot.classList.contains("hidden")) return;
+    const stage2 = document.getElementById("terminal-stage");
+    if (!stage2 || stage2.clientWidth < 100 || stage2.clientHeight < 50) return;
     tab.fit.fit();
     const { cols, rows } = tab.term;
-    // 尺寸门禁：严禁在容器尚未完成渲染或过渡态时发送异常极小尺寸（如 xterm 兜底的 2 列）
-    if (!tab.closed && cols >= 20 && rows >= 5 && ws.readyState === WebSocket.OPEN) {
+    if (!tab.closed && cols >= 30 && rows >= 6 && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "term:resize", sessionId: tab.info.sessionId, cols, rows }));
     }
   }
   function measureGrid() {
     const stage2 = document.getElementById("terminal-stage");
     if (!stage2) return { cols: 100, rows: 28 };
-
-    // 若已有活跃终端，直接复用其实际尺寸，避免向舞台注入临时 DOM 引起 Flex 布局抖动
     if (activeId) {
       const activeTab = tabs.get(activeId);
       if (activeTab && activeTab.term.cols >= 20 && activeTab.term.rows >= 5) {
         return { cols: activeTab.term.cols, rows: activeTab.term.rows };
       }
     }
-
-    // 根据当前舞台可用几何像素估算标准字符网格（字符宽约 8.5px，行高约 17px）
     const stageWidth = stage2.clientWidth;
     const stageHeight = stage2.clientHeight;
     if (stageWidth > 100 && stageHeight > 50) {
@@ -7594,8 +7607,60 @@ WARNING: This link could potentially be dangerous`)) {
       const estRows = Math.max(10, Math.min(150, Math.floor((stageHeight - 24) / 17)));
       return { cols: estCols, rows: estRows };
     }
-
     return { cols: 100, rows: 28 };
+  }
+  function updateNavHostBadge(tab) {
+    const dot = document.getElementById("nav-host-dot");
+    const aliasEl = document.getElementById("nav-host-alias");
+    const ipEl = document.getElementById("nav-host-ip");
+    if (!dot || !aliasEl || !ipEl) return;
+    if (!tab) {
+      dot.className = "status-dot disconnected";
+      aliasEl.textContent = "\u672A\u8FDE\u63A5\u4E3B\u673A";
+      ipEl.textContent = "";
+      return;
+    }
+    if (tab.closed) {
+      dot.className = "status-dot closed";
+      aliasEl.textContent = tab.info.kind === "local" ? "\u672C\u673A\u7EC8\u7AEF" : tab.info.alias;
+      ipEl.textContent = tab.info.kind === "local" ? "(Local - \u5DF2\u65AD\u5F00)" : `(${tab.info.host} - \u5DF2\u65AD\u5F00)`;
+    } else {
+      dot.className = "status-dot connected";
+      aliasEl.textContent = tab.info.kind === "local" ? "\u672C\u673A\u7EC8\u7AEF" : tab.info.alias;
+      ipEl.textContent = tab.info.kind === "local" ? "(Local)" : `(${tab.info.host})`;
+    }
+  }
+  function switchView(view) {
+    currentView = view;
+    const btnTerm = document.getElementById("nav-btn-terminal");
+    const btnSftp = document.getElementById("nav-btn-sftp");
+    const btnMon = document.getElementById("nav-btn-monitor");
+    const viewTerm = document.getElementById("view-terminal");
+    const viewSftp = document.getElementById("view-sftp");
+    const viewMon = document.getElementById("view-monitor");
+    btnTerm?.classList.toggle("active", view === "terminal");
+    btnSftp?.classList.toggle("active", view === "sftp");
+    btnMon?.classList.toggle("active", view === "monitor");
+    viewTerm?.classList.toggle("active", view === "terminal");
+    viewSftp?.classList.toggle("active", view === "sftp");
+    viewMon?.classList.toggle("active", view === "monitor");
+    if (view === "terminal") {
+      requestAnimationFrame(() => {
+        fitVisibleTabs();
+        if (activeId) {
+          const tab = tabs.get(activeId);
+          if (tab && !tab.closed) {
+            tab.term.focus();
+            tab.term.refresh(0, tab.term.rows - 1);
+          }
+        }
+      });
+    } else if (view === "sftp") {
+      sftpCtrl.syncSession();
+    } else if (view === "monitor") {
+      const tab = activeId ? tabs.get(activeId) : void 0;
+      showMetricsFor(tab);
+    }
   }
   function showMetricsFor(tab) {
     if (!tab || tab.closed || tab.info.kind !== "ssh") {
@@ -7612,12 +7677,13 @@ WARNING: This link could potentially be dangerous`)) {
     if (activeId === sessionId) {
       showMetricsFor(tab);
       sftpCtrl.syncSession();
+      updateNavHostBadge(tab);
     }
     renderTabs();
   }
   function setSplitMode(mode) {
     if (mode !== "single" && tabs.size < 2) {
-      showToast("分屏需要至少打开 2 个终端会话");
+      showToast("\u5206\u5C4F\u9700\u8981\u81F3\u5C11\u6253\u5F00 2 \u4E2A\u7EC8\u7AEF\u4F1A\u8BDD");
       return;
     }
     currentSplitMode = mode;
@@ -7630,6 +7696,7 @@ WARNING: This link could potentially be dangerous`)) {
     document.getElementById("split-vertical")?.classList.toggle("active", currentSplitMode === "vertical");
   }
   function fitVisibleTabs() {
+    if (!isTerminalViewActive()) return;
     if (activeId) {
       const tab = tabs.get(activeId);
       if (tab) fitTab(tab);
@@ -7685,6 +7752,7 @@ WARNING: This link could potentially be dangerous`)) {
       updateSplitControls();
       document.getElementById("term-empty")?.classList.remove("hidden");
       monCtrl.renderMetrics(null, "idle");
+      updateNavHostBadge(void 0);
       renderTabs();
       sftpCtrl.syncSession();
       return;
@@ -7712,13 +7780,16 @@ WARNING: This link could potentially be dangerous`)) {
         tab.slot.classList.toggle("active-pane", isAct);
         if (isAct) {
           fitTab(tab);
-          tab.term.focus();
+          if (currentView === "terminal") {
+            tab.term.focus();
+          }
           showMetricsFor(tab);
         }
       }
       renderTabs();
       sftpCtrl.syncSession();
     }
+    updateNavHostBadge(tabs.get(sessionId));
   }
   function renderTabs() {
     const bar = document.getElementById("tabs");
@@ -7733,21 +7804,19 @@ WARNING: This link could potentially be dangerous`)) {
       const label = document.createElement("span");
       label.textContent = tab.info.kind === "local" ? "\u672C\u673A" : tab.info.alias;
       chip.append(dot, label);
-
       if (currentSplitMode !== "single") {
         if (isPrimary) {
           const badge = document.createElement("span");
           badge.className = "pane-badge primary";
-          badge.textContent = "主屏";
+          badge.textContent = "\u4E3B\u5C4F";
           chip.appendChild(badge);
         } else if (isSecondary) {
           const badge = document.createElement("span");
           badge.className = "pane-badge secondary";
-          badge.textContent = "副屏";
+          badge.textContent = "\u526F\u5C4F";
           chip.appendChild(badge);
         }
       }
-
       const closeBtn = document.createElement("button");
       closeBtn.type = "button";
       closeBtn.textContent = "\xD7";
@@ -7766,7 +7835,7 @@ WARNING: This link could potentially be dangerous`)) {
       const dot = document.createElement("span");
       dot.className = "tab-dot spin";
       const label = document.createElement("span");
-      label.textContent = `${p.alias} (连接中...)`;
+      label.textContent = `${p.alias} (\u8FDE\u63A5\u4E2D...)`;
       chip.append(dot, label);
       bar.appendChild(chip);
     }
@@ -7779,7 +7848,6 @@ WARNING: This link could potentially be dangerous`)) {
     tab.slot.remove();
     tabs.delete(sessionId);
     treeCtrl.render();
-
     if (secondaryId === sessionId) {
       secondaryId = null;
     }
@@ -7788,7 +7856,6 @@ WARNING: This link could potentially be dangerous`)) {
       updateSplitControls();
       document.getElementById("terminal-stage")?.classList.remove("split-h", "split-v");
     }
-
     if (activeId === sessionId) {
       selectTab(Array.from(tabs.keys()).pop() ?? null);
     } else {
@@ -7796,27 +7863,31 @@ WARNING: This link could potentially be dangerous`)) {
     }
   }
   async function openSshTab(hostId) {
+    const existingTab = Array.from(tabs.values()).find((t) => t.info.hostId === hostId && !t.closed);
+    if (existingTab) {
+      selectTab(existingTab.info.sessionId);
+      switchView("terminal");
+      showToast(`\u5DF2\u5207\u6362\u81F3: ${existingTab.info.alias}`);
+      return;
+    }
     if (pendingConnections.has(hostId)) return;
     const host = treeCtrl.hosts.find((h) => h.id === hostId);
-    const alias = host ? host.alias : "\u8FDE\u63A5\u4E3B\u673A";
+    const alias = host ? host.alias : "\u8FDC\u7A0B\u4E3B\u673A";
     pendingConnections.set(hostId, { alias, host: host?.host, port: host?.port });
-
     const hostEl = document.getElementById(`host-${hostId}`);
     hostEl?.classList.add("connecting");
-
     const termEmpty = document.getElementById("term-empty");
     if (termEmpty && tabs.size === 0) {
       termEmpty.classList.remove("hidden");
       termEmpty.innerHTML = `
-        <div class="connecting-box">
-          <div class="connecting-spinner"></div>
-          <div class="connecting-title">正在连接 ${alias}...</div>
-          <div class="connecting-sub">${host ? `${host.username}@${host.host}:${host.port}` : ""} · 正在协商密钥并分配终端</div>
-        </div>
-      `;
+      <div class="connecting-box">
+        <div class="connecting-spinner"></div>
+        <div class="connecting-title">\u6B63\u5728\u8FDE\u63A5 ${alias}...</div>
+        <div class="connecting-sub">${host ? `${host.username}@${host.host}:${host.port}` : ""} \xB7 \u6B63\u5728\u534F\u5546\u5BC6\u94A5\u5E76\u5206\u914D\u7EC8\u7AEF</div>
+      </div>
+    `;
     }
     renderTabs();
-
     try {
       const grid = measureGrid();
       const info = await webApi.openSession({ kind: "ssh", hostId, cols: grid.cols, rows: grid.rows });
@@ -7824,7 +7895,7 @@ WARNING: This link could potentially be dangerous`)) {
       pendingConnections.delete(hostId);
       hostEl?.classList.remove("connecting");
       if (termEmpty) {
-        termEmpty.innerHTML = '<div>没有打开的终端</div><small>双击左侧主机，或使用「本机终端」。</small>';
+        termEmpty.innerHTML = "<div>\u6CA1\u6709\u6253\u5F00\u7684\u7EC8\u7AEF</div><small>\u53CC\u51FB\u5DE6\u4FA7\u4E3B\u673A\uFF0C\u6216\u4F7F\u7528\u300C\u672C\u673A\u7EC8\u7AEF\u300D\u3002</small>";
       }
       createTermInstance(info);
       const tab = activeId ? tabs.get(activeId) : void 0;
@@ -7833,7 +7904,7 @@ WARNING: This link could potentially be dangerous`)) {
       pendingConnections.delete(hostId);
       hostEl?.classList.remove("connecting");
       if (termEmpty) {
-        termEmpty.innerHTML = '<div>没有打开的终端</div><small>双击左侧主机，或使用「本机终端」。</small>';
+        termEmpty.innerHTML = "<div>\u6CA1\u6709\u6253\u5F00\u7684\u7EC8\u7AEF</div><small>\u53CC\u51FB\u5DE6\u4FA7\u4E3B\u673A\uFF0C\u6216\u4F7F\u7528\u300C\u672C\u673A\u7EC8\u7AEF\u300D\u3002</small>";
       }
       renderTabs();
       showToast(err instanceof Error ? err.message : "\u8FDE\u63A5\u5931\u8D25");
@@ -7858,25 +7929,50 @@ WARNING: This link could potentially be dangerous`)) {
     showToast(`\u672A\u627E\u5230 "${needle}"`);
   }
   function bindGlobalUi() {
-    document.getElementById("open-local")?.addEventListener("click", async () => {
+    document.getElementById("nav-btn-terminal")?.addEventListener("click", () => switchView("terminal"));
+    document.getElementById("nav-btn-sftp")?.addEventListener("click", () => switchView("sftp"));
+    document.getElementById("nav-btn-monitor")?.addEventListener("click", () => switchView("monitor"));
+    const navOpsToggle = document.getElementById("nav-ops-toggle");
+    const navOpsMenu = document.getElementById("nav-ops-menu");
+    navOpsToggle?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      navOpsMenu?.classList.toggle("hidden");
+    });
+    window.addEventListener("click", (e) => {
+      if (navOpsMenu && !navOpsMenu.classList.contains("hidden") && !navOpsMenu.contains(e.target) && e.target !== navOpsToggle) {
+        navOpsMenu.classList.add("hidden");
+      }
+    });
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && navOpsMenu && !navOpsMenu.classList.contains("hidden")) {
+        navOpsMenu.classList.add("hidden");
+      }
+    });
+    const sidebar = document.getElementById("sidebar");
+    const sideToggleBtn = document.getElementById("sidebar-toggle-btn");
+    sideToggleBtn?.addEventListener("click", () => {
+      if (!sidebar) return;
+      const isCollapsed = sidebar.classList.toggle("collapsed");
+      sideToggleBtn.textContent = isCollapsed ? "\u25B6" : "\u25C0";
+      sideToggleBtn.title = isCollapsed ? "\u5C55\u5F00\u5DE6\u4FA7\u680F" : "\u6536\u8D77\u5DE6\u4FA7\u680F";
+      requestAnimationFrame(() => fitVisibleTabs());
+    });
+    document.getElementById("nav-host-badge")?.addEventListener("click", () => {
+      if (activeId) switchView("terminal");
+    });
+    const handleOpenLocal = async () => {
       const grid = measureGrid();
       createTermInstance(await webApi.openSession({ kind: "local", cols: grid.cols, rows: grid.rows }));
-    });
+    };
+    document.getElementById("open-local")?.addEventListener("click", handleOpenLocal);
+    document.getElementById("new-tab-local")?.addEventListener("click", handleOpenLocal);
     document.getElementById("split-single")?.addEventListener("click", () => setSplitMode("single"));
     document.getElementById("split-horizontal")?.addEventListener("click", () => setSplitMode("horizontal"));
     document.getElementById("split-vertical")?.addEventListener("click", () => setSplitMode("vertical"));
-    document.getElementById("quick-ops-toggle")?.addEventListener("click", () => {
-      const bar = document.getElementById("quick-ops-bar");
-      const btn = document.getElementById("quick-ops-toggle");
-      const isHidden = bar?.classList.toggle("hidden");
-      btn?.classList.toggle("active", !isHidden);
-      fitVisibleTabs();
-    });
     document.getElementById("quick-ops-add")?.addEventListener("click", () => {
       document.getElementById("snippet-dialog")?.showModal();
     });
     document.getElementById("open-tunnels")?.addEventListener("click", () => void monCtrl.openTunnelModal());
-    document.getElementById("inspector-toggle")?.addEventListener("click", () => document.getElementById("inspector")?.classList.toggle("hidden"));
     document.getElementById("theme-toggle")?.addEventListener("click", async () => {
       const next = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
       document.documentElement.setAttribute("data-theme", next);
@@ -7911,6 +8007,7 @@ WARNING: This link could potentially be dangerous`)) {
     });
     const setDlg = document.getElementById("settings-dialog");
     document.getElementById("open-settings")?.addEventListener("click", () => setDlg.showModal());
+    document.getElementById("open-settings-top")?.addEventListener("click", () => setDlg.showModal());
     document.getElementById("cancel-settings")?.addEventListener("click", () => setDlg.close());
     document.getElementById("settings-form")?.addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -7929,23 +8026,19 @@ WARNING: This link could potentially be dangerous`)) {
       }
       setDlg.close();
     });
-
-    // Terminal Custom Context Menu Actions
     document.getElementById("ctx-copy")?.addEventListener("click", () => {
       document.getElementById("terminal-context-menu")?.classList.add("hidden");
       if (!activeId) return;
       const tab = tabs.get(activeId);
       if (tab && tab.term.hasSelection()) {
         const sel = tab.term.getSelection();
-        void copyText(sel, `已复制 ${sel.length} 字符`);
+        void copyText(sel, `\u5DF2\u590D\u5236 ${sel.length} \u5B57\u7B26`);
       }
     });
-
     document.getElementById("ctx-paste")?.addEventListener("click", () => {
       document.getElementById("terminal-context-menu")?.classList.add("hidden");
       if (activeId) void handleTerminalPaste(activeId);
     });
-
     document.getElementById("ctx-copy-all")?.addEventListener("click", () => {
       document.getElementById("terminal-context-menu")?.classList.add("hidden");
       if (!activeId) return;
@@ -7957,9 +8050,8 @@ WARNING: This link could potentially be dangerous`)) {
         const line = buf.getLine(i);
         if (line) text += line.translateToString(true) + "\n";
       }
-      void copyText(text.trimEnd(), "已复制当前终端全部内容");
+      void copyText(text.trimEnd(), "\u5DF2\u590D\u5236\u5F53\u524D\u7EC8\u7AEF\u5168\u90E8\u5185\u5BB9");
     });
-
     document.getElementById("ctx-clear")?.addEventListener("click", () => {
       document.getElementById("terminal-context-menu")?.classList.add("hidden");
       if (!activeId) return;
@@ -7968,13 +8060,11 @@ WARNING: This link could potentially be dangerous`)) {
       tab.term.clear();
       sendInput("clear\n");
     });
-
     document.getElementById("ctx-search")?.addEventListener("click", () => {
       document.getElementById("terminal-context-menu")?.classList.add("hidden");
       document.getElementById("search-bar")?.classList.remove("hidden");
       document.getElementById("search-input")?.focus();
     });
-
     document.getElementById("ctx-select-all")?.addEventListener("click", () => {
       document.getElementById("terminal-context-menu")?.classList.add("hidden");
       if (!activeId) return;
@@ -7982,10 +8072,9 @@ WARNING: This link could potentially be dangerous`)) {
       if (tab) {
         tab.term.selectAll();
         const sel = tab.term.getSelection();
-        if (sel) void copyText(sel, `已全选并复制 ${sel.length} 字符`);
+        if (sel) void copyText(sel, `\u5DF2\u5168\u9009\u5E76\u590D\u5236 ${sel.length} \u5B57\u7B26`);
       }
     });
-
     window.addEventListener("click", (e) => {
       const menu = document.getElementById("terminal-context-menu");
       if (menu && !menu.classList.contains("hidden") && !menu.contains(e.target)) {
@@ -8006,17 +8095,17 @@ WARNING: This link could potentially be dangerous`)) {
     }
   });
   window.addEventListener("resize", () => {
-    fitVisibleTabs();
+    if (isTerminalViewActive()) fitVisibleTabs();
   });
   var stage = document.getElementById("terminal-stage");
   if (stage && "ResizeObserver" in window) {
     const observer = new ResizeObserver(() => {
-      fitVisibleTabs();
+      if (isTerminalViewActive()) fitVisibleTabs();
     });
     observer.observe(stage);
   }
   void document.fonts?.ready.then(() => {
-    fitVisibleTabs();
+    if (isTerminalViewActive()) fitVisibleTabs();
   });
   async function applySettings() {
     const s = await webApi.getSettings();
@@ -8079,6 +8168,8 @@ WARNING: This link could potentially be dangerous`)) {
   }
   async function boot() {
     bindGlobalUi();
+    switchView("terminal");
+    updateNavHostBadge(void 0);
     document.getElementById("open-mcp")?.addEventListener("click", () => void showMcpDialog().catch((err) => {
       showToast(err instanceof Error ? err.message : "\u8BFB\u4E0D\u5230 MCP \u5730\u5740");
     }));

@@ -12,68 +12,92 @@
   </head>
   <body>
     <div class="app">
-      <aside class="sidebar">
-        <div class="brand">
-          <svg class="mark" viewBox="0 0 36 36" aria-hidden="true">
-            <rect x="1.5" y="1.5" width="33" height="33" rx="8" fill="#15181f" stroke="rgba(255,255,255,0.08)" />
-            <path d="M11 13l5 5-5 5" fill="none" stroke="#3b82f6" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
-            <path d="M19 23h8" fill="none" stroke="#10b981" stroke-width="2.2" stroke-linecap="round" />
-          </svg>
-          <div>
-            <div class="brand-name">TianShell</div>
-            <div class="brand-sub">SSH · SFTP · 监控 · MCP</div>
+      <!-- 顶部全局导航栏 (Global Top Bar) -->
+      <header class="global-nav">
+        <div class="nav-left">
+          <div class="brand">
+            <svg class="mark" viewBox="0 0 36 36" aria-hidden="true">
+              <rect x="1.5" y="1.5" width="33" height="33" rx="8" fill="#15181f" stroke="rgba(255,255,255,0.08)" />
+              <path d="M11 13l5 5-5 5" fill="none" stroke="#3b82f6" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+              <path d="M19 23h8" fill="none" stroke="#10b981" stroke-width="2.2" stroke-linecap="round" />
+            </svg>
+            <span class="brand-name">TianShell</span>
+          </div>
+          <div id="nav-host-badge" class="nav-host-badge" title="当前连接主机与状态">
+            <span id="nav-host-dot" class="status-dot"></span>
+            <span id="nav-host-alias">未连接主机</span>
+            <span id="nav-host-ip" class="host-ip-dim"></span>
           </div>
         </div>
-        <div class="side-tools">
-          <input id="filter" type="search" placeholder="搜索主机或标签..." autocomplete="off" />
-          <button id="add-host" class="primary" type="button" title="添加 SSH 主机">+ 主机</button>
-        </div>
-        <div class="side-subtools">
-          <button id="add-group" type="button">+ 分组</button>
-          <button id="open-local" type="button">+ 本机终端</button>
-          <button id="open-tunnels" type="button">隧道</button>
-        </div>
-        <div id="host-tree" class="host-tree"></div>
-        <div class="mcp-strip">
-          <button id="open-mcp" type="button" title="把 Cursor、Claude Code 接到这个工作台">连接 MCP</button>
-          <span id="mcp-status" class="mcp-status">正在读取本机 MCP 地址…</span>
-        </div>
-        <div class="side-footer">
-          <span id="data-dir" class="data-dir"></span>
-          <button id="open-settings" type="button" title="外观与监控设置">⚙ 设置</button>
-        </div>
-      </aside>
 
-      <main class="center">
-        <header class="tabbar">
-          <div id="tabs" class="tabs"></div>
-          <div class="toolbar-actions">
-            <div class="split-controls" id="split-controls">
-              <button id="split-single" class="btn-split active" type="button" title="单屏全尺寸展示">⬚ 单屏</button>
-              <button id="split-horizontal" class="btn-split" type="button" title="左右双终端同屏分屏">◫ 左右</button>
-              <button id="split-vertical" class="btn-split" type="button" title="上下双终端同屏分屏">⬒ 上下</button>
-            </div>
-            <label class="toggle-chip" title="同步向所有已打开终端发送快捷键与命令">
-              <input id="broadcast-toggle" type="checkbox" /> 广播输入
-            </label>
-            <button id="quick-ops-toggle" class="btn-tool active" type="button" title="折叠/展开常用运维快捷指令条">⚡ 快捷</button>
-            <button id="search-toggle" type="button" title="搜索终端内容 (Ctrl+F)">查找</button>
-            <button id="theme-toggle" type="button" title="切换暗/亮主题">主题</button>
-            <button id="inspector-toggle" type="button" title="折叠/展开右侧监控">监控</button>
+        <!-- 核心三合一分段导航切换器 -->
+        <div class="nav-center">
+          <div class="segmented-control" role="tablist">
+            <button id="nav-btn-terminal" class="seg-item active" type="button" role="tab" data-view="terminal">💻 终端 (Terminal)</button>
+            <button id="nav-btn-sftp" class="seg-item" type="button" role="tab" data-view="sftp">📁 文件管理 (SFTP)</button>
+            <button id="nav-btn-monitor" class="seg-item" type="button" role="tab" data-view="monitor">📊 性能监控 (Monitor)</button>
           </div>
-        </header>
+        </div>
 
-        <section class="split-wrap" id="split-wrap">
-          <div class="terminal-pane" id="terminal-pane">
-            <div id="quick-ops-bar" class="quick-ops-bar">
-              <div class="quick-ops-header">
-                <span class="quick-ops-label">⚡ 运维动作</span>
-              </div>
+        <div class="nav-right">
+          <!-- 悬浮运维动作下拉菜单 -->
+          <div class="ops-dropdown-wrap">
+            <button id="nav-ops-toggle" class="btn-tool" type="button" title="常用运维快捷指令">⚡ 运维动作 ▾</button>
+            <div id="nav-ops-menu" class="ops-menu hidden">
               <div id="quick-ops-list" class="quick-ops-list"></div>
-              <div class="quick-ops-tail">
-                <button id="quick-ops-add" class="btn-quick-add" type="button" title="新增自定义快捷命令">+ 自定义</button>
+              <div class="ops-menu-footer">
+                <button id="quick-ops-add" class="btn-ghost-sm" type="button" title="新增自定义快捷命令">+ 自定义</button>
               </div>
             </div>
+          </div>
+          <div class="split-controls" id="split-controls">
+            <button id="split-single" class="btn-split active" type="button" title="单屏展示">⬚ 单屏</button>
+            <button id="split-horizontal" class="btn-split" type="button" title="左右双终端同屏分屏">◫ 左右</button>
+            <button id="split-vertical" class="btn-split" type="button" title="上下双终端同屏分屏">⬒ 上下</button>
+          </div>
+          <label class="toggle-chip" title="同步向所有已打开终端发送快捷键与命令">
+            <input id="broadcast-toggle" type="checkbox" /> 广播
+          </label>
+          <button id="search-toggle" class="btn-tool" type="button" title="搜索终端内容 (Ctrl+F)">🔍 查找</button>
+          <button id="theme-toggle" class="btn-tool" type="button" title="切换暗/亮主题">🌓 主题</button>
+          <button id="open-settings-top" class="btn-tool" type="button" title="系统设置">⚙ 设置</button>
+        </div>
+      </header>
+
+      <!-- 核心工作区容器 -->
+      <div class="app-body">
+        <aside class="sidebar" id="sidebar">
+          <div class="sidebar-header">
+            <span>主机与连接</span>
+            <button id="sidebar-toggle-btn" class="btn-toggle-side" type="button" title="收起/展开左侧栏">◀</button>
+          </div>
+          <div class="side-tools">
+            <input id="filter" type="search" placeholder="搜索主机或标签..." autocomplete="off" />
+            <button id="add-host" class="primary" type="button" title="添加 SSH 主机">+ 主机</button>
+          </div>
+          <div class="side-subtools">
+            <button id="add-group" type="button">+ 分组</button>
+            <button id="open-local" type="button">+ 本机终端</button>
+            <button id="open-tunnels" type="button">隧道</button>
+          </div>
+          <div id="host-tree" class="host-tree"></div>
+          <div class="mcp-strip">
+            <button id="open-mcp" type="button" title="把 Cursor、Claude Code 接到这个工作台">连接 MCP</button>
+            <span id="mcp-status" class="mcp-status">正在读取本机 MCP 地址…</span>
+          </div>
+          <div class="side-footer">
+            <span id="data-dir" class="data-dir"></span>
+            <button id="open-settings" type="button" title="外观与监控设置">⚙ 设置</button>
+          </div>
+        </aside>
+
+        <main class="center" id="main-center">
+          <!-- 视图 1：💻 终端视图 (100% 满屏高度) -->
+          <section id="view-terminal" class="workspace-view active">
+            <header class="tabbar">
+              <div id="tabs" class="tabs"></div>
+              <button id="new-tab-local" class="btn-tool-sm" type="button" title="打开本机新终端">+ 本机终端</button>
+            </header>
             <div class="search-bar hidden" id="search-bar">
               <input id="search-input" type="search" placeholder="在当前终端查找…" />
               <button id="search-prev" type="button">上一个</button>
@@ -85,93 +109,123 @@
               <p class="empty-kicker">没有打开的终端</p>
               <p>双击左侧主机，或使用「本机终端」。</p>
             </div>
-          </div>
+          </section>
 
-          <div class="split-handle" id="split-handle" title="上下拖拽调整终端与 SFTP 高度"></div>
-
-          <div class="sftp-pane" id="sftp-pane">
-            <div class="sftp-bar">
-              <div class="sftp-nav">
-                <button id="sftp-up" type="button" title="返回上一级目录" disabled>↑ 上级</button>
-                <div id="sftp-breadcrumbs" class="sftp-breadcrumbs" title="点击目录层级直达，双击编辑路径"></div>
-                <input id="sftp-path" type="text" value="/" spellcheck="false" class="hidden" disabled />
-                <button id="sftp-edit-path" type="button" class="btn-ghost" title="手动输入路径" disabled>✏️</button>
-                <button id="sftp-go" type="button" class="hidden" disabled>跳转</button>
-              </div>
-              <div class="sftp-ops">
-                <button id="sftp-mkdir" type="button" disabled>新建目录</button>
-                <button id="sftp-upload" type="button" disabled>上传文件</button>
-                <button id="sftp-archive-current" type="button" title="打包下载当前目录为 .tar.gz" disabled>打包下载</button>
-                <input id="sftp-file-input" type="file" multiple class="hidden" />
-                <button id="sftp-refresh" type="button" disabled>刷新</button>
-              </div>
-            </div>
-            <div id="sftp-table-wrap" class="sftp-table-wrap">
-              <div id="sftp-drag-overlay" class="sftp-drag-overlay hidden">
-                <div class="sftp-drag-box">
-                  <div class="sftp-drag-icon">📥</div>
-                  <div class="sftp-drag-text">释放鼠标以上传文件至</div>
-                  <div id="sftp-drag-target" class="sftp-drag-path mono">/</div>
+          <!-- 视图 2：📁 SFTP 文件管理视图 (100% 满屏大文件树与表格) -->
+          <section id="view-sftp" class="workspace-view">
+            <div class="sftp-pane" id="sftp-pane">
+              <div class="sftp-bar">
+                <div class="sftp-nav">
+                  <button id="sftp-up" type="button" title="返回上一级目录" disabled>↑ 上级</button>
+                  <div id="sftp-breadcrumbs" class="sftp-breadcrumbs" title="点击目录层级直达，双击编辑路径"></div>
+                  <input id="sftp-path" type="text" value="/" spellcheck="false" class="hidden" disabled />
+                  <button id="sftp-edit-path" type="button" class="btn-ghost" title="手动输入路径" disabled>✏️</button>
+                  <button id="sftp-go" type="button" class="hidden" disabled>跳转</button>
+                </div>
+                <div class="sftp-ops">
+                  <button id="sftp-mkdir" type="button" disabled>新建目录</button>
+                  <button id="sftp-upload" type="button" disabled>上传文件</button>
+                  <button id="sftp-archive-current" type="button" title="打包下载当前目录为 .tar.gz" disabled>打包下载</button>
+                  <input id="sftp-file-input" type="file" multiple class="hidden" />
+                  <button id="sftp-refresh" type="button" disabled>刷新</button>
                 </div>
               </div>
-              <div id="sftp-empty" class="empty-muted">空闲。连上 SSH 会话后，这里显示该会话的当前目录。</div>
-              <table id="sftp-table" class="sftp-table hidden">
-                <thead>
-                  <tr><th>名称</th><th>权限</th><th>大小</th><th>修改时间</th><th>操作</th></tr>
-                </thead>
-                <tbody id="sftp-body"></tbody>
-              </table>
+              <div id="sftp-table-wrap" class="sftp-table-wrap">
+                <div id="sftp-drag-overlay" class="sftp-drag-overlay hidden">
+                  <div class="sftp-drag-box">
+                    <div class="sftp-drag-icon">📥</div>
+                    <div class="sftp-drag-text">释放鼠标以上传文件至</div>
+                    <div id="sftp-drag-target" class="sftp-drag-path mono">/</div>
+                  </div>
+                </div>
+                <div id="sftp-empty" class="empty-muted">空闲。连上 SSH 会话后，这里显示该会话的当前目录。</div>
+                <table id="sftp-table" class="sftp-table hidden">
+                  <thead>
+                    <tr><th>名称</th><th>权限</th><th>大小</th><th>修改时间</th><th>操作</th></tr>
+                  </thead>
+                  <tbody id="sftp-body"></tbody>
+                </table>
+              </div>
             </div>
-          </div>
-        </section>
+            <footer class="transfer-bar" id="transfer-bar">
+              <span id="transfer-summary">没有正在传输的文件</span>
+              <div id="transfer-list" class="transfer-list"></div>
+            </footer>
+          </section>
 
-        <footer class="transfer-bar" id="transfer-bar">
-          <span id="transfer-summary">没有正在传输的文件</span>
-          <div id="transfer-list" class="transfer-list"></div>
-        </footer>
-      </main>
+          <!-- 视图 3：📊 性能监控大盘视图 (100% 满屏 Bento 仪表盘) -->
+          <section id="view-monitor" class="workspace-view">
+            <div class="monitor-dashboard" id="monitor-dashboard">
+              <div class="bento-header">
+                <div class="bento-title-row">
+                  <span class="bento-main-title">系统健康与资源大盘</span>
+                  <span id="mon-host" class="badge-muted">空闲</span>
+                </div>
+                <p id="mon-note" class="panel-note">连上 SSH 会话后自动采样指标与进程。</p>
+              </div>
 
-      <aside class="inspector" id="inspector">
-        <div class="inspector-section">
-          <div class="section-head">
-            <span>监控</span>
-            <span id="mon-host" class="badge-muted">空闲</span>
-          </div>
-          <div id="mon-bento" class="mon-bento idle">
-            <p id="mon-note" class="panel-note">打开 SSH 会话后自动采样。</p>
-            <div class="kpi-row"><span>CPU</span><span id="mon-cpu" class="mono">—</span></div>
-            <div class="meter"><div id="mon-cpu-bar" class="meter-fill"></div></div>
-            <div class="kpi-row"><span>内存</span><span id="mon-mem" class="mono">—</span></div>
-            <div class="meter"><div id="mon-mem-bar" class="meter-fill teal"></div></div>
-            <div class="kpi-row"><span>Swap</span><span id="mon-swap" class="mono">—</span></div>
-            <div class="meter"><div id="mon-swap-bar" class="meter-fill amber"></div></div>
-            <div class="kpi-grid mono">
-              <div><small>下行 RX</small><div id="mon-rx">—</div></div>
-              <div><small>上行 TX</small><div id="mon-tx">—</div></div>
-              <div class="wide"><small>负载</small><div id="mon-load">—</div></div>
+              <div class="bento-kpi-grid">
+                <div class="bento-kpi-card">
+                  <div class="kpi-label">CPU 使用率</div>
+                  <div class="kpi-val" id="mon-cpu">—</div>
+                  <div class="meter"><div id="mon-cpu-bar" class="meter-fill"></div></div>
+                </div>
+                <div class="bento-kpi-card">
+                  <div class="kpi-label">内存占用</div>
+                  <div class="kpi-val" id="mon-mem">—</div>
+                  <div class="meter"><div id="mon-mem-bar" class="meter-fill teal"></div></div>
+                </div>
+                <div class="bento-kpi-card">
+                  <div class="kpi-label">Swap 交换区</div>
+                  <div class="kpi-val" id="mon-swap">—</div>
+                  <div class="meter"><div id="mon-swap-bar" class="meter-fill amber"></div></div>
+                </div>
+                <div class="bento-kpi-card">
+                  <div class="kpi-label">网络与系统负载</div>
+                  <div class="kpi-network-row">
+                    <div><small>下行 RX: </small><span id="mon-rx" class="mono">—</span></div>
+                    <div><small>上行 TX: </small><span id="mon-tx" class="mono">—</span></div>
+                    <div><small>平均负载: </small><span id="mon-load" class="mono">—</span></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="bento-detail-grid">
+                <div class="bento-sub-card">
+                  <div class="section-head">
+                    <span>💾 磁盘挂载占用</span>
+                  </div>
+                  <div id="mon-disks" class="sub-list"></div>
+                </div>
+                <div class="bento-sub-card">
+                  <div class="section-head">
+                    <span>⚡ 内存占用 Top 10 进程</span>
+                  </div>
+                  <div id="mon-procs" class="sub-list"></div>
+                </div>
+              </div>
+
+              <div class="bento-ops-grid">
+                <div class="bento-sub-card">
+                  <div class="section-head">
+                    <span>📜 常用命令</span>
+                    <button id="add-snippet" type="button">+ 新增</button>
+                  </div>
+                  <div id="snippet-list" class="snippet-list"></div>
+                </div>
+                <div class="bento-sub-card">
+                  <div class="section-head">
+                    <span>🕒 执行历史</span>
+                    <button id="history-refresh" type="button">刷新</button>
+                  </div>
+                  <input id="history-filter" type="search" placeholder="搜索历史命令..." autocomplete="off" />
+                  <div id="history-list" class="history-list"></div>
+                </div>
+              </div>
             </div>
-          </div>
-          <div id="mon-disks" class="sub-list"></div>
-          <div id="mon-procs" class="sub-list"></div>
-        </div>
-
-        <div class="inspector-section grow">
-          <div class="section-head">
-            <span>快捷命令</span>
-            <button id="add-snippet" type="button">+ 新增</button>
-          </div>
-          <div id="snippet-list" class="snippet-list"></div>
-        </div>
-
-        <div class="inspector-section">
-          <div class="section-head">
-            <span>命令历史</span>
-            <button id="history-refresh" type="button">刷新</button>
-          </div>
-          <input id="history-filter" type="search" placeholder="搜索命令或主机" autocomplete="off" />
-          <div id="history-list" class="history-list"></div>
-        </div>
-      </aside>
+          </section>
+        </main>
+      </div>
     </div>
 
     <div id="toast" class="toast" role="status"></div>
