@@ -416,6 +416,56 @@ fn hands_use_the_open_tab_and_leave_secrets_out_of_memory() {
     assert!(again[0].cwd.is_some(), "{again:?}");
 }
 
+#[test]
+fn download_urls_reject_the_long_lived_token() {
+    let dir = tempdir().unwrap();
+    let server = start_workbench(ServerOptions {
+        data_dir: Some(dir.path().to_path_buf()),
+        port: Some(0),
+        open_browser: false,
+    })
+    .expect("workbench");
+    let token = server.token.clone();
+    let leaked = format!("/api/sessions/missing/sftp/download?path=%2Ftmp%2Fa&token={token}");
+    let (status, _, body) = http(server.port, "GET", &leaked, None, None);
+    assert_eq!(status, 400, "带长期令牌的下载地址应被拒绝");
+    assert!(!body.contains(&token), "拒绝下载时不能把令牌写回响应");
+
+    let leaked_archive = format!("/api/sessions/missing/sftp/archive-download?path=%2Ftmp&token={token}");
+    let (status, _, body) = http(server.port, "GET", &leaked_archive, None, None);
+    assert_eq!(status, 400, "打包下载同样不能携带长期令牌");
+    assert!(!body.contains(&token), "拒绝打包下载时不能把令牌写回响应");
+
+    let (status, _, body) = http(
+        server.port,
+        "GET",
+        "/api/sessions/missing/sftp/download?path=%2Ftmp%2Fa",
+        Some(&token),
+        None,
+    );
+    assert_eq!(status, 400, "请求头鉴权的下载仍应走到会话检查");
+    assert!(!body.contains(&token), "下载错误不能回显令牌");
+
+    let (status, _, body) = http(
+        server.port,
+        "POST",
+        "/api/sessions/missing/sftp/download-grant",
+        Some(&token),
+        Some(r#"{"path":"/tmp/a","kind":"file"}"#),
+    );
+    assert_eq!(status, 400, "没有会话时不发下载票");
+    assert!(!body.contains(&token), "发下载票失败时不能回显令牌");
+    assert!(!body.contains("/api/downloads/"), "失败时不应发出下载地址");
+
+    let (status, _, body) = http(server.port, "GET", "/api/downloads/not-a-grant", None, None);
+    assert_eq!(status, 401, "无效下载票应拒绝");
+    assert!(!body.contains("not-a-grant"), "错误文案不能回显票号");
+
+    let (status, _, body) = http(server.port, "POST", "/api/mcp/cursor", Some(&token), Some(r#"{"confirm":false}"#));
+    assert_eq!(status, 400, "未确认不能写 Cursor 配置");
+    assert!(!body.contains(&token), "拒绝写入时不能回显令牌");
+}
+
 fn tool_json(body: &str) -> Value {
     let envelope: Value = serde_json::from_str(body).unwrap();
     let text = envelope["result"]["content"][0]["text"].as_str().unwrap();

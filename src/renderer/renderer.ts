@@ -6,7 +6,15 @@ import type { ConnectInfo, ServerMetrics, TransferTask } from '../shared/types.j
 import { connectWs, resolveClientToken, webApi } from './api-client.js';
 import { HostTreeController } from './host-tree.js';
 import { MonitorAndToolsController } from './monitor-panel.js';
-import { broadcastRecipients, nextFindIndex, seedBroadcastChecks, type BroadcastTab } from './session-logic.js';
+import {
+  broadcastRecipients,
+  nextFindIndex,
+  planSessionOpen,
+  seedBroadcastChecks,
+  tabLabels,
+  type BroadcastTab,
+  type SessionOpenIntent,
+} from './session-logic.js';
 import { SftpController } from './sftp-panel.js';
 
 interface TabState {
@@ -178,7 +186,8 @@ const sftpCtrl = new SftpController({
 });
 
 const treeCtrl = new HostTreeController({
-  onOpenHost: (hostId) => void openSshTab(hostId, true),
+  onOpenHost: (hostId) => void openSshTab(hostId, true, 'reuse'),
+  onOpenAnother: (hostId) => void openSshTab(hostId, true, 'another'),
   onSelectHost: (hostId) => markSelectedHost(hostId),
   onCancelConnect: (hostId) => cancelConnect(hostId),
   toast: showToast,
@@ -820,7 +829,7 @@ function renderTabs(): void {
     const dot = document.createElement('span');
     dot.className = 'tab-dot';
     const label = document.createElement('span');
-    label.textContent = tab.info.kind === 'local' ? '本机' : tab.info.alias;
+    label.textContent = tab.info.kind === 'local' ? '本机' : (sessionTabLabels().get(id) ?? tab.info.alias);
     chip.append(dot, label);
 
     if (currentSplitMode !== 'single') {
@@ -842,10 +851,10 @@ function renderTabs(): void {
       reconnect.type = 'button';
       reconnect.className = 'tab-reconnect';
       reconnect.textContent = '重连';
-      const hostId = tab.info.hostId;
+      const closedId = id;
       reconnect.addEventListener('click', (event) => {
         event.stopPropagation();
-        void openSshTab(hostId, currentView === 'terminal');
+        void reconnectClosedTab(closedId);
       });
       chip.appendChild(reconnect);
     }
@@ -967,15 +976,40 @@ function cancelConnect(hostId: string): void {
   treeCtrl.render();
 }
 
-async function openSshTab(hostId: string, showTerminal: boolean): Promise<void> {
-  const live = Array.from(tabs.values()).find((tab) => tab.info.hostId === hostId && !tab.closed);
-  if (live) {
-    selectTab(live.info.sessionId);
+function sessionTabLabels(): Map<string, string> {
+  return tabLabels(Array.from(tabs.values()).map((tab) => ({
+    id: tab.info.sessionId,
+    alias: tab.info.alias,
+    hostId: tab.info.hostId ?? null,
+  })));
+}
+
+async function reconnectClosedTab(sessionId: string): Promise<void> {
+  const tab = tabs.get(sessionId);
+  const hostId = tab?.info.hostId;
+  if (!tab?.closed || !hostId) return;
+  if (pendingConnections.has(hostId)) return;
+  await disposeTab(sessionId, true);
+  await openSshTab(hostId, currentView === 'terminal', 'another');
+}
+
+async function openSshTab(hostId: string, showTerminal: boolean, intent: SessionOpenIntent = 'reuse'): Promise<void> {
+  const plan = planSessionOpen(
+    hostId,
+    Array.from(tabs.values()).map((tab) => ({
+      id: tab.info.sessionId,
+      hostId: tab.info.hostId ?? null,
+      closed: tab.closed,
+    })),
+    pendingConnections.has(hostId),
+    intent,
+  );
+  if (plan.wait) return;
+  if (plan.focusId) {
+    selectTab(plan.focusId);
     return;
   }
-  if (pendingConnections.has(hostId)) return;
-  const stale = Array.from(tabs.entries()).find(([, tab]) => tab.info.hostId === hostId && tab.closed);
-  if (stale) await disposeTab(stale[0], true);
+  if (plan.disposeId) await disposeTab(plan.disposeId, true);
 
   cancelledHostIds.delete(hostId);
   const host = treeCtrl.hosts.find((item) => item.id === hostId);
@@ -1345,6 +1379,26 @@ async function copyText(text: string, ok: string): Promise<void> {
   }
 }
 
+async function writeCursorMcp(): Promise<void> {
+  try {
+    const ok = await confirmAction(
+      '写入 Cursor 用户配置？',
+      '只更新用户目录下 .cursor/mcp.json 里的 mcpServers.tianshell。其他 MCP 服务器保持原样。这一条会带上当前工作台的地址和本机访问令牌。项目里的配置不会改。写入后这个文件只有当前用户能读。',
+      '写入',
+    );
+    if (!ok) return;
+    const result = await webApi.writeCursorMcp();
+    if (result.action === 'unchanged') {
+      showToast('Cursor 里的 tianshell 已经是当前工作台');
+      return;
+    }
+    const verb = result.action === 'created' ? '已创建' : '已更新';
+    showToast(`${verb} ${result.path}`);
+  } catch (err) {
+    showToast(err instanceof Error ? err.message : '写入 Cursor 配置失败', 'error');
+  }
+}
+
 async function showMcpDialog(): Promise<void> {
   const dlg = document.getElementById('mcp-dialog') as HTMLDialogElement;
   const info = await webApi.mcpInfo();
@@ -1382,6 +1436,9 @@ async function boot(): Promise<void> {
   });
   document.getElementById('copy-cursor')?.addEventListener('click', () => {
     void copyText((document.getElementById('mcp-cursor') as HTMLTextAreaElement).value, '已复制 Cursor 配置');
+  });
+  document.getElementById('write-cursor-mcp')?.addEventListener('click', () => {
+    void writeCursorMcp();
   });
   document.getElementById('copy-claude')?.addEventListener('click', () => {
     void copyText((document.getElementById('mcp-claude') as HTMLTextAreaElement).value, '已复制 Claude Code 配置');

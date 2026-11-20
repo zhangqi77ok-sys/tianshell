@@ -370,28 +370,40 @@ export class SftpController {
     this.editorDlg.close();
   }
 
-  private triggerDownload(remotePath: string): void {
-    const sid = this.deps.getActiveSshId();
-    if (!sid) return;
-    const a = document.createElement('a');
-    a.href = webApi.sftpDownloadUrl(sid, remotePath);
-    a.download = remotePath.split('/').pop() || 'file';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+  private async triggerDownload(remotePath: string): Promise<void> {
+    const name = remotePath.split('/').pop() || 'file';
+    await this.startGrantedDownload(remotePath, 'file', name);
   }
 
-  private triggerArchiveDownload(remotePath: string): void {
-    const sid = this.deps.getActiveSshId();
-    if (!sid) return;
-    const a = document.createElement('a');
-    a.href = webApi.sftpArchiveDownloadUrl(sid, remotePath);
+  private async triggerArchiveDownload(remotePath: string): Promise<void> {
     const name = remotePath === '/' ? 'root' : (remotePath.split('/').filter(Boolean).pop() || 'archive');
-    a.download = `${name}.tar.gz`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    this.deps.toast(`开始流式打包下载 ${name}.tar.gz`);
+    const started = await this.startGrantedDownload(remotePath, 'archive', `${name}.tar.gz`);
+    if (started) this.deps.toast(`开始流式打包下载 ${name}.tar.gz`);
+  }
+
+  private async startGrantedDownload(remotePath: string, kind: 'file' | 'archive', filename: string): Promise<boolean> {
+    const sid = this.deps.getActiveSshId();
+    if (!sid) return false;
+    try {
+      const ticket = await webApi.sftpDownloadGrant(sid, remotePath, kind);
+      const href = ticket.href;
+      if (!href.startsWith('/api/downloads/') || href.includes('token=')) {
+        this.deps.toast('下载地址无效');
+        return false;
+      }
+      const a = document.createElement('a');
+      a.href = href;
+      a.rel = 'noreferrer';
+      a.referrerPolicy = 'no-referrer';
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      return true;
+    } catch (err) {
+      this.deps.toast(err instanceof Error ? err.message : '下载没有开始');
+      return false;
+    }
   }
 
   private async renameItem(entry: SftpEntry): Promise<void> {

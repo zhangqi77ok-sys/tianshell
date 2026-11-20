@@ -1,3 +1,4 @@
+use serde_json::json;
 use tempfile::tempdir;
 use tianshell_core::store::{HostStore, SettingsStore, SnippetStore};
 use tianshell_core::types::{AppSettings, AuthType, HostRecord, Snippet};
@@ -165,4 +166,18 @@ fn loads_node_hosts_json_without_leaking_secrets() {
     assert!(!public.contains("s3cret"));
     assert!(!public.contains(&sealed));
     assert_eq!(store.list_groups_sorted()[0].name, "研发");
+}
+
+#[test]
+fn test_group_rename_keeps_id_and_rejects_duplicates() {
+    let dir = tempdir().unwrap();
+    let key = load_or_create_master_key(&dir.path().join("vault.key")).unwrap();
+    let mut store = HostStore::load(dir.path().join("hosts.json"), key).unwrap();
+    let first = store.save_group("研发", None).unwrap();
+    let err = store.save_group("研发", None).unwrap_err();
+    assert!(err.to_string().contains("研发"));
+    let renamed = store.save_group_draft(&json!({ "id": first.id, "name": "运维" })).unwrap();
+    assert_eq!(renamed.id, first.id);
+    assert_eq!(renamed.name, "运维");
+    assert_eq!(store.list_groups().len(), 1);
 }

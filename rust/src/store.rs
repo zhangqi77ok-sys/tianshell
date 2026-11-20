@@ -131,6 +131,9 @@ impl HostStore {
             None
         };
         let order = draft.get("order").and_then(|v| v.as_i64()).map(|n| n as i32);
+        if self.group_name_taken(&name, id.as_deref()) {
+            return Err(StoreError::Invalid(format!("已经有叫「{name}」的分组了")));
+        }
         if let Some(id) = id.clone() {
             if let Some(existing) = self.groups.iter_mut().find(|g| g.id == id) {
                 existing.name = name;
@@ -154,6 +157,10 @@ impl HostStore {
         self.groups.push(group.clone());
         self.persist()?;
         Ok(group)
+    }
+
+    fn group_name_taken(&self, name: &str, except_id: Option<&str>) -> bool {
+        self.groups.iter().any(|group| group.name.eq_ignore_ascii_case(name) && Some(group.id.as_str()) != except_id)
     }
 
     pub fn delete_group(&mut self, id: &str) -> Result<(), StoreError> {
