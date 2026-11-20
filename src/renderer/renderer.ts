@@ -340,7 +340,8 @@ function fitTab(tab: TabState): void {
   if (tab.slot.classList.contains('hidden')) return;
   tab.fit.fit();
   const { cols, rows } = tab.term;
-  if (!tab.closed && cols > 1 && rows > 1 && ws.readyState === WebSocket.OPEN) {
+  // 尺寸门禁：严禁在容器尚未完成渲染或过渡态时发送异常极小尺寸（如 xterm 兜底的 2 列）
+  if (!tab.closed && cols >= 20 && rows >= 5 && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'term:resize', sessionId: tab.info.sessionId, cols, rows }));
   }
 }
@@ -348,25 +349,25 @@ function fitTab(tab: TabState): void {
 function measureGrid(): { cols: number; rows: number } {
   const stage = document.getElementById('terminal-stage');
   if (!stage) return { cols: 100, rows: 28 };
-  const slot = document.createElement('div');
-  slot.className = 'term-slot';
-  stage.appendChild(slot);
-  const term = new Terminal({
-    fontFamily: TERM_FONT,
-    fontSize,
-    lineHeight: 1.15,
-    letterSpacing: 0,
-    theme: TERM_THEME,
-  });
-  const fit = new FitAddon();
-  term.loadAddon(fit);
-  term.open(slot);
-  fit.fit();
-  const cols = term.cols > 1 ? term.cols : 100;
-  const rows = term.rows > 1 ? term.rows : 28;
-  term.dispose();
-  slot.remove();
-  return { cols, rows };
+
+  // 若已有活跃终端，直接复用其实际尺寸，避免向舞台注入临时 DOM 引起 Flex 布局抖动
+  if (activeId) {
+    const activeTab = tabs.get(activeId);
+    if (activeTab && activeTab.term.cols >= 20 && activeTab.term.rows >= 5) {
+      return { cols: activeTab.term.cols, rows: activeTab.term.rows };
+    }
+  }
+
+  // 根据当前舞台可用几何像素估算标准字符网格（字符宽约 8.5px，行高约 17px）
+  const stageWidth = stage.clientWidth;
+  const stageHeight = stage.clientHeight;
+  if (stageWidth > 100 && stageHeight > 50) {
+    const estCols = Math.max(40, Math.min(300, Math.floor((stageWidth - 28) / 8.5)));
+    const estRows = Math.max(10, Math.min(150, Math.floor((stageHeight - 24) / 17)));
+    return { cols: estCols, rows: estRows };
+  }
+
+  return { cols: 100, rows: 28 };
 }
 
 function showMetricsFor(tab: TabState | undefined): void {

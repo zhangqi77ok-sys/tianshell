@@ -145,7 +145,9 @@ impl ShellIo for SshShell {
     }
 
     fn resize(&mut self, cols: u32, rows: u32) {
-        let _ = self.channel.request_pty_size(cols, rows, None, None);
+        if let Err(err) = self.channel.request_pty_size(cols, rows, None, None) {
+            eprintln!("[ssh-{}] 调整 PTY 尺寸 ({}x{}) 失败: {err}", self.id, cols, rows);
+        }
     }
 
     fn shutdown(&mut self) {

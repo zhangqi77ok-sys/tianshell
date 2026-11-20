@@ -173,6 +173,8 @@ impl SessionHub {
     }
 
     pub fn open_local(&self, cols: u32, rows: u32) -> Result<ConnectInfo, String> {
+        let cols = clamp_cols(cols, 80);
+        let rows = clamp_rows(rows, 24);
         let (session, mut reader) = LocalShellSession::open(None, cols, rows).map_err(|err| err.to_string())?;
         let session = Arc::new(Mutex::new(session));
         let id = Uuid::new_v4().to_string();
@@ -237,8 +239,8 @@ impl SessionHub {
         remember_fingerprints(hosts, &learned);
         remember_fingerprints(hosts, &learned_side);
 
-        let cols = clamp_dim(cols, 80);
-        let rows = clamp_dim(rows, 24);
+        let cols = clamp_cols(cols, 80);
+        let rows = clamp_rows(rows, 24);
         let channel = open_shell(&pty_session, cols, rows)?;
 
         let id = Uuid::new_v4().to_string();
@@ -349,9 +351,9 @@ impl SessionHub {
             tabs.get(session_id).map(|tab| tab.io.clone())
         };
         match io {
-            Some(TabIo::Remote(remote)) => remote.pty.resize(clamp_dim(cols, 80), clamp_dim(rows, 24)),
+            Some(TabIo::Remote(remote)) => remote.pty.resize(clamp_cols(cols, 80), clamp_rows(rows, 24)),
             Some(TabIo::Local(session)) => {
-                let _ = lock(&session).resize(clamp_dim(cols, 80), clamp_dim(rows, 24));
+                let _ = lock(&session).resize(clamp_cols(cols, 80), clamp_rows(rows, 24));
             }
             None => {}
         }
@@ -717,8 +719,14 @@ struct TabMeta {
     cwd: Option<String>,
 }
 
-fn clamp_dim(value: u32, fallback: u32) -> u32 {
-    if value == 0 { fallback } else { value.min(512) }
+pub(crate) fn clamp_cols(value: u32, fallback: u32) -> u32 {
+    let fb = fallback.max(20).min(512);
+    if value < 20 { fb } else { value.min(512) }
+}
+
+pub(crate) fn clamp_rows(value: u32, fallback: u32) -> u32 {
+    let fb = fallback.max(5).min(256);
+    if value < 5 { fb } else { value.min(256) }
 }
 
 fn command_nonce() -> String {
@@ -879,5 +887,31 @@ fn metrics_loop(
             }
             std::thread::sleep(Duration::from_millis(200));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_clamp_cols_rejects_tiny_values() {
+        assert_eq!(clamp_cols(0, 80), 80);
+        assert_eq!(clamp_cols(1, 80), 80);
+        assert_eq!(clamp_cols(2, 80), 80);
+        assert_eq!(clamp_cols(19, 80), 80);
+        assert_eq!(clamp_cols(20, 80), 20);
+        assert_eq!(clamp_cols(100, 80), 100);
+        assert_eq!(clamp_cols(1000, 80), 512);
+    }
+
+    #[test]
+    fn test_clamp_rows_rejects_tiny_values() {
+        assert_eq!(clamp_rows(0, 24), 24);
+        assert_eq!(clamp_rows(1, 24), 24);
+        assert_eq!(clamp_rows(4, 24), 24);
+        assert_eq!(clamp_rows(5, 24), 5);
+        assert_eq!(clamp_rows(30, 24), 30);
+        assert_eq!(clamp_rows(500, 24), 256);
     }
 }
