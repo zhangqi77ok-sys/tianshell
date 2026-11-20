@@ -6642,6 +6642,13 @@ WARNING: This link could potentially be dangerous`)) {
   function clearScreenInput() {
     return "\f";
   }
+  function quickCommandInput(command, shell = "posix") {
+    const text = command.replace(/[\r\n]+$/, "");
+    if (!text.trim()) return "";
+    if (shell === "powershell") return `\x1B[1;5H\x1B[1;5F${text}\r`;
+    return `${text}
+`;
+  }
   var LINK_DOWN_NOTICE_GAP_MS = 4e3;
   function inputDelivery(haveRecipients, linkOpen) {
     if (!haveRecipients) return "no-terminal";
@@ -8086,8 +8093,7 @@ ${op.command}`;
           showToast("\u8BF7\u5148\u6253\u5F00\u6216\u9009\u4E2D\u4E00\u4E2A\u7EC8\u7AEF\u4F1A\u8BDD", "error");
           return;
         }
-        sendInput(`${op.command}
-`);
+        sendQuickCommand(op.command);
         document.getElementById("nav-ops-menu")?.classList.add("hidden");
         switchView("terminal");
       });
@@ -8133,6 +8139,22 @@ ${op.command}`;
   }
   function inputRecipients(sourceId) {
     return keystrokeRecipients(sourceId, tabModels(), Array.from(broadcastChecked), broadcastOn());
+  }
+  function sendQuickCommand(command) {
+    if (!activeId) return;
+    const ids = inputRecipients(activeId);
+    if (!ids.length) {
+      showToast("\u5F53\u524D\u7EC8\u7AEF\u5DF2\u65AD\u5F00\uFF0C\u547D\u4EE4\u6CA1\u6709\u53D1\u51FA", "error");
+      return;
+    }
+    if (!quickCommandInput(command)) {
+      showToast("\u8FD9\u6761\u5FEB\u6377\u547D\u4EE4\u662F\u7A7A\u7684", "error");
+      return;
+    }
+    for (const id of ids) {
+      const shell = tabs.get(id)?.info.shell === "powershell" ? "powershell" : "posix";
+      dispatchInput([id], quickCommandInput(command, shell));
+    }
   }
   function sendInput(data) {
     if (!activeId) return;

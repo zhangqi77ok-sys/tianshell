@@ -183,6 +183,23 @@ export function clearScreenInput(): string {
   return '\u000c';
 }
 
+export type QuickCommandShell = 'posix' | 'powershell';
+
+/**
+ * 快捷命令要单独成行。字节必须和 Rust `quick_command_input` 一致。
+ *
+ * Bash 的 Ctrl+U 只删光标左边，所以先 Ctrl+E 到行尾再 Ctrl+U。
+ * 本机 PowerShell 默认是 PSReadLine 的 Windows 模式。powershell.exe 会把裸的 Ctrl+U 显示成 ^U，
+ * Escape 和 Ctrl+A 也清不掉半行。Ctrl+Home 再 Ctrl+End 会删到开头和末尾，光标在中间也删得掉整行。
+ * PowerShell 用 CR 提交。不发送 Ctrl+C。Emacs 模式不绑定这两键，这条序列以 Windows 默认模式为准。
+ */
+export function quickCommandInput(command: string, shell: QuickCommandShell = 'posix'): string {
+  const text = command.replace(/[\r\n]+$/, '');
+  if (!text.trim()) return '';
+  if (shell === 'powershell') return `\u001b[1;5H\u001b[1;5F${text}\r`;
+  return `\u0005\u0015${text}\n`;
+}
+
 export type InputDelivery = 'send' | 'no-terminal' | 'link-down';
 
 /** 同一段断线里，输入失败只提示一次，避免每个按键都弹一条。 */

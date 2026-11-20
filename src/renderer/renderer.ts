@@ -11,6 +11,7 @@ import {
   broadcastRecipients,
   claimSingleFlight,
   clearScreenInput,
+  quickCommandInput,
   inputDelivery,
   keystrokeRecipients,
   nextFindIndex,
@@ -352,7 +353,7 @@ async function renderQuickOpsBar(): Promise<void> {
         showToast('请先打开或选中一个终端会话', 'error');
         return;
       }
-      sendInput(`${op.command}\n`);
+      sendQuickCommand(op.command);
       document.getElementById('nav-ops-menu')?.classList.add('hidden');
       switchView('terminal');
     });
@@ -402,6 +403,23 @@ function dispatchInput(ids: string[], data: string): void {
 
 function inputRecipients(sourceId: string): string[] {
   return keystrokeRecipients(sourceId, tabModels(), Array.from(broadcastChecked), broadcastOn());
+}
+
+function sendQuickCommand(command: string): void {
+  if (!activeId) return;
+  const ids = inputRecipients(activeId);
+  if (!ids.length) {
+    showToast('当前终端已断开，命令没有发出', 'error');
+    return;
+  }
+  if (!quickCommandInput(command)) {
+    showToast('这条快捷命令是空的', 'error');
+    return;
+  }
+  for (const id of ids) {
+    const shell = tabs.get(id)?.info.shell === 'powershell' ? 'powershell' : 'posix';
+    dispatchInput([id], quickCommandInput(command, shell));
+  }
 }
 
 function sendInput(data: string): void {

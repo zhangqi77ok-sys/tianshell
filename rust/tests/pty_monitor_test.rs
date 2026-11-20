@@ -4,6 +4,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tianshell_core::monitor::parse_metrics_sample;
 use tianshell_core::pty::LocalShellSession;
+use tianshell_core::screen::quick_command_input;
 
 /// 提示符已经出现，并且这一小段时间没有新输出，才说明 shell 开始读键盘。
 /// 这不是启动前的固定等待：输出还在涨时计时会重新开始。
@@ -195,6 +196,93 @@ fn local_shell_is_a_pty_and_accepts_resize() {
     }
     assert!(!text.to_ascii_lowercase().contains("can't access tty"), "{text}");
     assert!(!text.to_ascii_lowercase().contains("not a tty"), "{text}");
+    session.kill().unwrap();
+}
+
+/// 把终端重绘折成行。成功断言看的是执行结果那一行，不能只看见送出去的命令文本。
+fn folded_lines(raw: &str) -> Vec<String> {
+    let text = strip_ansi(raw);
+    let mut lines = vec![String::new()];
+    let mut col = 0usize;
+    for ch in text.chars() {
+        match ch {
+            '\n' => {
+                lines.push(String::new());
+                col = 0;
+            }
+            '\r' => col = 0,
+            '\u{8}' | '\u{7f}' => {
+                if col > 0 {
+                    col -= 1;
+                }
+            }
+            c if c.is_control() => {}
+            c => {
+                let line = lines.last_mut().expect("line");
+                let mut chars: Vec<char> = line.chars().collect();
+                if col < chars.len() {
+                    chars[col] = c;
+                } else {
+                    while chars.len() < col {
+                        chars.push(' ');
+                    }
+                    chars.push(c);
+                }
+                *line = chars.into_iter().collect();
+                col += 1;
+            }
+        }
+    }
+    lines.into_iter().map(|line| line.trim().to_string()).filter(|line| !line.is_empty()).collect()
+}
+
+fn marker_command(powershell: bool, marker: &str) -> String {
+    let (head, tail) = marker.split_once(':').expect("marker");
+    if powershell {
+        format!("Write-Output ('{head}:' + '{tail}')")
+    } else {
+        format!("printf '{head}:%s\\n' {tail}")
+    }
+}
+
+fn replace_pending_line(session: &mut LocalShellSession, captured: &CapturedPty, at_end: bool, pending: &str, marker: &str) {
+    let powershell = cfg!(windows);
+    let command = marker_command(powershell, marker);
+    assert!(!command.contains(marker), "the marker must be produced by running the command");
+    let mut bytes = format!("echo {pending}").into_bytes();
+    if !at_end {
+        let steps = pending.len();
+        if powershell {
+            for _ in 0..steps {
+                bytes.extend_from_slice(b"\x1b[D");
+            }
+        } else {
+            bytes.extend(std::iter::repeat(0x02u8).take(steps));
+        }
+    }
+    bytes.extend(quick_command_input(&command, powershell).into_bytes());
+    session.write(&bytes).unwrap();
+    let out = captured.wait_until(Duration::from_secs(8), |raw| folded_lines(raw).iter().any(|line| line == marker));
+    let lines = folded_lines(&out);
+    assert!(
+        lines.iter().any(|line| line == marker),
+        "quick command did not run by itself ({pending}, end={at_end}): {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line == pending),
+        "pending text was executed ({pending}, end={at_end}): {lines:?}"
+    );
+}
+
+#[test]
+fn quick_command_replaces_pending_line_at_end_and_middle() {
+    // 宽屏避免半行标记被 80 列折成单独一行，被误当成已经执行。
+    let (mut session, reader) = LocalShellSession::open(None, 200, 24).unwrap();
+    let captured = CapturedPty::start(reader);
+    let ready = captured.wait_until_ready(Duration::from_secs(8));
+    assert!(shell_prompt_ready(&ready), "shell never became ready: {ready}");
+    replace_pending_line(&mut session, &captured, false, "PENDINGMID", "RAN:MIDOK");
+    replace_pending_line(&mut session, &captured, true, "PENDINGEND", "RAN:ENDOK");
     session.kill().unwrap();
 }
 

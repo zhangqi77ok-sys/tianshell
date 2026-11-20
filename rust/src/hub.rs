@@ -28,6 +28,8 @@ pub struct ConnectInfo {
     pub host: String,
     pub port: u16,
     pub kind: String,
+    /// posix：Ctrl+E 再 Ctrl+U。powershell：Ctrl+Home 再 Ctrl+End，删掉未提交的整行。
+    pub shell: String,
     #[serde(rename = "hostId", skip_serializing_if = "Option::is_none")]
     pub host_id: Option<String>,
 }
@@ -200,6 +202,10 @@ impl SessionHub {
             host: "localhost".into(),
             port: 0,
             kind: "local".into(),
+            shell: match ShellKind::local_default() {
+                ShellKind::PowerShell => "powershell".into(),
+                ShellKind::Posix => "posix".into(),
+            },
             host_id: None,
         };
         lock(&self.tabs).insert(
@@ -264,6 +270,7 @@ impl SessionHub {
             host: leaf.host,
             port: leaf.port,
             kind: "ssh".into(),
+            shell: "posix".into(),
             host_id: Some(leaf.id.clone()),
         };
         lock(&self.tabs).insert(

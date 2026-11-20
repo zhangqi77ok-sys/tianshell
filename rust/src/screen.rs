@@ -309,11 +309,13 @@ fn parse_params(bytes: &[u8]) -> Vec<i64> {
 #[derive(Debug)]
 pub struct LineAssembler {
     buf: String,
+    /// 刚看到 Ctrl+Home 或 Ctrl+End。两个连着出现才表示整行都删了。
+    saw_input_edge_delete: bool,
 }
 
 impl LineAssembler {
     pub fn new() -> Self {
-        Self { buf: String::new() }
+        Self { buf: String::new(), saw_input_edge_delete: false }
     }
 
     pub fn feed(&mut self, data: &str) -> Vec<String> {
@@ -323,11 +325,19 @@ impl LineAssembler {
             if ch == '\u{1b}' {
                 if chars.peek() == Some(&'[') {
                     chars.next();
+                    let mut csi = String::new();
                     for next in chars.by_ref() {
+                        csi.push(next);
                         if ('@'..='~').contains(&next) {
                             break;
                         }
                     }
+                    // PSReadLine Windows 模式：Ctrl+Home 删到开头，Ctrl+End 删到末尾。
+                    let edge = csi == "1;5H" || csi == "1;5F";
+                    if edge && self.saw_input_edge_delete {
+                        self.buf.clear();
+                    }
+                    self.saw_input_edge_delete = edge;
                 } else if chars.peek() == Some(&']') {
                     chars.next();
                     for next in chars.by_ref() {
@@ -335,9 +345,13 @@ impl LineAssembler {
                             break;
                         }
                     }
+                    self.saw_input_edge_delete = false;
+                } else {
+                    self.saw_input_edge_delete = false;
                 }
                 continue;
             }
+            self.saw_input_edge_delete = false;
             match ch {
                 '\r' | '\n' => {
                     let line = std::mem::take(&mut self.buf);
@@ -366,6 +380,33 @@ impl Default for LineAssembler {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 工作台快捷命令发给 shell 的按键。必须和 `quickCommandInput` 保持同一串字节。
+///
+/// posix 先 Ctrl+E 再 Ctrl+U：Bash 的 Ctrl+U 只删光标左边。
+/// powershell 发送 Ctrl+Home、Ctrl+End。Windows 控制台会把它们交给 PSReadLine，
+/// 分别删到输入开头和末尾，所以光标在中间也能删掉整行。
+/// 裸的 Ctrl+U 在 powershell.exe 里会变成可见的 ^U，Escape 也清不掉半行，Ctrl+A 同样不能用。
+/// PowerShell 用 CR 提交，因为那是 Enter。posix 用 LF。不发送 Ctrl+C。
+pub fn quick_command_input(command: &str, powershell: bool) -> String {
+    let text = command.trim_end_matches(['\r', '\n']);
+    if text.trim().is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    if powershell {
+        out.push_str("\u{1b}[1;5H\u{1b}[1;5F");
+        out.push_str(text);
+        // PSReadLine 的 Enter 是 CR。LF 在 Windows 控制台上不一定提交。
+        out.push('\r');
+    } else {
+        out.push('\u{5}');
+        out.push('\u{15}');
+        out.push_str(text);
+        out.push('\n');
+    }
+    out
 }
 
 pub fn is_trailer_line(line: &str) -> bool {
@@ -527,6 +568,25 @@ mod tests {
         wiped.feed("\u{7f}");
         wiped.feed("\u{7f}");
         assert_eq!(wiped.feed("\r"), Vec::<String>::new());
+        let mut replaced = LineAssembler::new();
+        replaced.feed("echo PENDINGMID");
+        replaced.feed("\u{2}\u{2}");
+        let submitted = replaced.feed(&quick_command_input("printf 'RAN:%s\\n' MIDOK", false));
+        assert_eq!(submitted, vec!["printf 'RAN:%s\\n' MIDOK".to_string()]);
+        let mut kept = LineAssembler::new();
+        kept.feed("echo PENDINGMID");
+        kept.feed("\u{1b}[1;5H");
+        assert_eq!(kept.feed("\n"), vec!["echo PENDINGMID".to_string()]);
+        let mut powershell = LineAssembler::new();
+        powershell.feed("echo PENDINGMID");
+        powershell.feed("\u{1b}[D");
+        let ps_line = powershell.feed(&quick_command_input("Write-Output ('RAN:' + 'MIDOK')", true));
+        assert_eq!(ps_line, vec!["Write-Output ('RAN:' + 'MIDOK')".to_string()]);
+        let ps_bytes = quick_command_input("Get-Date", true);
+        assert!(!ps_bytes.contains('\u{3}'));
+        assert!(!ps_bytes.contains('\u{15}'));
+        assert!(!ps_bytes.contains('\u{1}'));
+        assert_eq!(quick_command_input("   \n", false), "");
     }
 
     #[test]

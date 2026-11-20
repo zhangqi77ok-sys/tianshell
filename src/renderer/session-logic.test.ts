@@ -6,6 +6,7 @@ import {
   claimSingleFlight,
   editorWriteGuard,
   clearScreenInput,
+  quickCommandInput,
   historyAfterFailedRefresh,
   historyEmptyText,
   inputDelivery,
@@ -139,6 +140,18 @@ test('多行粘贴只执行第一次选择，取消后不能再提交', () => {
   assert.equal(pasteNeedsConfirm('echo a\r\necho b'), true);
   assert.equal(pasteNeedsConfirm('echo a\n'), false);
   assert.equal(pasteNeedsConfirm('echo a'), false);
+});
+
+test('快捷命令先到行尾再清掉整行，避免光标中间的后半段被拼上', () => {
+  assert.equal(quickCommandInput('uptime && free -h'), '\u0005\u0015uptime && free -h\n');
+  assert.equal(quickCommandInput('df -hT\n', 'posix'), '\u0005\u0015df -hT\n');
+  assert.equal(quickCommandInput(''), '');
+  assert.equal(quickCommandInput('   \n', 'posix'), '');
+  const powershell = quickCommandInput('Get-Date', 'powershell');
+  assert.equal(powershell, '\u001b[1;5H\u001b[1;5FGet-Date\r');
+  assert.equal(powershell.includes('\u0003'), false);
+  assert.equal(powershell.includes('\u0001'), false);
+  assert.equal(powershell.includes('\u0015'), false);
 });
 
 test('清空屏幕送给 shell，而不是本地擦除', () => {
