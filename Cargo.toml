@@ -30,7 +30,7 @@ name = "workbench_mcp_test"
 path = "rust/tests/workbench_mcp_test.rs"
 
 [features]
-default = []
+default = ["desktop"]
 desktop = ["dep:wry", "dep:tao"]
 
 [dependencies]
