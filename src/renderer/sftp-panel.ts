@@ -1,5 +1,6 @@
 import type { SftpEntry, TransferTask } from '../shared/types.js';
 import { webApi } from './api-client.js';
+import { editorWriteGuard } from './session-logic.js';
 
 export interface SftpControllerDeps {
   getActiveSshId: () => string | null;
@@ -51,6 +52,8 @@ export class SftpController {
   private loadTicket = 0;
   private readonly transfers = new Map<string, TransferTask>();
   private editingPath: string | null = null;
+  private editingSession: string | null = null;
+  private editorSaving = false;
 
   private readonly pathInput = document.getElementById('sftp-path') as HTMLInputElement;
   private readonly breadcrumbsEl = document.getElementById('sftp-breadcrumbs') as HTMLDivElement;
@@ -301,10 +304,14 @@ export class SftpController {
 
   private async openEditor(remotePath: string): Promise<void> {
     const sid = this.deps.getActiveSshId();
-    if (!sid) return;
+    if (!sid) {
+      this.deps.toast('没有仍连接的 SSH 会话，读不了这个文件', 'error');
+      return;
+    }
     try {
       const res = await webApi.sftpReadText(sid, remotePath);
       this.editingPath = remotePath;
+      this.editingSession = sid;
       const fileName = remotePath.split('/').pop() || '文件';
       const meta = getFileMeta(fileName, false);
       if (this.editorFileIcon) this.editorFileIcon.textContent = meta.icon;
@@ -354,18 +361,27 @@ export class SftpController {
   }
 
   private async saveEditorContent(): Promise<boolean> {
-    const sid = this.deps.getActiveSshId();
-    if (!sid || !this.editingPath) return false;
+    const decision = editorWriteGuard(this.editingSession, this.deps.getActiveSshId(), this.editorSaving);
+    if (decision === 'idle' || decision === 'busy' || !this.editingPath || !this.editingSession) return false;
+    if (decision === 'disconnected') {
+      this.deps.toast('这个会话已经断开，修改还留在编辑器里', 'error');
+      return false;
+    }
+    const sid = this.editingSession;
+    const path = this.editingPath;
+    this.editorSaving = true;
     try {
-      await webApi.sftpWriteText(sid, this.editingPath, this.editorContent.value);
+      await webApi.sftpWriteText(sid, path, this.editorContent.value);
       this.editorOriginalContent = this.editorContent.value;
       this.checkEditorDirty();
-      this.deps.toast(`已写回远端文件: ${this.editingPath.split('/').pop()}`);
+      this.deps.toast(`已写回远端文件: ${path.split('/').pop()}`);
       void this.load(this.currentDir);
       return true;
     } catch (err) {
       this.deps.toast(err instanceof Error ? `保存失败: ${err.message}` : '保存失败', 'error');
       return false;
+    } finally {
+      this.editorSaving = false;
     }
   }
 
@@ -374,6 +390,8 @@ export class SftpController {
       const ok = await this.deps.confirm('放弃未保存的修改？', '关闭后，这次编辑不会写回远端。', '放弃修改');
       if (!ok) return;
     }
+    this.editingPath = null;
+    this.editingSession = null;
     this.editorDlg.close();
   }
 

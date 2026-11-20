@@ -7,10 +7,16 @@ import { connectWs, resolveClientToken, webApi } from './api-client.js';
 import { HostTreeController } from './host-tree.js';
 import { MonitorAndToolsController } from './monitor-panel.js';
 import {
+  acceptLiveMetrics,
   broadcastRecipients,
+  claimSingleFlight,
+  keystrokeRecipients,
   nextFindIndex,
   planSessionOpen,
+  resizeIfChanged,
   seedBroadcastChecks,
+  sessionOpenSteps,
+  shouldMeasureTerminal,
   tabLabels,
   type BroadcastTab,
   type SessionOpenIntent,
@@ -24,6 +30,8 @@ interface TabState {
   slot: HTMLDivElement;
   metrics: ServerMetrics | null;
   closed: boolean;
+  dataSub: { dispose(): void };
+  lastResize: { cols: number; rows: number } | null;
 }
 
 const TERM_FONT = 'Consolas, "Cascadia Mono", "Courier New", monospace';
@@ -248,7 +256,7 @@ function handleWsEvent(msg: Record<string, unknown>): void {
     const tab = tabs.get(msg.sessionId);
     if (!tab || tab.closed) return;
     tab.metrics = msg.metrics as ServerMetrics;
-    if (activeId === msg.sessionId) showMetricsFor(tab);
+    if (acceptLiveMetrics(msg.sessionId, activeId, tab.closed)) showMetricsFor(tab);
   } else if (type === 'catalog:changed') {
     void refreshLive(String(msg.kind || 'disk'));
   } else if (type === 'transfer:progress') {
@@ -376,9 +384,18 @@ function dispatchInput(ids: string[], data: string): void {
   ws.send(JSON.stringify({ type: 'term:broadcast', sessionIds: ids, data }));
 }
 
+function inputRecipients(sourceId: string): string[] {
+  return keystrokeRecipients(sourceId, tabModels(), Array.from(broadcastChecked), broadcastOn());
+}
+
 function sendInput(data: string): void {
-  const enabled = (document.getElementById('broadcast-toggle') as HTMLInputElement).checked;
-  dispatchInput(broadcastRecipients(activeId, tabModels(), Array.from(broadcastChecked), enabled), data);
+  if (!activeId) return;
+  const ids = inputRecipients(activeId);
+  if (!ids.length) {
+    showToast('当前终端已断开，命令没有发出', 'error');
+    return;
+  }
+  dispatchInput(ids, data);
 }
 
 function sendToActive(data: string): void {
@@ -521,8 +538,11 @@ function createTermInstance(info: ConnectInfo): void {
   const fit = new FitAddon();
   term.loadAddon(fit);
   term.open(slot);
-  term.onData((data) => sendInput(data));
-  tabs.set(info.sessionId, { info, term, fit, slot, metrics: null, closed: false });
+  const sourceId = info.sessionId;
+  const dataSub = term.onData((data) => {
+    dispatchInput(inputRecipients(sourceId), data);
+  });
+  tabs.set(info.sessionId, { info, term, fit, slot, metrics: null, closed: false, dataSub, lastResize: null });
   treeCtrl.render();
   selectTab(info.sessionId);
 }
@@ -533,18 +553,16 @@ function isTerminalViewActive(): boolean {
 }
 
 function fitTab(tab: TabState): void {
-  // 门禁 1：若终端主视图未激活或槽位隐藏，坚决不执行 fit 和向远端发送 resize
-  if (!isTerminalViewActive() || tab.slot.classList.contains('hidden')) return;
+  if (!shouldMeasureTerminal(isTerminalViewActive(), tab.slot.classList.contains('hidden'))) return;
 
   const stage = document.getElementById('terminal-stage');
   if (!stage || stage.clientWidth < 100 || stage.clientHeight < 50) return;
 
   tab.fit.fit();
-  const { cols, rows } = tab.term;
-  // 尺寸门禁：严禁在容器尚未完成渲染或过渡态时发送异常极小尺寸（必须 >= 30 列且 >= 6 行）
-  if (!tab.closed && cols >= 30 && rows >= 6 && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'term:resize', sessionId: tab.info.sessionId, cols, rows }));
-  }
+  const next = resizeIfChanged(tab.lastResize, tab.term.cols, tab.term.rows);
+  if (!next || tab.closed || ws.readyState !== WebSocket.OPEN) return;
+  tab.lastResize = next;
+  ws.send(JSON.stringify({ type: 'term:resize', sessionId: tab.info.sessionId, cols: next.cols, rows: next.rows }));
 }
 
 function measureGrid(): { cols: number; rows: number } {
@@ -912,6 +930,7 @@ async function disposeTab(sessionId: string, selectFallback: boolean): Promise<v
   } catch {
     // 会话可能已经在服务端断开。
   }
+  tab.dataSub.dispose();
   tab.term.dispose();
   tab.slot.remove();
   tabs.delete(sessionId);
@@ -1016,12 +1035,12 @@ async function openSshTab(hostId: string, showTerminal: boolean, intent: Session
     pendingConnections.has(hostId),
     intent,
   );
-  if (plan.wait) return;
-  if (plan.focusId) {
+  const steps = sessionOpenSteps(plan);
+  if (steps[0] === 'focus' && plan.focusId) {
     selectTab(plan.focusId);
     return;
   }
-  if (plan.disposeId) await disposeTab(plan.disposeId, true);
+  if (!steps.includes('connect')) return;
 
   cancelledHostIds.delete(hostId);
   const host = treeCtrl.hosts.find((item) => item.id === hostId);
@@ -1039,6 +1058,17 @@ async function openSshTab(hostId: string, showTerminal: boolean, intent: Session
   treeCtrl.render();
 
   try {
+    if (steps.includes('dispose') && plan.disposeId) {
+      await disposeTab(plan.disposeId, true);
+      if (abort.signal.aborted || pendingConnections.get(hostId)?.cancelled) {
+        pendingConnections.delete(hostId);
+        cancelledHostIds.delete(hostId);
+        renderTabs();
+        treeCtrl.render();
+        if (tabs.size === 0) showIdleEmpty();
+        return;
+      }
+    }
     const grid = measureGrid();
     const info = (await webApi.openSession({ kind: 'ssh', hostId, cols: grid.cols, rows: grid.rows }, abort.signal)) as ConnectInfo & { hostId?: string };
     if (!info.hostId) info.hostId = hostId;
@@ -1133,6 +1163,11 @@ function findInActiveTerm(needle: string, forward = true): void {
   setFindCount(`${findCursor + 1}/${findHits.length}`, wrapped ? '已从另一头继续' : '');
 }
 
+function closeFind(): void {
+  document.getElementById('search-bar')?.classList.add('hidden');
+  if (currentView === 'terminal' && activeId) tabs.get(activeId)?.term.focus();
+}
+
 function openFind(): void {
   switchView('terminal');
   const bar = document.getElementById('search-bar');
@@ -1197,9 +1232,18 @@ function bindGlobalUi(): void {
   });
 
   // 打开新终端（顶部栏与侧栏）
+  let localOpenInFlight = false;
   const handleOpenLocal = async () => {
-    const grid = measureGrid();
-    createTermInstance(await webApi.openSession({ kind: 'local', cols: grid.cols, rows: grid.rows }));
+    if (!claimSingleFlight(localOpenInFlight)) return;
+    localOpenInFlight = true;
+    try {
+      const grid = measureGrid();
+      createTermInstance(await webApi.openSession({ kind: 'local', cols: grid.cols, rows: grid.rows }));
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '本机终端没有打开', 'error');
+    } finally {
+      localOpenInFlight = false;
+    }
   };
   document.getElementById('new-tab-local')?.addEventListener('click', () => void handleOpenLocal());
 
@@ -1223,7 +1267,7 @@ function bindGlobalUi(): void {
     moreWrap?.classList.remove('open');
   });
   document.getElementById('search-toggle')?.addEventListener('click', () => openFind());
-  document.getElementById('search-close')?.addEventListener('click', () => document.getElementById('search-bar')?.classList.add('hidden'));
+  document.getElementById('search-close')?.addEventListener('click', () => closeFind());
   document.getElementById('search-prev')?.addEventListener('click', () => findInActiveTerm((document.getElementById('search-input') as HTMLInputElement).value, false));
   document.getElementById('search-next')?.addEventListener('click', () => findInActiveTerm((document.getElementById('search-input') as HTMLInputElement).value, true));
   document.getElementById('search-input')?.addEventListener('keydown', (event) => {
@@ -1251,7 +1295,8 @@ function bindGlobalUi(): void {
     syncThemeToggle();
     applyTermTheme();
     sftpCtrl.setShowHidden(s.showHiddenFiles);
-    for (const tab of tabs.values()) { tab.term.options.fontSize = fontSize; tab.fit.fit(); }
+    for (const tab of tabs.values()) tab.term.options.fontSize = fontSize;
+    fitVisibleTabs();
     setDlg.close();
   });
 
@@ -1311,8 +1356,13 @@ function bindGlobalUi(): void {
     }
   });
   window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      document.getElementById('terminal-context-menu')?.classList.add('hidden');
+    if (e.key !== 'Escape') return;
+    const el = document.activeElement as HTMLElement | null;
+    if (el?.closest('dialog')) return;
+    document.getElementById('terminal-context-menu')?.classList.add('hidden');
+    if (el?.closest('#search-bar')) {
+      e.preventDefault();
+      closeFind();
     }
   });
 }
@@ -1355,10 +1405,9 @@ async function applySettings(): Promise<void> {
   if (font) font.value = String(s.fontSize);
   if (interval) interval.value = String(s.monitorIntervalMs);
   if (hidden) hidden.checked = s.showHiddenFiles;
-  for (const tab of tabs.values()) {
-    tab.term.options.fontSize = fontSize;
-    tab.fit.fit();
-  }
+  for (const tab of tabs.values()) tab.term.options.fontSize = fontSize;
+  for (const tab of tabs.values()) tab.lastResize = null;
+  fitVisibleTabs();
 }
 
 function mcpConfigs(url: string, token: string): { cursor: string; claude: string } {

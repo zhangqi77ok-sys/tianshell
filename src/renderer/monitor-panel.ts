@@ -1,5 +1,6 @@
 import type { PublicHost, ServerMetrics } from '../shared/types.js';
 import { webApi } from './api-client.js';
+import { isCurrentGeneration } from './session-logic.js';
 import { formatBytes } from './sftp-panel.js';
 
 export interface MonitorPanelDeps {
@@ -28,6 +29,7 @@ export class MonitorAndToolsController {
   private readonly procsEl = document.getElementById('mon-procs') as HTMLElement;
   private readonly historyEl = document.getElementById('history-list') as HTMLElement;
   private historyQuery = '';
+  private historyTicket = 0;
 
   constructor(private readonly deps: MonitorPanelDeps) {
     this.bindDialogs();
@@ -153,8 +155,10 @@ export class MonitorAndToolsController {
 
   async refreshHistory(): Promise<void> {
     if (!this.historyEl) return;
+    const ticket = ++this.historyTicket;
     try {
       const rows = await webApi.listHistory(this.historyQuery);
+      if (!isCurrentGeneration(ticket, this.historyTicket)) return;
       this.historyEl.textContent = '';
       if (!rows.length) {
         const empty = document.createElement('div');
@@ -226,6 +230,7 @@ export class MonitorAndToolsController {
         this.historyEl.appendChild(card);
       }
     } catch {
+      if (!isCurrentGeneration(ticket, this.historyTicket)) return;
       this.historyEl.textContent = '';
       const empty = document.createElement('div');
       empty.className = 'empty-muted';

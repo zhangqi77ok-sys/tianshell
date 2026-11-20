@@ -114,7 +114,7 @@ pub struct SessionHub {
 
 impl SessionHub {
     pub fn new(interval_ms: u64) -> Arc<Self> {
-        let (events, _) = broadcast::channel::<String>(256);
+        let (events, _) = broadcast::channel::<String>(crate::shared_ssh::EVENT_BUS_CAPACITY);
         let screens = Arc::new(Mutex::new(HashMap::new()));
         let history = Arc::new(Mutex::new(None));
         let finished = Arc::new(Mutex::new(HashMap::new()));

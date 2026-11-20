@@ -91,6 +91,81 @@ export function tabLabels(tabs: readonly { id: string; alias: string; hostId: st
   return labels;
 }
 
+/**
+ * 按键属于发出它的那个终端。
+ * 这个终端已经断开时，结果是空的，不能再漏到其他被勾选的会话。
+ */
+export function keystrokeRecipients(
+  sourceId: string,
+  tabs: readonly BroadcastTab[],
+  checked: readonly string[],
+  enabled: boolean,
+): string[] {
+  const source = tabs.find((tab) => tab.id === sourceId);
+  if (!source || source.closed) return [];
+  return broadcastRecipients(sourceId, tabs, checked, enabled);
+}
+
+export type SessionOpenStep = 'focus' | 'reserve' | 'dispose' | 'connect';
+
+/**
+ * 真正要发起连接时，先占住这台主机的名额，再等待关闭旧标签。
+ * 名额如果放在 await 之后，双击会在占位前再走进来一次。
+ */
+export function sessionOpenSteps(plan: SessionOpenPlan): SessionOpenStep[] {
+  if (plan.wait) return [];
+  if (plan.focusId) return ['focus'];
+  const steps: SessionOpenStep[] = ['reserve'];
+  if (plan.disposeId) steps.push('dispose');
+  steps.push('connect');
+  return steps;
+}
+
+/** 同一动作还在飞，就不要再接受一次点击。 */
+export function claimSingleFlight(inFlight: boolean): boolean {
+  return !inFlight;
+}
+
+/** 终端视图没显示，或槽位还藏着，量出来的格子不能信。 */
+export function shouldMeasureTerminal(viewActive: boolean, slotHidden: boolean): boolean {
+  return viewActive && !slotHidden;
+}
+
+/** 尺寸没变，或还没到能交给 PTY 的网格，就不要发 resize。 */
+export function resizeIfChanged(
+  previous: { cols: number; rows: number } | null,
+  cols: number,
+  rows: number,
+): { cols: number; rows: number } | null {
+  if (cols < 30 || rows < 6) return null;
+  if (previous && previous.cols === cols && previous.rows === rows) return null;
+  return { cols, rows };
+}
+
+export type EditorWrite = 'write' | 'busy' | 'disconnected' | 'idle';
+
+/** 只写回打开编辑器时的那个仍连接会话。上一笔保存还没结束时不再叠一笔。 */
+export function editorWriteGuard(
+  editingSession: string | null,
+  activeSession: string | null,
+  inFlight: boolean,
+): EditorWrite {
+  if (!editingSession) return 'idle';
+  if (inFlight) return 'busy';
+  if (!activeSession || activeSession !== editingSession) return 'disconnected';
+  return 'write';
+}
+
+/** 监控数字只画在仍连接、且正看着的那个会话上。 */
+export function acceptLiveMetrics(sessionId: string, activeId: string | null, closed: boolean): boolean {
+  return Boolean(activeId) && activeId === sessionId && !closed;
+}
+
+/** 后返回的历史或目录结果才算数。0 不是有效序号。 */
+export function isCurrentGeneration(ticket: number, latest: number): boolean {
+  return ticket > 0 && ticket === latest;
+}
+
 /** current < 0 表示还没定位。向前从第一条开始，向后从最后一条开始，到头之后回绕。 */
 export function nextFindIndex(current: number, count: number, forward: boolean): number {
   if (count <= 0) return -1;
