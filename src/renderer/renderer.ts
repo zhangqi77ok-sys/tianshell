@@ -204,6 +204,76 @@ function sendInput(data: string): void {
   ws.send(JSON.stringify(broadcast ? { type: 'term:broadcast', sessionIds: Array.from(tabs.keys()), data } : { type: 'term:input', sessionId: activeId, data }));
 }
 
+function showTerminalContextMenu(x: number, y: number, sessionId: string): void {
+  const menu = document.getElementById('terminal-context-menu');
+  const tab = tabs.get(sessionId);
+  if (!menu || !tab) return;
+
+  const copyItem = document.getElementById('ctx-copy');
+  if (copyItem) {
+    const hasSel = tab.term.hasSelection();
+    copyItem.classList.toggle('disabled', !hasSel);
+  }
+
+  menu.classList.remove('hidden');
+  const menuWidth = 200;
+  const menuHeight = 220;
+  const posX = x + menuWidth > window.innerWidth ? Math.max(10, window.innerWidth - menuWidth - 10) : x;
+  const posY = y + menuHeight > window.innerHeight ? Math.max(10, window.innerHeight - menuHeight - 10) : y;
+  menu.style.left = `${posX}px`;
+  menu.style.top = `${posY}px`;
+}
+
+async function handleTerminalPaste(sessionId: string): Promise<void> {
+  const tab = tabs.get(sessionId);
+  if (!tab) return;
+  let text = '';
+  try {
+    text = await navigator.clipboard.readText();
+  } catch {
+    showToast('无法读取系统剪贴板，请使用快捷键 Ctrl+V');
+    return;
+  }
+  if (!text) return;
+
+  const hasNewline = text.includes('\n') || text.includes('\r');
+  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+
+  if (hasNewline && lines.length > 1) {
+    const dlg = document.getElementById('paste-confirm-dialog') as HTMLDialogElement;
+    const preview = document.getElementById('paste-confirm-preview') as HTMLElement;
+    const hint = document.getElementById('paste-confirm-hint') as HTMLElement;
+    const form = document.getElementById('paste-confirm-form') as HTMLFormElement;
+    const cancelBtn = document.getElementById('cancel-paste-btn') as HTMLButtonElement;
+
+    if (hint) hint.textContent = `检测到剪贴板包含 ${lines.length} 行文本/命令，直接粘贴将立即向终端提交执行：`;
+    if (preview) preview.textContent = text;
+
+    const onConfirm = (e: Event) => {
+      e.preventDefault();
+      cleanup();
+      dlg.close();
+      sendInput(text);
+      tab.term.focus();
+    };
+    const onCancel = () => {
+      cleanup();
+      dlg.close();
+      tab.term.focus();
+    };
+    const cleanup = () => {
+      form.removeEventListener('submit', onConfirm);
+      cancelBtn?.removeEventListener('click', onCancel);
+    };
+    form.addEventListener('submit', onConfirm);
+    cancelBtn?.addEventListener('click', onCancel);
+    dlg.showModal();
+  } else {
+    sendInput(text);
+    tab.term.focus();
+  }
+}
+
 function createTermInstance(info: ConnectInfo): void {
   if (tabs.has(info.sessionId)) {
     selectTab(info.sessionId);
@@ -217,6 +287,29 @@ function createTermInstance(info: ConnectInfo): void {
       selectTab(info.sessionId);
     }
   });
+
+  // 划选即复制 (Copy-on-select)
+  slot.addEventListener('mouseup', () => {
+    const t = tabs.get(info.sessionId);
+    if (t && t.term.hasSelection()) {
+      const sel = t.term.getSelection();
+      if (sel && sel.trim().length > 0) {
+        void navigator.clipboard.writeText(sel).then(() => {
+          showToast(`已自动复制 ${sel.length} 字符`);
+        }).catch(() => {});
+      }
+    }
+  });
+
+  // 极客右键智能上下文菜单
+  slot.addEventListener('contextmenu', (e: MouseEvent) => {
+    e.preventDefault();
+    if (activeId !== info.sessionId) {
+      selectTab(info.sessionId);
+    }
+    showTerminalContextMenu(e.clientX, e.clientY, info.sessionId);
+  });
+
   stage.appendChild(slot);
 
   const term = new Terminal({
@@ -625,6 +718,74 @@ function bindGlobalUi(): void {
     sftpCtrl.setShowHidden(s.showHiddenFiles);
     for (const tab of tabs.values()) { tab.term.options.fontSize = fontSize; tab.fit.fit(); }
     setDlg.close();
+  });
+
+  // Terminal Custom Context Menu Actions
+  document.getElementById('ctx-copy')?.addEventListener('click', () => {
+    document.getElementById('terminal-context-menu')?.classList.add('hidden');
+    if (!activeId) return;
+    const tab = tabs.get(activeId);
+    if (tab && tab.term.hasSelection()) {
+      const sel = tab.term.getSelection();
+      void copyText(sel, `已复制 ${sel.length} 字符`);
+    }
+  });
+
+  document.getElementById('ctx-paste')?.addEventListener('click', () => {
+    document.getElementById('terminal-context-menu')?.classList.add('hidden');
+    if (activeId) void handleTerminalPaste(activeId);
+  });
+
+  document.getElementById('ctx-copy-all')?.addEventListener('click', () => {
+    document.getElementById('terminal-context-menu')?.classList.add('hidden');
+    if (!activeId) return;
+    const tab = tabs.get(activeId);
+    if (!tab) return;
+    const buf = tab.term.buffer.active;
+    let text = '';
+    for (let i = 0; i < buf.length; i++) {
+      const line = buf.getLine(i);
+      if (line) text += line.translateToString(true) + '\n';
+    }
+    void copyText(text.trimEnd(), '已复制当前终端全部内容');
+  });
+
+  document.getElementById('ctx-clear')?.addEventListener('click', () => {
+    document.getElementById('terminal-context-menu')?.classList.add('hidden');
+    if (!activeId) return;
+    const tab = tabs.get(activeId);
+    if (!tab) return;
+    tab.term.clear();
+    sendInput('clear\n');
+  });
+
+  document.getElementById('ctx-search')?.addEventListener('click', () => {
+    document.getElementById('terminal-context-menu')?.classList.add('hidden');
+    document.getElementById('search-bar')?.classList.remove('hidden');
+    (document.getElementById('search-input') as HTMLInputElement)?.focus();
+  });
+
+  document.getElementById('ctx-select-all')?.addEventListener('click', () => {
+    document.getElementById('terminal-context-menu')?.classList.add('hidden');
+    if (!activeId) return;
+    const tab = tabs.get(activeId);
+    if (tab) {
+      tab.term.selectAll();
+      const sel = tab.term.getSelection();
+      if (sel) void copyText(sel, `已全选并复制 ${sel.length} 字符`);
+    }
+  });
+
+  window.addEventListener('click', (e) => {
+    const menu = document.getElementById('terminal-context-menu');
+    if (menu && !menu.classList.contains('hidden') && !menu.contains(e.target as Node)) {
+      menu.classList.add('hidden');
+    }
+  });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      document.getElementById('terminal-context-menu')?.classList.add('hidden');
+    }
   });
 }
 

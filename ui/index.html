@@ -306,6 +306,54 @@
       </form>
     </dialog>
 
+    <div id="terminal-context-menu" class="terminal-context-menu hidden">
+      <div class="menu-item" id="ctx-copy">
+        <span class="menu-icon">📋</span>
+        <span class="menu-label">复制选中内容</span>
+        <span class="menu-shortcut">划选即复制</span>
+      </div>
+      <div class="menu-item" id="ctx-paste">
+        <span class="menu-icon">📥</span>
+        <span class="menu-label">粘贴</span>
+        <span class="menu-shortcut">Ctrl+V</span>
+      </div>
+      <div class="menu-divider"></div>
+      <div class="menu-item" id="ctx-copy-all">
+        <span class="menu-icon">📄</span>
+        <span class="menu-label">复制当前屏内容</span>
+      </div>
+      <div class="menu-item" id="ctx-clear">
+        <span class="menu-icon">🧹</span>
+        <span class="menu-label">清空屏幕</span>
+        <span class="menu-shortcut">Clear</span>
+      </div>
+      <div class="menu-divider"></div>
+      <div class="menu-item" id="ctx-search">
+        <span class="menu-icon">🔍</span>
+        <span class="menu-label">在终端中查找…</span>
+        <span class="menu-shortcut">Ctrl+F</span>
+      </div>
+      <div class="menu-item" id="ctx-select-all">
+        <span class="menu-icon">⬚</span>
+        <span class="menu-label">全选终端文本</span>
+        <span class="menu-shortcut">Ctrl+A</span>
+      </div>
+    </div>
+
+    <dialog id="paste-confirm-dialog" class="paste-confirm-dialog">
+      <form id="paste-confirm-form">
+        <header class="dialog-head">
+          <h2>⚠️ 多行文本安全粘贴警告</h2>
+          <p id="paste-confirm-hint">检测到剪贴板包含多行文本或换行符，直接粘贴将立即向终端提交执行：</p>
+        </header>
+        <pre id="paste-confirm-preview" class="paste-preview-box"></pre>
+        <div class="dialog-actions">
+          <button type="button" id="cancel-paste-btn">取消粘贴</button>
+          <button type="submit" id="confirm-paste-btn" class="primary">确认粘贴</button>
+        </div>
+      </form>
+    </dialog>
+
     <script src="./renderer.js"></script>
   </body>
 </html>
