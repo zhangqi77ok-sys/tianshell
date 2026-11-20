@@ -6631,6 +6631,14 @@ WARNING: This link could potentially be dangerous`)) {
   function isCurrentGeneration(ticket, latest) {
     return ticket > 0 && ticket === latest;
   }
+  function historyEmptyText(query) {
+    const q = query.trim();
+    if (!q) return "\u8FD8\u6CA1\u6709\u547D\u4EE4\u5386\u53F2\u3002\u5728\u7EC8\u7AEF\u91CC\u56DE\u8F66\uFF0C\u6216\u8BA9 MCP \u6267\u884C\u547D\u4EE4\u540E\u4F1A\u51FA\u73B0\u5728\u8FD9\u91CC\u3002";
+    return `\u6CA1\u6709\u5339\u914D\u300C${q}\u300D\u7684\u547D\u4EE4`;
+  }
+  function historyAfterFailedRefresh(haveList) {
+    return haveList ? "keep" : "show-error";
+  }
   var LINK_DOWN_NOTICE_GAP_MS = 4e3;
   function inputDelivery(haveRecipients, linkOpen) {
     if (!haveRecipients) return "no-terminal";
@@ -7469,6 +7477,7 @@ WARNING: This link could potentially be dangerous`)) {
     historyEl = document.getElementById("history-list");
     historyQuery = "";
     historyTicket = 0;
+    historyReady = false;
     tunnelDialogOpen = false;
     renderMetrics(metrics, mode = metrics ? "live" : "idle") {
       const bento = document.getElementById("mon-bento");
@@ -7581,12 +7590,10 @@ WARNING: This link could potentially be dangerous`)) {
       try {
         const rows = await webApi.listHistory(this.historyQuery);
         if (!isCurrentGeneration(ticket, this.historyTicket)) return;
+        this.historyReady = true;
         this.historyEl.textContent = "";
         if (!rows.length) {
-          const empty = document.createElement("div");
-          empty.className = "empty-muted";
-          empty.textContent = "\u8FD8\u6CA1\u6709\u547D\u4EE4\u5386\u53F2\u3002\u5728\u7EC8\u7AEF\u91CC\u56DE\u8F66\uFF0C\u6216\u8BA9 MCP \u6267\u884C\u547D\u4EE4\u540E\u4F1A\u51FA\u73B0\u5728\u8FD9\u91CC\u3002";
-          this.historyEl.appendChild(empty);
+          this.showHistoryNote(historyEmptyText(this.historyQuery));
           return;
         }
         for (const row of rows) {
@@ -7641,14 +7648,23 @@ WARNING: This link could potentially be dangerous`)) {
           });
           this.historyEl.appendChild(card);
         }
-      } catch {
+      } catch (err) {
         if (!isCurrentGeneration(ticket, this.historyTicket)) return;
-        this.historyEl.textContent = "";
-        const empty = document.createElement("div");
-        empty.className = "empty-muted";
-        empty.textContent = "\u547D\u4EE4\u5386\u53F2\u7531\u5F53\u524D\u5DE5\u4F5C\u53F0\u4FDD\u5B58\u3002";
-        this.historyEl.appendChild(empty);
+        const message = err instanceof Error ? err.message : "\u547D\u4EE4\u5386\u53F2\u6CA1\u6709\u8BFB\u51FA\u6765";
+        if (historyAfterFailedRefresh(this.historyReady) === "keep") {
+          this.deps.toast(message, "error");
+          return;
+        }
+        this.showHistoryNote(message);
       }
+    }
+    showHistoryNote(message) {
+      if (!this.historyEl) return;
+      this.historyEl.textContent = "";
+      const empty = document.createElement("div");
+      empty.className = "empty-muted";
+      empty.textContent = message;
+      this.historyEl.appendChild(empty);
     }
     refreshTunnelsIfOpen() {
       if (this.tunnelDialogOpen) void this.renderTunnels();

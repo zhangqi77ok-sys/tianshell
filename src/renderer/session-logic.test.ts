@@ -5,6 +5,8 @@ import {
   broadcastRecipients,
   claimSingleFlight,
   editorWriteGuard,
+  historyAfterFailedRefresh,
+  historyEmptyText,
   inputDelivery,
   isCurrentGeneration,
   LINK_DOWN_NOTICE_GAP_MS,
@@ -136,6 +138,14 @@ test('多行粘贴只执行第一次选择，取消后不能再提交', () => {
   assert.equal(pasteNeedsConfirm('echo a\r\necho b'), true);
   assert.equal(pasteNeedsConfirm('echo a\n'), false);
   assert.equal(pasteNeedsConfirm('echo a'), false);
+});
+
+test('历史搜索没有结果时，不说成还没有命令', () => {
+  assert.match(historyEmptyText(''), /还没有命令历史/);
+  assert.match(historyEmptyText('   '), /还没有命令历史/);
+  assert.equal(historyEmptyText('zzzz'), '没有匹配「zzzz」的命令');
+  assert.equal(historyAfterFailedRefresh(true), 'keep');
+  assert.equal(historyAfterFailedRefresh(false), 'show-error');
 });
 
 test('工作台连接中断时输入不发出，并在间隔内只提示一次', () => {

@@ -1,6 +1,6 @@
 import type { PublicHost, ServerMetrics } from '../shared/types.js';
 import { webApi } from './api-client.js';
-import { isCurrentGeneration } from './session-logic.js';
+import { historyAfterFailedRefresh, historyEmptyText, isCurrentGeneration } from './session-logic.js';
 import { formatBytes } from './sftp-panel.js';
 
 export interface MonitorPanelDeps {
@@ -30,6 +30,7 @@ export class MonitorAndToolsController {
   private readonly historyEl = document.getElementById('history-list') as HTMLElement;
   private historyQuery = '';
   private historyTicket = 0;
+  private historyReady = false;
 
   constructor(private readonly deps: MonitorPanelDeps) {
     this.bindDialogs();
@@ -159,12 +160,10 @@ export class MonitorAndToolsController {
     try {
       const rows = await webApi.listHistory(this.historyQuery);
       if (!isCurrentGeneration(ticket, this.historyTicket)) return;
+      this.historyReady = true;
       this.historyEl.textContent = '';
       if (!rows.length) {
-        const empty = document.createElement('div');
-        empty.className = 'empty-muted';
-        empty.textContent = '还没有命令历史。在终端里回车，或让 MCP 执行命令后会出现在这里。';
-        this.historyEl.appendChild(empty);
+        this.showHistoryNote(historyEmptyText(this.historyQuery));
         return;
       }
       for (const row of rows) {
@@ -229,14 +228,24 @@ export class MonitorAndToolsController {
         });
         this.historyEl.appendChild(card);
       }
-    } catch {
+    } catch (err) {
       if (!isCurrentGeneration(ticket, this.historyTicket)) return;
-      this.historyEl.textContent = '';
-      const empty = document.createElement('div');
-      empty.className = 'empty-muted';
-      empty.textContent = '命令历史由当前工作台保存。';
-      this.historyEl.appendChild(empty);
+      const message = err instanceof Error ? err.message : '命令历史没有读出来';
+      if (historyAfterFailedRefresh(this.historyReady) === 'keep') {
+        this.deps.toast(message, 'error');
+        return;
+      }
+      this.showHistoryNote(message);
     }
+  }
+
+  private showHistoryNote(message: string): void {
+    if (!this.historyEl) return;
+    this.historyEl.textContent = '';
+    const empty = document.createElement('div');
+    empty.className = 'empty-muted';
+    empty.textContent = message;
+    this.historyEl.appendChild(empty);
   }
 
   refreshTunnelsIfOpen(): void {
