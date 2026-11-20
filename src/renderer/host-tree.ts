@@ -10,6 +10,7 @@ export interface HostUiState {
 
 export interface HostTreeDeps {
   onOpenHost: (hostId: string) => void;
+  onOpenAnother: (hostId: string) => void;
   onSelectHost?: (hostId: string) => void;
   onCancelConnect?: (hostId: string) => void;
   toast: (msg: string) => void;
@@ -60,12 +61,30 @@ export class HostTreeController {
       const key = bucket.id ?? '__none__';
       const hdr = document.createElement('div');
       hdr.className = 'group-hdr';
-      hdr.textContent = `${this.collapsed.has(key) ? '▸' : '▾'} ${bucket.title} (${bucket.list.length})`;
-      hdr.addEventListener('click', () => {
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'group-toggle';
+      toggle.textContent = `${this.collapsed.has(key) ? '▸' : '▾'} ${bucket.title} (${bucket.list.length})`;
+      toggle.addEventListener('click', () => {
         if (this.collapsed.has(key)) this.collapsed.delete(key);
         else this.collapsed.add(key);
         this.render();
       });
+      hdr.appendChild(toggle);
+      if (bucket.id) {
+        const rename = document.createElement('button');
+        rename.type = 'button';
+        rename.className = 'group-rename';
+        rename.textContent = '重命名';
+        rename.setAttribute('aria-label', `重命名分组 ${bucket.title}`);
+        const groupId = bucket.id;
+        const currentName = bucket.title;
+        rename.addEventListener('click', (event) => {
+          event.stopPropagation();
+          void this.renameGroup(groupId, currentName);
+        });
+        hdr.appendChild(rename);
+      }
       tree.appendChild(hdr);
       if (this.collapsed.has(key)) continue;
       for (const h of bucket.list) tree.appendChild(this.renderHostRow(h));
@@ -119,6 +138,13 @@ export class HostTreeController {
         e.stopPropagation();
         this.deps.onCancelConnect?.(h.id);
       });
+    } else if (isOnline) {
+      connectBtn.textContent = '切换';
+      connectBtn.title = '切到这台主机已经打开的会话';
+      connectBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.deps.onOpenHost(h.id);
+      });
     } else {
       connectBtn.textContent = '连接';
       connectBtn.title = '连接此远程主机';
@@ -154,10 +180,27 @@ export class HostTreeController {
         this.deps.toast(err instanceof Error ? err.message : '删除主机失败');
       }
     });
-    ops.append(connectBtn, editBtn, delBtn);
+    ops.append(connectBtn);
+    if (isOnline && !ui?.connecting) {
+      const again = document.createElement('button');
+      again.type = 'button';
+      again.className = 'host-again-btn';
+      again.textContent = '再开';
+      again.title = '再开一个 SSH 会话，当前标签保留';
+      again.setAttribute('aria-label', `再开一个到 ${h.alias} 的会话`);
+      again.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.deps.onOpenAnother(h.id);
+      });
+      ops.append(again);
+    }
+    ops.append(editBtn, delBtn);
     item.append(left, ops);
     item.addEventListener('click', () => this.deps.onSelectHost?.(h.id));
-    item.addEventListener('dblclick', () => this.deps.onOpenHost(h.id));
+    item.addEventListener('dblclick', (event) => {
+      if (event.shiftKey) this.deps.onOpenAnother(h.id);
+      else this.deps.onOpenHost(h.id);
+    });
     return item;
   }
 
@@ -222,13 +265,30 @@ export class HostTreeController {
     }
   }
 
+  private async renameGroup(groupId: string, currentName: string): Promise<void> {
+    const name = await this.deps.promptText('重命名分组', currentName);
+    if (!name || name === currentName) return;
+    try {
+      await webApi.saveGroup(name, groupId);
+      await this.refresh();
+    } catch (err) {
+      this.deps.toast(err instanceof Error ? err.message : '重命名分组失败');
+    }
+  }
+
   private bindEvents(): void {
     document.getElementById('filter')?.addEventListener('input', () => this.render());
     document.getElementById('add-host')?.addEventListener('click', () => this.openModal(null));
     document.getElementById('cancel-host')?.addEventListener('click', () => (document.getElementById('host-dialog') as HTMLDialogElement).close());
     document.getElementById('add-group')?.addEventListener('click', async () => {
       const name = await this.deps.promptText('输入新分组名称');
-      if (name) { await webApi.saveGroup(name); await this.refresh(); }
+      if (!name) return;
+      try {
+        await webApi.saveGroup(name);
+        await this.refresh();
+      } catch (err) {
+        this.deps.toast(err instanceof Error ? err.message : '添加分组失败');
+      }
     });
     document.querySelectorAll<HTMLInputElement>('input[name="auth"]').forEach((r) => r.addEventListener('change', () => {
       const isKey = (document.querySelector('input[name="auth"]:checked') as HTMLInputElement).value === 'privateKey';

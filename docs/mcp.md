@@ -74,6 +74,8 @@ Windows 安装包里双击 `tianshell.exe` 就是这条命令，不用再记参�
 
 保存后重载 MCP。Cursor 的 `${env:NAME}` 只在 Cursor 里展开，和 Claude Code 的写法不一样。
 
+工作台「连接 MCP」里的「写入 Cursor 配置」会在确认后改用户目录的 `~/.cursor/mcp.json`，只替换 `mcpServers.tianshell`。其他服务器保持原样。项目里的 `.cursor/mcp.json` 不会动。文件如果不是合法 JSON，或者 `mcpServers` 不是对象，就整份不写。
+
 ### Claude Code
 
 `type` 不能省。项目级配置是仓库根目录的 `.mcp.json`，个人配置用 `claude mcp add`。
@@ -193,11 +195,13 @@ Claude Code 必须写 `type`：
 - `initialize` 的响应头里有 `Mcp-Session-Id`。之后的请求带上它
 - 没有 `id` 的通知返回 `202`，没有响应体
 
-只监听环回地址。令牌三者任一即可：
+只监听环回地址。接口鉴权三者任一即可：
 
 - `Authorization: Bearer <token>`（推荐）
 - `x-tianshell-token: <token>`
 - 查询参数 `?token=<token>`
+
+工作台里的文件下载和打包下载不走最后一种。界面先用请求头换一张一次性下载票，地址是 `/api/downloads/<票号>`，大约 60 秒、只能用一次。下载地址上如果带了长期令牌，请求会被拒绝，响应里也不写回令牌。
 
 带了 `Origin` 或 `Host` 时，只接受 `localhost` / `127.0.0.1`。
 

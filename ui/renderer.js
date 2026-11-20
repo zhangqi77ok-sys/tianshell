@@ -6185,8 +6185,14 @@ WARNING: This link could potentially be dangerous`)) {
       method: "POST",
       body: JSON.stringify({ path: targetPath, mode })
     }),
-    sftpDownloadUrl: (sid, targetPath) => `/api/sessions/${encodeURIComponent(sid)}/sftp/download?path=${encodeURIComponent(targetPath)}&token=${encodeURIComponent(resolveClientToken())}`,
-    sftpArchiveDownloadUrl: (sid, targetPath) => `/api/sessions/${encodeURIComponent(sid)}/sftp/archive-download?path=${encodeURIComponent(targetPath)}&token=${encodeURIComponent(resolveClientToken())}`,
+    sftpDownloadGrant: (sid, targetPath, kind) => apiRequest(`/api/sessions/${encodeURIComponent(sid)}/sftp/download-grant`, {
+      method: "POST",
+      body: JSON.stringify({ path: targetPath, kind })
+    }),
+    writeCursorMcp: () => apiRequest("/api/mcp/cursor", {
+      method: "POST",
+      body: JSON.stringify({ confirm: true })
+    }),
     sftpUploadFile: async (sid, targetPath, file) => apiRequest(
       `/api/sessions/${encodeURIComponent(sid)}/sftp/upload?path=${encodeURIComponent(targetPath)}&total=${file.size}`,
       { method: "POST", body: file }
@@ -6267,12 +6273,30 @@ WARNING: This link could potentially be dangerous`)) {
         const key = bucket.id ?? "__none__";
         const hdr = document.createElement("div");
         hdr.className = "group-hdr";
-        hdr.textContent = `${this.collapsed.has(key) ? "\u25B8" : "\u25BE"} ${bucket.title} (${bucket.list.length})`;
-        hdr.addEventListener("click", () => {
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "group-toggle";
+        toggle.textContent = `${this.collapsed.has(key) ? "\u25B8" : "\u25BE"} ${bucket.title} (${bucket.list.length})`;
+        toggle.addEventListener("click", () => {
           if (this.collapsed.has(key)) this.collapsed.delete(key);
           else this.collapsed.add(key);
           this.render();
         });
+        hdr.appendChild(toggle);
+        if (bucket.id) {
+          const rename = document.createElement("button");
+          rename.type = "button";
+          rename.className = "group-rename";
+          rename.textContent = "\u91CD\u547D\u540D";
+          rename.setAttribute("aria-label", `\u91CD\u547D\u540D\u5206\u7EC4 ${bucket.title}`);
+          const groupId = bucket.id;
+          const currentName = bucket.title;
+          rename.addEventListener("click", (event) => {
+            event.stopPropagation();
+            void this.renameGroup(groupId, currentName);
+          });
+          hdr.appendChild(rename);
+        }
         tree.appendChild(hdr);
         if (this.collapsed.has(key)) continue;
         for (const h of bucket.list) tree.appendChild(this.renderHostRow(h));
@@ -6324,6 +6348,13 @@ WARNING: This link could potentially be dangerous`)) {
           e.stopPropagation();
           this.deps.onCancelConnect?.(h.id);
         });
+      } else if (isOnline) {
+        connectBtn.textContent = "\u5207\u6362";
+        connectBtn.title = "\u5207\u5230\u8FD9\u53F0\u4E3B\u673A\u5DF2\u7ECF\u6253\u5F00\u7684\u4F1A\u8BDD";
+        connectBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.deps.onOpenHost(h.id);
+        });
       } else {
         connectBtn.textContent = "\u8FDE\u63A5";
         connectBtn.title = "\u8FDE\u63A5\u6B64\u8FDC\u7A0B\u4E3B\u673A";
@@ -6362,10 +6393,27 @@ WARNING: This link could potentially be dangerous`)) {
           this.deps.toast(err instanceof Error ? err.message : "\u5220\u9664\u4E3B\u673A\u5931\u8D25");
         }
       });
-      ops.append(connectBtn, editBtn, delBtn);
+      ops.append(connectBtn);
+      if (isOnline && !ui?.connecting) {
+        const again = document.createElement("button");
+        again.type = "button";
+        again.className = "host-again-btn";
+        again.textContent = "\u518D\u5F00";
+        again.title = "\u518D\u5F00\u4E00\u4E2A SSH \u4F1A\u8BDD\uFF0C\u5F53\u524D\u6807\u7B7E\u4FDD\u7559";
+        again.setAttribute("aria-label", `\u518D\u5F00\u4E00\u4E2A\u5230 ${h.alias} \u7684\u4F1A\u8BDD`);
+        again.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.deps.onOpenAnother(h.id);
+        });
+        ops.append(again);
+      }
+      ops.append(editBtn, delBtn);
       item.append(left, ops);
       item.addEventListener("click", () => this.deps.onSelectHost?.(h.id));
-      item.addEventListener("dblclick", () => this.deps.onOpenHost(h.id));
+      item.addEventListener("dblclick", (event) => {
+        if (event.shiftKey) this.deps.onOpenAnother(h.id);
+        else this.deps.onOpenHost(h.id);
+      });
       return item;
     }
     openModal(host) {
@@ -6424,15 +6472,28 @@ WARNING: This link could potentially be dangerous`)) {
         sel.appendChild(el);
       }
     }
+    async renameGroup(groupId, currentName) {
+      const name = await this.deps.promptText("\u91CD\u547D\u540D\u5206\u7EC4", currentName);
+      if (!name || name === currentName) return;
+      try {
+        await webApi.saveGroup(name, groupId);
+        await this.refresh();
+      } catch (err) {
+        this.deps.toast(err instanceof Error ? err.message : "\u91CD\u547D\u540D\u5206\u7EC4\u5931\u8D25");
+      }
+    }
     bindEvents() {
       document.getElementById("filter")?.addEventListener("input", () => this.render());
       document.getElementById("add-host")?.addEventListener("click", () => this.openModal(null));
       document.getElementById("cancel-host")?.addEventListener("click", () => document.getElementById("host-dialog").close());
       document.getElementById("add-group")?.addEventListener("click", async () => {
         const name = await this.deps.promptText("\u8F93\u5165\u65B0\u5206\u7EC4\u540D\u79F0");
-        if (name) {
+        if (!name) return;
+        try {
           await webApi.saveGroup(name);
           await this.refresh();
+        } catch (err) {
+          this.deps.toast(err instanceof Error ? err.message : "\u6DFB\u52A0\u5206\u7EC4\u5931\u8D25");
         }
       });
       document.querySelectorAll('input[name="auth"]').forEach((r) => r.addEventListener("change", () => {
@@ -6843,27 +6904,38 @@ WARNING: This link could potentially be dangerous`)) {
       }
       this.editorDlg.close();
     }
-    triggerDownload(remotePath) {
-      const sid = this.deps.getActiveSshId();
-      if (!sid) return;
-      const a = document.createElement("a");
-      a.href = webApi.sftpDownloadUrl(sid, remotePath);
-      a.download = remotePath.split("/").pop() || "file";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
+    async triggerDownload(remotePath) {
+      const name = remotePath.split("/").pop() || "file";
+      await this.startGrantedDownload(remotePath, "file", name);
     }
-    triggerArchiveDownload(remotePath) {
-      const sid = this.deps.getActiveSshId();
-      if (!sid) return;
-      const a = document.createElement("a");
-      a.href = webApi.sftpArchiveDownloadUrl(sid, remotePath);
+    async triggerArchiveDownload(remotePath) {
       const name = remotePath === "/" ? "root" : remotePath.split("/").filter(Boolean).pop() || "archive";
-      a.download = `${name}.tar.gz`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      this.deps.toast(`\u5F00\u59CB\u6D41\u5F0F\u6253\u5305\u4E0B\u8F7D ${name}.tar.gz`);
+      const started = await this.startGrantedDownload(remotePath, "archive", `${name}.tar.gz`);
+      if (started) this.deps.toast(`\u5F00\u59CB\u6D41\u5F0F\u6253\u5305\u4E0B\u8F7D ${name}.tar.gz`);
+    }
+    async startGrantedDownload(remotePath, kind, filename) {
+      const sid = this.deps.getActiveSshId();
+      if (!sid) return false;
+      try {
+        const ticket = await webApi.sftpDownloadGrant(sid, remotePath, kind);
+        const href = ticket.href;
+        if (!href.startsWith("/api/downloads/") || href.includes("token=")) {
+          this.deps.toast("\u4E0B\u8F7D\u5730\u5740\u65E0\u6548");
+          return false;
+        }
+        const a = document.createElement("a");
+        a.href = href;
+        a.rel = "noreferrer";
+        a.referrerPolicy = "no-referrer";
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        return true;
+      } catch (err) {
+        this.deps.toast(err instanceof Error ? err.message : "\u4E0B\u8F7D\u6CA1\u6709\u5F00\u59CB");
+        return false;
+      }
     }
     async renameItem(entry) {
       const sid = this.deps.getActiveSshId();
@@ -7420,6 +7492,34 @@ WARNING: This link could potentially be dangerous`)) {
     }
     return ids;
   }
+  function planSessionOpen(hostId, tabs2, pending, intent) {
+    if (pending) return { focusId: null, disposeId: null, wait: true };
+    if (intent === "another") return { focusId: null, disposeId: null, wait: false };
+    const live = tabs2.find((tab) => tab.hostId === hostId && !tab.closed);
+    if (live) return { focusId: live.id, disposeId: null, wait: false };
+    const stale = tabs2.find((tab) => tab.hostId === hostId && tab.closed);
+    return { focusId: null, disposeId: stale?.id ?? null, wait: false };
+  }
+  function tabLabels(tabs2) {
+    const totals = /* @__PURE__ */ new Map();
+    for (const tab of tabs2) {
+      if (!tab.hostId) continue;
+      totals.set(tab.hostId, (totals.get(tab.hostId) ?? 0) + 1);
+    }
+    const seen = /* @__PURE__ */ new Map();
+    const labels = /* @__PURE__ */ new Map();
+    for (const tab of tabs2) {
+      const total = tab.hostId ? totals.get(tab.hostId) ?? 1 : 1;
+      if (!tab.hostId || total <= 1) {
+        labels.set(tab.id, tab.alias);
+        continue;
+      }
+      const index = (seen.get(tab.hostId) ?? 0) + 1;
+      seen.set(tab.hostId, index);
+      labels.set(tab.id, `${tab.alias} \xB7 ${index}`);
+    }
+    return labels;
+  }
   function nextFindIndex(current, count, forward) {
     if (count <= 0) return -1;
     if (current < 0) return forward ? 0 : count - 1;
@@ -7572,7 +7672,8 @@ WARNING: This link could potentially be dangerous`)) {
     onDirChange: () => updateSessionContext()
   });
   var treeCtrl = new HostTreeController({
-    onOpenHost: (hostId) => void openSshTab(hostId, true),
+    onOpenHost: (hostId) => void openSshTab(hostId, true, "reuse"),
+    onOpenAnother: (hostId) => void openSshTab(hostId, true, "another"),
     onSelectHost: (hostId) => markSelectedHost(hostId),
     onCancelConnect: (hostId) => cancelConnect(hostId),
     toast: showToast,
@@ -8134,7 +8235,7 @@ ${op.command}`;
       const dot = document.createElement("span");
       dot.className = "tab-dot";
       const label = document.createElement("span");
-      label.textContent = tab.info.kind === "local" ? "\u672C\u673A" : tab.info.alias;
+      label.textContent = tab.info.kind === "local" ? "\u672C\u673A" : sessionTabLabels().get(id) ?? tab.info.alias;
       chip.append(dot, label);
       if (currentSplitMode !== "single") {
         if (isPrimary) {
@@ -8154,10 +8255,10 @@ ${op.command}`;
         reconnect.type = "button";
         reconnect.className = "tab-reconnect";
         reconnect.textContent = "\u91CD\u8FDE";
-        const hostId = tab.info.hostId;
+        const closedId = id;
         reconnect.addEventListener("click", (event) => {
           event.stopPropagation();
-          void openSshTab(hostId, currentView === "terminal");
+          void reconnectClosedTab(closedId);
         });
         chip.appendChild(reconnect);
       }
@@ -8273,15 +8374,38 @@ ${op.command}`;
     renderTabs();
     treeCtrl.render();
   }
-  async function openSshTab(hostId, showTerminal) {
-    const live = Array.from(tabs.values()).find((tab) => tab.info.hostId === hostId && !tab.closed);
-    if (live) {
-      selectTab(live.info.sessionId);
+  function sessionTabLabels() {
+    return tabLabels(Array.from(tabs.values()).map((tab) => ({
+      id: tab.info.sessionId,
+      alias: tab.info.alias,
+      hostId: tab.info.hostId ?? null
+    })));
+  }
+  async function reconnectClosedTab(sessionId) {
+    const tab = tabs.get(sessionId);
+    const hostId = tab?.info.hostId;
+    if (!tab?.closed || !hostId) return;
+    if (pendingConnections.has(hostId)) return;
+    await disposeTab(sessionId, true);
+    await openSshTab(hostId, currentView === "terminal", "another");
+  }
+  async function openSshTab(hostId, showTerminal, intent = "reuse") {
+    const plan = planSessionOpen(
+      hostId,
+      Array.from(tabs.values()).map((tab) => ({
+        id: tab.info.sessionId,
+        hostId: tab.info.hostId ?? null,
+        closed: tab.closed
+      })),
+      pendingConnections.has(hostId),
+      intent
+    );
+    if (plan.wait) return;
+    if (plan.focusId) {
+      selectTab(plan.focusId);
       return;
     }
-    if (pendingConnections.has(hostId)) return;
-    const stale = Array.from(tabs.entries()).find(([, tab]) => tab.info.hostId === hostId && tab.closed);
-    if (stale) await disposeTab(stale[0], true);
+    if (plan.disposeId) await disposeTab(plan.disposeId, true);
     cancelledHostIds.delete(hostId);
     const host = treeCtrl.hosts.find((item) => item.id === hostId);
     const alias = host?.alias ?? "\u8FDC\u7A0B\u4E3B\u673A";
@@ -8621,6 +8745,25 @@ ${op.command}`;
       showToast("\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u5728\u5BF9\u8BDD\u6846\u91CC\u624B\u52A8\u9009\u62E9");
     }
   }
+  async function writeCursorMcp() {
+    try {
+      const ok = await confirmAction(
+        "\u5199\u5165 Cursor \u7528\u6237\u914D\u7F6E\uFF1F",
+        "\u53EA\u66F4\u65B0\u7528\u6237\u76EE\u5F55\u4E0B .cursor/mcp.json \u91CC\u7684 mcpServers.tianshell\u3002\u5176\u4ED6 MCP \u670D\u52A1\u5668\u4FDD\u6301\u539F\u6837\u3002\u8FD9\u4E00\u6761\u4F1A\u5E26\u4E0A\u5F53\u524D\u5DE5\u4F5C\u53F0\u7684\u5730\u5740\u548C\u672C\u673A\u8BBF\u95EE\u4EE4\u724C\u3002\u9879\u76EE\u91CC\u7684\u914D\u7F6E\u4E0D\u4F1A\u6539\u3002\u5199\u5165\u540E\u8FD9\u4E2A\u6587\u4EF6\u53EA\u6709\u5F53\u524D\u7528\u6237\u80FD\u8BFB\u3002",
+        "\u5199\u5165"
+      );
+      if (!ok) return;
+      const result = await webApi.writeCursorMcp();
+      if (result.action === "unchanged") {
+        showToast("Cursor \u91CC\u7684 tianshell \u5DF2\u7ECF\u662F\u5F53\u524D\u5DE5\u4F5C\u53F0");
+        return;
+      }
+      const verb = result.action === "created" ? "\u5DF2\u521B\u5EFA" : "\u5DF2\u66F4\u65B0";
+      showToast(`${verb} ${result.path}`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "\u5199\u5165 Cursor \u914D\u7F6E\u5931\u8D25", "error");
+    }
+  }
   async function showMcpDialog() {
     const dlg = document.getElementById("mcp-dialog");
     const info = await webApi.mcpInfo();
@@ -8657,6 +8800,9 @@ ${op.command}`;
     });
     document.getElementById("copy-cursor")?.addEventListener("click", () => {
       void copyText(document.getElementById("mcp-cursor").value, "\u5DF2\u590D\u5236 Cursor \u914D\u7F6E");
+    });
+    document.getElementById("write-cursor-mcp")?.addEventListener("click", () => {
+      void writeCursorMcp();
     });
     document.getElementById("copy-claude")?.addEventListener("click", () => {
       void copyText(document.getElementById("mcp-claude").value, "\u5DF2\u590D\u5236 Claude Code \u914D\u7F6E");

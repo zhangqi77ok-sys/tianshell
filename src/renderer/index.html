@@ -344,10 +344,11 @@
           <button type="button" id="mcp-token-copy">复制</button>
         </span>
       </label>
-      <p class="panel-note">编码工具应先看已打开的标签，再往这个终端里打字。文件读写另开一条 SSH，避免堵住正在输入的会话。命令历史记在本机数据目录里。</p>
+      <p class="panel-note">编码工具应先看已打开的标签，再往这个终端里打字。文件读写另开一条 SSH，避免堵住正在输入的会话。命令历史记在本机数据目录里。写入 Cursor 时只改用户目录里的 <span class="mono">mcp.json</span>，并且只替换 <span class="mono">tianshell</span> 这一条。</p>
       <label>Cursor（<span class="mono">~/.cursor/mcp.json</span> 或项目 <span class="mono">.cursor/mcp.json</span>）<textarea id="mcp-cursor" class="mono mcp-config" readonly></textarea></label>
       <label>Claude Code（<span class="mono">.mcp.json</span>，必须带 type）<textarea id="mcp-claude" class="mono mcp-config" readonly></textarea></label>
       <div class="dialog-actions">
+        <button type="button" id="write-cursor-mcp" class="primary">写入 Cursor 配置</button>
         <button type="button" id="copy-cursor">复制 Cursor 配置</button>
         <button type="button" id="copy-claude">复制 Claude Code 配置</button>
         <button type="button" id="close-mcp">关闭</button>

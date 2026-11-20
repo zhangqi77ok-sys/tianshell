@@ -108,10 +108,16 @@ export const webApi = {
       method: 'POST',
       body: JSON.stringify({ path: targetPath, mode }),
     }),
-  sftpDownloadUrl: (sid: string, targetPath: string) =>
-    `/api/sessions/${encodeURIComponent(sid)}/sftp/download?path=${encodeURIComponent(targetPath)}&token=${encodeURIComponent(resolveClientToken())}`,
-  sftpArchiveDownloadUrl: (sid: string, targetPath: string) =>
-    `/api/sessions/${encodeURIComponent(sid)}/sftp/archive-download?path=${encodeURIComponent(targetPath)}&token=${encodeURIComponent(resolveClientToken())}`,
+  sftpDownloadGrant: (sid: string, targetPath: string, kind: 'file' | 'archive') =>
+    apiRequest<{ href: string }>(`/api/sessions/${encodeURIComponent(sid)}/sftp/download-grant`, {
+      method: 'POST',
+      body: JSON.stringify({ path: targetPath, kind }),
+    }),
+  writeCursorMcp: () =>
+    apiRequest<{ action: 'created' | 'updated' | 'unchanged'; path: string }>('/api/mcp/cursor', {
+      method: 'POST',
+      body: JSON.stringify({ confirm: true }),
+    }),
   sftpUploadFile: async (sid: string, targetPath: string, file: File) =>
     apiRequest<{ tid: string }>(
       `/api/sessions/${encodeURIComponent(sid)}/sftp/upload?path=${encodeURIComponent(targetPath)}&total=${file.size}`,

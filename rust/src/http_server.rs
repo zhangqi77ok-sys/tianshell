@@ -1,12 +1,13 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, FromRequestParts, Path as IdPath, Query, State};
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -16,8 +17,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
-use crate::auth::authorize;
+use crate::auth::{authorize, host_is_local, origin_ok};
 use crate::bindings::BindingStore;
+use crate::download_grant::{DownloadGrants, DownloadKind};
+use crate::mcp_config::{cursor_user_mcp_path, write_cursor_mcp_file};
 use crate::history::CommandHistory;
 use crate::hub::SessionHub;
 use crate::mcp::{tool_names, McpHandler, WorkbenchMcp};
@@ -113,6 +116,7 @@ pub fn start_workbench(options: ServerOptions) -> Result<RunningServer, String> 
             token: token.clone(),
         })),
         transfers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        download_grants: Arc::new(std::sync::Mutex::new(DownloadGrants::new())),
         sse: Arc::new(SseHub::default()),
         mcp_sessions: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -234,6 +238,9 @@ fn router(state: AppState) -> Router {
         .route("/api/sessions/:id/sftp/delete", post(sftp_delete))
         .route("/api/sessions/:id/sftp/download", get(sftp_download))
         .route("/api/sessions/:id/sftp/archive-download", get(sftp_archive_download))
+        .route("/api/sessions/:id/sftp/download-grant", post(issue_download_grant))
+        .route("/api/downloads/:id", get(redeem_download))
+        .route("/api/mcp/cursor", post(write_cursor_mcp))
         .route("/api/sessions/:id/sftp/upload", post(sftp_upload))
         .route("/api/transfers/:id/cancel", post(cancel_transfer))
         .route("/api/mcp", get(mcp_info))
@@ -596,7 +603,13 @@ async fn simple_sftp(state: AppState, id: String, op: impl FnOnce(&ssh2::Session
 }
 
 async fn sftp_download(_auth: Authed, State(state): State<AppState>, IdPath(id): IdPath<String>, Query(query): Query<PathQuery>) -> Response {
-    let remote = query.path.unwrap_or_default();
+    if let Some(response) = reject_download_token(&query) {
+        return with_private_download(response);
+    }
+    with_private_download(stream_file_download(state, id, query.path.unwrap_or_default()).await)
+}
+
+async fn stream_file_download(state: AppState, id: String, remote: String) -> Response {
     if remote.is_empty() {
         return json_err(StatusCode::BAD_REQUEST, "缺少 path 参数");
     }
@@ -676,7 +689,13 @@ async fn sftp_archive_download(
     IdPath(id): IdPath<String>,
     Query(query): Query<PathQuery>,
 ) -> Response {
-    let remote = query.path.unwrap_or_default();
+    if let Some(response) = reject_download_token(&query) {
+        return with_private_download(response);
+    }
+    with_private_download(stream_archive_download(state, id, query.path.unwrap_or_default()).await)
+}
+
+async fn stream_archive_download(state: AppState, id: String, remote: String) -> Response {
     if remote.is_empty() {
         return json_err(StatusCode::BAD_REQUEST, "缺少 path 参数");
     }
@@ -948,9 +967,117 @@ fn transfer_task(
     })
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Deserialize, Default)]
 struct PathQuery {
     path: Option<String>,
+    /// 只用来拒绝把长期令牌放进下载地址。不要记录、不要写回响应。
+    token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GrantBody {
+    path: Option<String>,
+    kind: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CursorWriteBody {
+    confirm: Option<bool>,
+}
+
+fn reject_download_token(query: &PathQuery) -> Option<Response> {
+    let carries = query.token.as_deref().is_some_and(|value| !value.trim().is_empty());
+    if carries {
+        Some(json_err(StatusCode::BAD_REQUEST, "下载地址不能携带访问令牌，请使用一次性下载票"))
+    } else {
+        None
+    }
+}
+
+fn with_private_download(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    if let Ok(value) = HeaderValue::from_str("no-store") {
+        headers.insert("cache-control", value);
+    }
+    if let Ok(value) = HeaderValue::from_str("no-referrer") {
+        headers.insert("referrer-policy", value);
+    }
+    response
+}
+
+async fn issue_download_grant(
+    _auth: Authed,
+    State(state): State<AppState>,
+    IdPath(id): IdPath<String>,
+    Json(body): Json<GrantBody>,
+) -> Response {
+    let remote = body.path.unwrap_or_default();
+    if remote.is_empty() {
+        return json_err(StatusCode::BAD_REQUEST, "缺少 path 参数");
+    }
+    let kind = match body.kind.as_deref() {
+        Some("archive") => DownloadKind::Archive,
+        Some("file") | None => DownloadKind::File,
+        Some(_) => return json_err(StatusCode::BAD_REQUEST, "kind 只能是 file 或 archive"),
+    };
+    if kind == DownloadKind::Archive && archive_path_rejected(&remote) {
+        return json_err(StatusCode::BAD_REQUEST, "路径包含非法字符");
+    }
+    if state.hub.host_id(&id).is_err() {
+        return json_err(StatusCode::BAD_REQUEST, "找不到这个会话");
+    }
+    let grant_id = {
+        let mut grants = lock(&state.download_grants);
+        match grants.issue(&id, &remote, kind, Instant::now()) {
+            Ok(grant_id) => grant_id,
+            Err(message) => return json_err(StatusCode::TOO_MANY_REQUESTS, message),
+        }
+    };
+    json_ok(json!({ "href": format!("/api/downloads/{grant_id}") }))
+}
+
+async fn redeem_download(State(state): State<AppState>, headers: HeaderMap, IdPath(id): IdPath<String>) -> Response {
+    if !host_is_local(&headers) {
+        return json_err(StatusCode::FORBIDDEN, "仅允许本机访问");
+    }
+    if !origin_ok(&headers) {
+        return json_err(StatusCode::FORBIDDEN, "拒绝跨站来源");
+    }
+    let grant = {
+        let mut grants = lock(&state.download_grants);
+        match grants.redeem(&id, Instant::now()) {
+            Ok(grant) => grant,
+            Err(message) => return json_err(StatusCode::UNAUTHORIZED, message),
+        }
+    };
+    let response = match grant.kind {
+        DownloadKind::File => stream_file_download(state, grant.session_id, grant.path).await,
+        DownloadKind::Archive => stream_archive_download(state, grant.session_id, grant.path).await,
+    };
+    with_private_download(response)
+}
+
+async fn write_cursor_mcp(_auth: Authed, State(state): State<AppState>, Json(body): Json<CursorWriteBody>) -> Response {
+    if body.confirm != Some(true) {
+        return json_err(StatusCode::BAD_REQUEST, "需要确认后才会写入 Cursor 配置");
+    }
+    let path = match cursor_user_mcp_path() {
+        Ok(path) => path,
+        Err(message) => return json_err(StatusCode::BAD_REQUEST, message),
+    };
+    let port = state.port.load(Ordering::Relaxed);
+    let url = format!("http://127.0.0.1:{port}/mcp");
+    match write_cursor_mcp_file(&path, &url, &state.token) {
+        Ok(action) => json_ok(json!({
+            "action": action.as_str(),
+            "path": path.display().to_string()
+        })),
+        Err(message) => json_err(StatusCode::BAD_REQUEST, message),
+    }
+}
+
+fn archive_path_rejected(remote: &str) -> bool {
+    remote.chars().any(|c| matches!(c, ';' | '|' | '&' | '$' | '>' | '<' | '`' | '\n' | '\r'))
 }
 
 fn render_index(token: &str) -> String {

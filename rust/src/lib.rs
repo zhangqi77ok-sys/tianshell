@@ -2,12 +2,14 @@
 
 pub mod auth;
 pub mod bindings;
+pub mod download_grant;
 pub mod hands;
 pub mod history;
 pub mod http_server;
 pub mod hub;
 pub mod keys;
 pub mod mcp;
+pub mod mcp_config;
 pub mod mcp_http;
 pub mod monitor;
 pub mod paths;
