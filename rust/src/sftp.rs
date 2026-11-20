@@ -105,6 +105,12 @@ pub fn list_dir(sess: &Session, dir_path: &str) -> Result<Vec<SftpEntry>, SftpEr
     Ok(entries)
 }
 
+pub const MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
+
+pub fn upload_too_big(len: usize) -> bool {
+    len > MAX_UPLOAD_BYTES
+}
+
 pub fn read_text(sess: &Session, file_path: &str, max_bytes: usize) -> Result<String, SftpError> {
     let sftp = sess.sftp()?;
     let mut file = sftp.open(Path::new(file_path))?;
@@ -258,4 +264,16 @@ pub fn write_bytes(sess: &Session, file_path: &str, bytes: &[u8], mut on_progres
     }
     file.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upload_limit_is_64_mebibytes() {
+        assert!(!upload_too_big(0));
+        assert!(!upload_too_big(MAX_UPLOAD_BYTES));
+        assert!(upload_too_big(MAX_UPLOAD_BYTES + 1));
+    }
 }

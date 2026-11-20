@@ -1412,6 +1412,7 @@ button.danger:hover:not(:disabled) {
   border-bottom: 1px solid var(--line);
   flex: none;
   background: var(--surface);
+  flex-wrap: wrap;
 }
 .sftp-nav {
   display: flex;
@@ -1488,6 +1489,25 @@ button.danger:hover:not(:disabled) {
 .sftp-ops {
   display: flex;
   gap: 5px;
+  flex: none;
+  flex-wrap: wrap;
+}
+@media (max-width: 860px) {
+  .sftp-nav,
+  .sftp-ops {
+    flex: 1 1 100%;
+  }
+  .editor-modal-head {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .editor-head-actions {
+    flex-wrap: wrap;
+  }
+  .editor-path {
+    max-width: 70vw;
+  }
 }
 .sftp-table-wrap {
   flex: 1;

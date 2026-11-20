@@ -15,6 +15,15 @@ pub enum DownloadKind {
     Archive,
 }
 
+/// 普通下载不能把目录当成文件。打包下载可以针对目录，也可以针对单个文件。
+pub fn file_download_rejected(kind: DownloadKind, is_dir: bool) -> Option<&'static str> {
+    if kind == DownloadKind::File && is_dir {
+        Some("这是目录，请用打包下载")
+    } else {
+        None
+    }
+}
+
 #[derive(Debug)]
 pub struct IssuedGrant {
     pub session_id: String,
@@ -113,6 +122,14 @@ mod tests {
         let later = now + GRANT_TTL;
         let err = grants.redeem(&id, later).unwrap_err();
         assert!(!err.contains(&id));
+    }
+
+    #[test]
+    fn file_download_rejects_a_directory() {
+        assert_eq!(file_download_rejected(DownloadKind::File, true), Some("这是目录，请用打包下载"));
+        assert_eq!(file_download_rejected(DownloadKind::File, false), None);
+        assert_eq!(file_download_rejected(DownloadKind::Archive, true), None);
+        assert_eq!(file_download_rejected(DownloadKind::Archive, false), None);
     }
 
     #[test]

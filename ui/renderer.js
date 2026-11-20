@@ -6621,6 +6621,54 @@ WARNING: This link could potentially be dangerous`)) {
     return (current + step + count) % count;
   }
 
+  // src/renderer/sftp-logic.ts
+  var MAX_UPLOAD_BYTES = 64 * 1024 * 1024;
+  function editorSaveBlock(truncated) {
+    return truncated ? "\u8FD9\u4E2A\u6587\u4EF6\u53EA\u6253\u5F00\u4E86\u524D\u9762\u4E00\u6BB5\uFF0C\u5199\u56DE\u4F1A\u622A\u6389\u540E\u9762\u7684\u5185\u5BB9" : null;
+  }
+  function keepEditorOpen(dirty, discardConfirmed) {
+    return dirty && !discardConfirmed;
+  }
+  function remoteChildPath(dir, name) {
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === "." || trimmed === "..") return null;
+    if (/[/\\\0]/.test(trimmed)) return null;
+    const base = !dir || dir === "/" ? "" : dir.replace(/\/+$/, "");
+    return `${base}/${trimmed}`;
+  }
+  function planUploads(dir, existingNames, files) {
+    const existing = new Set(existingNames);
+    const seen = /* @__PURE__ */ new Set();
+    const send = [];
+    const skipped = [];
+    const overwrite = [];
+    for (const file of files) {
+      const label = file.name.trim() || "\u672A\u547D\u540D";
+      const path = remoteChildPath(dir, file.name);
+      if (!path) {
+        skipped.push({ name: label, reason: `${label} \u7684\u540D\u5B57\u4E0D\u80FD\u5E26\u659C\u6760\u6216 ..` });
+        continue;
+      }
+      if (seen.has(file.name)) {
+        skipped.push({ name: file.name, reason: `${file.name} \u5728\u8FD9\u4E00\u6279\u91CC\u91CD\u540D\uFF0C\u5DF2\u8DF3\u8FC7` });
+        continue;
+      }
+      seen.add(file.name);
+      if (file.size > MAX_UPLOAD_BYTES) {
+        skipped.push({ name: file.name, reason: `${file.name} \u8D85\u8FC7 64MB\uFF0C\u6CA1\u6709\u5F00\u59CB\u4E0A\u4F20` });
+        continue;
+      }
+      if (existing.has(file.name)) overwrite.push(file.name);
+      send.push({ name: file.name, path });
+    }
+    return { send, skipped, overwrite };
+  }
+  function parseOctalMode(raw) {
+    const text = raw.trim();
+    if (!/^[0-7]{3,4}$/.test(text)) return null;
+    return Number.parseInt(text, 8);
+  }
+
   // src/renderer/sftp-panel.ts
   function formatBytes(bytes) {
     if (bytes < 1024) return `${bytes} B`;
@@ -6705,6 +6753,9 @@ WARNING: This link could potentially be dangerous`)) {
     editingPath = null;
     editingSession = null;
     editorSaving = false;
+    editorTruncated = false;
+    editorClosePending = false;
+    listedNames = [];
     pathInput = document.getElementById("sftp-path");
     breadcrumbsEl = document.getElementById("sftp-breadcrumbs");
     editPathBtn = document.getElementById("sftp-edit-path");
@@ -6750,6 +6801,7 @@ WARNING: This link could potentially be dangerous`)) {
       }
       if (!sid) {
         this.currentDir = "/";
+        this.listedNames = [];
         this.showListingMessage("\u7A7A\u95F2\u3002\u8FDE\u4E0A SSH \u4F1A\u8BDD\u540E\uFF0C\u8FD9\u91CC\u663E\u793A\u8BE5\u4F1A\u8BDD\u7684\u5F53\u524D\u76EE\u5F55\u3002", true);
         if (this.breadcrumbsEl) this.breadcrumbsEl.textContent = "";
         this.deps.onDirChange?.("/");
@@ -6834,6 +6886,7 @@ WARNING: This link could potentially be dangerous`)) {
         this.renderBreadcrumbs(this.currentDir);
         this.showPathInput(false);
         this.deps.onDirChange?.(this.currentDir);
+        this.listedNames = list.map((entry) => entry.name);
         const visible = list.filter((e) => this.showHidden || !e.name.startsWith("."));
         const sig = `${sid}|${this.currentDir}|${visible.map((e) => `${e.path}:${e.size}:${e.mtimeMs}:${e.mode}`).join("|")}`;
         if (sig === this.lastSig) return;
@@ -6841,6 +6894,7 @@ WARNING: This link could potentially be dangerous`)) {
         this.renderEntries(visible);
       } catch (err) {
         if (!this.listingCurrent(sid, ticket)) return;
+        this.listedNames = [];
         const message = err instanceof Error ? err.message : "SFTP \u8BFB\u53D6\u5931\u8D25";
         this.showListingMessage(message, true);
       } finally {
@@ -6938,6 +6992,8 @@ WARNING: This link could potentially be dangerous`)) {
         const res = await webApi.sftpReadText(sid, remotePath);
         this.editingPath = remotePath;
         this.editingSession = sid;
+        this.editorTruncated = res.truncated;
+        this.setSaveEnabled(!res.truncated);
         const fileName = remotePath.split("/").pop() || "\u6587\u4EF6";
         const meta = getFileMeta(fileName, false);
         if (this.editorFileIcon) this.editorFileIcon.textContent = meta.icon;
@@ -6982,7 +7038,18 @@ WARNING: This link could potentially be dangerous`)) {
       this.editorDirtyBadge.className = `editor-dirty-badge ${dirty ? "dirty" : "clean"}`;
       this.editorDirtyBadge.textContent = dirty ? "\u25CF \u672A\u4FDD\u5B58" : "\u2713 \u5DF2\u4FDD\u5B58";
     }
+    setSaveEnabled(enabled) {
+      const saveBtn = document.getElementById("save-editor-btn");
+      if (!saveBtn) return;
+      saveBtn.disabled = !enabled;
+      saveBtn.textContent = enabled ? "\u4FDD\u5B58\u5199\u56DE (Ctrl+S)" : "\u4E0D\u80FD\u5199\u56DE";
+    }
     async saveEditorContent() {
+      const blocked = editorSaveBlock(this.editorTruncated);
+      if (blocked) {
+        this.deps.toast(blocked, "error");
+        return false;
+      }
       const decision = editorWriteGuard(this.editingSession, this.deps.getActiveSshId(), this.editorSaving);
       if (decision === "idle" || decision === "busy" || !this.editingPath || !this.editingSession) return false;
       if (decision === "disconnected") {
@@ -7006,14 +7073,27 @@ WARNING: This link could potentially be dangerous`)) {
         this.editorSaving = false;
       }
     }
-    async handleCloseEditor() {
-      if (this.isEditorDirty) {
-        const ok = await this.deps.confirm("\u653E\u5F03\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF1F", "\u5173\u95ED\u540E\uFF0C\u8FD9\u6B21\u7F16\u8F91\u4E0D\u4F1A\u5199\u56DE\u8FDC\u7AEF\u3002", "\u653E\u5F03\u4FEE\u6539");
-        if (!ok) return;
-      }
+    finishEditor() {
       this.editingPath = null;
       this.editingSession = null;
+      this.editorTruncated = false;
+      this.isEditorDirty = false;
+      this.setSaveEnabled(true);
       this.editorDlg.close();
+    }
+    async handleCloseEditor() {
+      if (this.editorClosePending) return;
+      if (this.isEditorDirty) {
+        this.editorClosePending = true;
+        let discard = false;
+        try {
+          discard = await this.deps.confirm("\u653E\u5F03\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF1F", "\u5173\u95ED\u540E\uFF0C\u8FD9\u6B21\u7F16\u8F91\u4E0D\u4F1A\u5199\u56DE\u8FDC\u7AEF\u3002", "\u653E\u5F03\u4FEE\u6539");
+        } finally {
+          this.editorClosePending = false;
+        }
+        if (keepEditorOpen(true, discard)) return;
+      }
+      this.finishEditor();
     }
     async triggerDownload(remotePath) {
       const name = remotePath.split("/").pop() || "file";
@@ -7071,8 +7151,8 @@ WARNING: This link could potentially be dangerous`)) {
       if (!sid) return;
       const raw = await this.deps.promptText("\u8F93\u5165\u516B\u8FDB\u5236\u6743\u9650 (\u4F8B\u5982 755 \u6216 644)", entry.mode.toString(8));
       if (!raw) return;
-      const mode = Number.parseInt(raw.trim(), 8);
-      if (Number.isNaN(mode)) return this.deps.toast("\u6743\u9650\u683C\u5F0F\u65E0\u6548", "error");
+      const mode = parseOctalMode(raw);
+      if (mode === null) return this.deps.toast("\u6743\u9650\u683C\u5F0F\u65E0\u6548\uFF0C\u8BF7\u7528\u4E09\u4F4D\u6216\u56DB\u4F4D\u516B\u8FDB\u5236", "error");
       try {
         await webApi.sftpChmod(sid, entry.path, mode);
         await this.load(this.currentDir);
@@ -7099,19 +7179,44 @@ WARNING: This link could potentially be dangerous`)) {
     async uploadFiles(files) {
       const sid = this.deps.getActiveSshId();
       if (!sid || !files?.length) return;
-      const base = this.currentDir === "/" ? "" : this.currentDir;
+      const dir = this.currentDir;
       const batch = Array.from(files);
+      const plan = planUploads(dir, this.listedNames, batch.map((file) => ({ name: file.name, size: file.size })));
+      for (const item of plan.skipped) this.deps.toast(item.reason, "error");
+      let send = plan.send;
+      if (plan.overwrite.length) {
+        const preview = plan.overwrite.slice(0, 6).join("\u3001");
+        const more = plan.overwrite.length > 6 ? ` \u7B49 ${plan.overwrite.length} \u4E2A` : "";
+        const ok = await this.deps.confirm(
+          `\u8986\u76D6 ${plan.overwrite.length} \u4E2A\u540C\u540D\u6587\u4EF6\uFF1F`,
+          `\u8FD9\u4E9B\u6587\u4EF6\u4F1A\u88AB\u66FF\u6362\uFF1A${preview}${more}`,
+          "\u8986\u76D6"
+        );
+        if (!ok) {
+          const skip = new Set(plan.overwrite);
+          send = send.filter((item) => !skip.has(item.name));
+          if (!send.length) {
+            this.deps.toast("\u6CA1\u6709\u4E0A\u4F20\uFF0C\u540C\u540D\u6587\u4EF6\u4FDD\u6301\u539F\u6837");
+            return;
+          }
+        }
+      }
+      if (!send.length) return;
+      const byName = new Map(batch.map((file) => [file.name, file]));
       let failed = 0;
       let firstError = "";
-      for (const file of batch) {
+      let uploaded = 0;
+      for (const item of send) {
+        const file = byName.get(item.name);
+        if (!file) continue;
         try {
-          await webApi.sftpUploadFile(sid, `${base}/${file.name}`, file);
+          await webApi.sftpUploadFile(sid, item.path, file);
+          uploaded += 1;
         } catch (err) {
           failed += 1;
           if (!firstError) firstError = err instanceof Error ? err.message : "\u4E0A\u4F20\u5931\u8D25";
         }
       }
-      const uploaded = batch.length - failed;
       if (failed === 0) {
         this.deps.toast(`\u5DF2\u4E0A\u4F20 ${uploaded} \u4E2A\u6587\u4EF6`);
         return;
@@ -7278,12 +7383,16 @@ WARNING: This link could potentially be dangerous`)) {
           await this.openEditor(path);
         })();
       });
+      this.editorDlg.addEventListener("cancel", (event) => {
+        event.preventDefault();
+        void this.handleCloseEditor();
+      });
       document.getElementById("cancel-editor")?.addEventListener("click", () => void this.handleCloseEditor());
       this.closeEditorBtn?.addEventListener("click", () => void this.handleCloseEditor());
       document.getElementById("editor-form")?.addEventListener("submit", async (e) => {
         e.preventDefault();
         const ok = await this.saveEditorContent();
-        if (ok) this.editorDlg.close();
+        if (ok) this.finishEditor();
       });
     }
   };

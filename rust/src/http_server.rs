@@ -815,7 +815,7 @@ async fn sftp_upload(
     if remote.is_empty() {
         return json_err(StatusCode::BAD_REQUEST, "缺少 path 参数");
     }
-    if body.len() > 64 * 1024 * 1024 {
+    if sftp::upload_too_big(body.len()) {
         return json_err(StatusCode::BAD_REQUEST, "上传内容超过 64MB");
     }
     let filename = base_name(&remote);
@@ -1025,6 +1025,25 @@ async fn issue_download_grant(
     }
     if state.hub.host_id(&id).is_err() {
         return json_err(StatusCode::BAD_REQUEST, "找不到这个会话");
+    }
+    let remote_check = remote.clone();
+    let id_check = id.clone();
+    let state_check = state.clone();
+    if let Err(err) = block(move || {
+        with_ssh(&state_check, &id_check, move |session| {
+            let sftp = session.sftp().map_err(|err| err.to_string())?;
+            let stat = sftp
+                .stat(std::path::Path::new(&remote_check))
+                .map_err(|err| format!("远端路径不可用：{err}"))?;
+            if let Some(message) = crate::download_grant::file_download_rejected(kind, stat.is_dir()) {
+                return Err(message.to_string());
+            }
+            Ok(())
+        })
+    })
+    .await
+    {
+        return json_err(StatusCode::BAD_REQUEST, err);
     }
     let grant_id = {
         let mut grants = lock(&state.download_grants);
