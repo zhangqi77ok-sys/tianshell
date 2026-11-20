@@ -15,6 +15,77 @@ pub enum DownloadKind {
     Archive,
 }
 
+#[derive(Debug)]
+pub struct ArchiveRequest {
+    pub command: String,
+    pub filename: String,
+}
+
+/// 把远端路径收成一条 `tar -C parent name`。
+/// 路径 `/` 不能收成名字 `root`，否则打的是 `/root`，不是文件系统根。
+/// 整个根目录也不打包：里面有 `/proc` 这类特殊文件，而且会占住这条 SFTP 连接。
+pub fn archive_request(remote: &str) -> Result<ArchiveRequest, &'static str> {
+    if remote.is_empty() {
+        return Err("缺少 path 参数");
+    }
+    if remote_is_filesystem_root(remote) {
+        return Err("不会打包整个根目录。进入要下载的目录后再打包。");
+    }
+    if archive_path_rejected(remote) {
+        return Err("路径包含非法字符");
+    }
+    let norm = remote.trim_end_matches('/');
+    if norm.is_empty() || remote_is_filesystem_root(norm) {
+        return Err("不会打包整个根目录。进入要下载的目录后再打包。");
+    }
+    let (parent, name) = match norm.rfind('/') {
+        Some(0) => ("/", &norm[1..]),
+        Some(idx) => (&norm[..idx], &norm[idx + 1..]),
+        None => (".", norm),
+    };
+    if name.is_empty() || name == "." || name == ".." {
+        return Err("不会打包这个路径");
+    }
+    Ok(ArchiveRequest {
+        command: format!("tar -czf - -C {} {}", shell_quote(parent), shell_quote(name)),
+        filename: format!("{name}.tar.gz"),
+    })
+}
+
+pub fn archive_path_rejected(remote: &str) -> bool {
+    remote.chars().any(|c| matches!(c, ';' | '|' | '&' | '$' | '>' | '<' | '`' | '\n' | '\r'))
+}
+
+/// `tar` 退出码不是 0 时，这次打包是失败，不能记成完成。
+pub fn archive_failure(exit_code: i32, stderr: &str) -> Option<String> {
+    if exit_code == 0 {
+        return None;
+    }
+    let line: String = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(160)
+        .collect();
+    if line.is_empty() {
+        Some(format!("远端打包失败（退出码 {exit_code}）"))
+    } else {
+        Some(format!("远端打包失败（退出码 {exit_code}）：{line}"))
+    }
+}
+
+fn remote_is_filesystem_root(remote: &str) -> bool {
+    let trimmed = remote.trim();
+    !trimmed.is_empty() && trimmed.chars().all(|ch| ch == '/')
+}
+
+fn shell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
 /// 普通下载不能把目录当成文件。打包下载可以针对目录，也可以针对单个文件。
 pub fn file_download_rejected(kind: DownloadKind, is_dir: bool) -> Option<&'static str> {
     if kind == DownloadKind::File && is_dir {
@@ -122,6 +193,38 @@ mod tests {
         let later = now + GRANT_TTL;
         let err = grants.redeem(&id, later).unwrap_err();
         assert!(!err.contains(&id));
+    }
+
+    #[test]
+    fn filesystem_root_is_not_packed_as_the_root_home() {
+        let err = archive_request("/").unwrap_err();
+        assert!(err.contains("根目录"));
+        assert!(archive_request("//").is_err());
+        assert!(archive_request(" / ").is_err());
+        let home = archive_request("/root").unwrap();
+        assert_eq!(home.command, "tar -czf - -C '/' 'root'");
+        assert_eq!(home.filename, "root.tar.gz");
+        assert!(!home.command.contains("-C '/' '.'"));
+    }
+
+    #[test]
+    fn archive_command_uses_the_parent_and_the_leaf() {
+        let log = archive_request("/var/log/").unwrap();
+        assert_eq!(log.command, "tar -czf - -C '/var' 'log'");
+        assert_eq!(log.filename, "log.tar.gz");
+        let quoted = archive_request("/tmp/o'brien").unwrap();
+        assert_eq!(quoted.command, "tar -czf - -C '/tmp' 'o'\\''brien'");
+        assert_eq!(archive_request("/tmp/a;rm").unwrap_err(), "路径包含非法字符");
+    }
+
+    #[test]
+    fn failed_tar_is_not_a_completed_download() {
+        assert_eq!(archive_failure(0, "anything"), None);
+        assert_eq!(archive_failure(2, "").as_deref(), Some("远端打包失败（退出码 2）"));
+        let message = archive_failure(2, "tar: /var/missing: Cannot stat\n").unwrap();
+        assert!(message.contains("退出码 2"));
+        assert!(message.contains("Cannot stat"));
+        assert!(!message.contains('\n'));
     }
 
     #[test]
