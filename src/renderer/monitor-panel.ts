@@ -6,7 +6,7 @@ import { formatBytes } from './sftp-panel.js';
 export interface MonitorPanelDeps {
   onFillCommand: (cmd: string) => void;
   getHosts: () => PublicHost[];
-  toast: (msg: string) => void;
+  toast: (msg: string, kind?: 'info' | 'error') => void;
   confirm: (title: string, body: string) => Promise<boolean>;
   reloadQuickOps?: () => void;
 }
@@ -209,7 +209,7 @@ export class MonitorAndToolsController {
             await navigator.clipboard.writeText(row.command);
             this.deps.toast('已复制命令到剪贴板');
           } catch {
-            this.deps.toast('复制失败');
+            this.deps.toast('复制失败', 'error');
           }
         });
 
@@ -289,7 +289,7 @@ export class MonitorAndToolsController {
           else await webApi.startTunnel(r.id);
           await this.renderTunnels();
         } catch (err) {
-          this.deps.toast(err instanceof Error ? err.message : '隧道操作失败');
+          this.deps.toast(err instanceof Error ? err.message : '隧道操作失败', 'error');
         }
       });
       const del = document.createElement('button');
@@ -305,7 +305,7 @@ export class MonitorAndToolsController {
           await webApi.deleteTunnel(r.id);
           await this.renderTunnels();
         } catch (err) {
-          this.deps.toast(err instanceof Error ? err.message : '删除隧道失败');
+          this.deps.toast(err instanceof Error ? err.message : '删除隧道失败', 'error');
         }
       });
       ops.append(toggle, del);
@@ -325,13 +325,17 @@ export class MonitorAndToolsController {
     document.getElementById('cancel-snippet')?.addEventListener('click', () => snipDlg.close());
     document.getElementById('snippet-form')?.addEventListener('submit', async (e) => {
       e.preventDefault();
-      await webApi.saveSnippet({
-        name: (document.getElementById('snip-name') as HTMLInputElement).value,
-        category: (document.getElementById('snip-cat') as HTMLInputElement).value,
-        command: (document.getElementById('snip-cmd') as HTMLTextAreaElement).value,
-      });
-      snipDlg.close();
-      this.deps.reloadQuickOps?.();
+      try {
+        await webApi.saveSnippet({
+          name: (document.getElementById('snip-name') as HTMLInputElement).value,
+          category: (document.getElementById('snip-cat') as HTMLInputElement).value,
+          command: (document.getElementById('snip-cmd') as HTMLTextAreaElement).value,
+        });
+        snipDlg.close();
+        this.deps.reloadQuickOps?.();
+      } catch (err) {
+        this.deps.toast(err instanceof Error ? err.message : '快捷命令没有保存', 'error');
+      }
     });
 
     const tunDlg = document.getElementById('tunnel-dialog') as HTMLDialogElement;
@@ -345,16 +349,20 @@ export class MonitorAndToolsController {
     document.getElementById('close-tunnels')?.addEventListener('click', () => tunDlg.close());
     document.getElementById('tunnel-form')?.addEventListener('submit', async (e) => {
       e.preventDefault();
-      await webApi.saveTunnel({
-        name: (document.getElementById('tun-name') as HTMLInputElement).value,
-        hostId: (document.getElementById('tun-host') as HTMLSelectElement).value,
-        mode: tunMode.value as 'local' | 'remote' | 'socks5',
-        localHost: '127.0.0.1',
-        localPort: Number((document.getElementById('tun-lport') as HTMLInputElement).value),
-        remoteHost: (document.getElementById('tun-rhost') as HTMLInputElement).value,
-        remotePort: Number((document.getElementById('tun-rport') as HTMLInputElement).value),
-      });
-      await this.renderTunnels();
+      try {
+        await webApi.saveTunnel({
+          name: (document.getElementById('tun-name') as HTMLInputElement).value,
+          hostId: (document.getElementById('tun-host') as HTMLSelectElement).value,
+          mode: tunMode.value as 'local' | 'remote' | 'socks5',
+          localHost: '127.0.0.1',
+          localPort: Number((document.getElementById('tun-lport') as HTMLInputElement).value),
+          remoteHost: (document.getElementById('tun-rhost') as HTMLInputElement).value,
+          remotePort: Number((document.getElementById('tun-rport') as HTMLInputElement).value),
+        });
+        await this.renderTunnels();
+      } catch (err) {
+        this.deps.toast(err instanceof Error ? err.message : '隧道规则没有保存', 'error');
+      }
     });
   }
 }

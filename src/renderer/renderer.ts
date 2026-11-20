@@ -16,6 +16,8 @@ import {
   resizeIfChanged,
   seedBroadcastChecks,
   sessionOpenSteps,
+  pasteNeedsConfirm,
+  settlePaste,
   shouldMeasureTerminal,
   tabLabels,
   type BroadcastTab,
@@ -434,6 +436,45 @@ function showTerminalContextMenu(x: number, y: number, sessionId: string): void 
   menu.style.top = `${posY}px`;
 }
 
+function confirmMultilinePaste(sessionId: string, text: string): void {
+  const tab = tabs.get(sessionId);
+  const dlg = document.getElementById('paste-confirm-dialog') as HTMLDialogElement | null;
+  const form = document.getElementById('paste-confirm-form') as HTMLFormElement | null;
+  if (!tab || !dlg || !form) return;
+  const preview = document.getElementById('paste-confirm-preview') as HTMLElement | null;
+  const hint = document.getElementById('paste-confirm-hint') as HTMLElement | null;
+  const cancelBtn = document.getElementById('cancel-paste-btn') as HTMLButtonElement | null;
+  const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  if (hint) hint.textContent = `检测到剪贴板包含 ${lines.length} 行文本/命令，直接粘贴将立即向终端提交执行：`;
+  if (preview) preview.textContent = text;
+
+  let settled = false;
+  const finish = (choice: 'send' | 'dismiss') => {
+    const action = settlePaste(settled, choice);
+    if (action === 'ignore') return;
+    settled = true;
+    form.removeEventListener('submit', onConfirm);
+    cancelBtn?.removeEventListener('click', onCancel);
+    dlg.removeEventListener('cancel', onEscape);
+    if (dlg.open) dlg.close();
+    if (action === 'send') sendInput(text);
+    tab.term.focus();
+  };
+  const onConfirm = (event: Event) => {
+    event.preventDefault();
+    finish('send');
+  };
+  const onCancel = () => finish('dismiss');
+  const onEscape = (event: Event) => {
+    event.preventDefault();
+    finish('dismiss');
+  };
+  form.addEventListener('submit', onConfirm);
+  cancelBtn?.addEventListener('click', onCancel);
+  dlg.addEventListener('cancel', onEscape);
+  dlg.showModal();
+}
+
 async function handleTerminalPaste(sessionId: string): Promise<void> {
   const tab = tabs.get(sessionId);
   if (!tab) return;
@@ -441,47 +482,16 @@ async function handleTerminalPaste(sessionId: string): Promise<void> {
   try {
     text = await navigator.clipboard.readText();
   } catch {
-    showToast('无法读取系统剪贴板，请使用快捷键 Ctrl+V');
+    showToast('无法读取系统剪贴板，请使用快捷键 Ctrl+V', 'error');
     return;
   }
   if (!text) return;
-
-  const hasNewline = text.includes('\n') || text.includes('\r');
-  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-
-  if (hasNewline && lines.length > 1) {
-    const dlg = document.getElementById('paste-confirm-dialog') as HTMLDialogElement;
-    const preview = document.getElementById('paste-confirm-preview') as HTMLElement;
-    const hint = document.getElementById('paste-confirm-hint') as HTMLElement;
-    const form = document.getElementById('paste-confirm-form') as HTMLFormElement;
-    const cancelBtn = document.getElementById('cancel-paste-btn') as HTMLButtonElement;
-
-    if (hint) hint.textContent = `检测到剪贴板包含 ${lines.length} 行文本/命令，直接粘贴将立即向终端提交执行：`;
-    if (preview) preview.textContent = text;
-
-    const onConfirm = (e: Event) => {
-      e.preventDefault();
-      cleanup();
-      dlg.close();
-      sendInput(text);
-      tab.term.focus();
-    };
-    const onCancel = () => {
-      cleanup();
-      dlg.close();
-      tab.term.focus();
-    };
-    const cleanup = () => {
-      form.removeEventListener('submit', onConfirm);
-      cancelBtn?.removeEventListener('click', onCancel);
-    };
-    form.addEventListener('submit', onConfirm);
-    cancelBtn?.addEventListener('click', onCancel);
-    dlg.showModal();
-  } else {
-    sendInput(text);
-    tab.term.focus();
+  if (pasteNeedsConfirm(text)) {
+    confirmMultilinePaste(sessionId, text);
+    return;
   }
+  sendInput(text);
+  tab.term.focus();
 }
 
 function createTermInstance(info: ConnectInfo): void {
@@ -510,6 +520,14 @@ function createTermInstance(info: ConnectInfo): void {
   });
 
   // 极客右键智能上下文菜单
+  slot.addEventListener('paste', (event) => {
+    const data = event.clipboardData;
+    const text = data?.getData('text/plain') || data?.getData('text') || '';
+    if (!pasteNeedsConfirm(text)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    confirmMultilinePaste(info.sessionId, text);
+  }, true);
   slot.addEventListener('contextmenu', (e: MouseEvent) => {
     e.preventDefault();
     if (activeId !== info.sessionId) {
@@ -1284,20 +1302,24 @@ function bindGlobalUi(): void {
   document.getElementById('cancel-settings')?.addEventListener('click', () => setDlg.close());
   document.getElementById('settings-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const s = await webApi.updateSettings({
-      theme: (document.getElementById('set-theme') as HTMLSelectElement).value as 'dark' | 'light',
-      fontSize: Number((document.getElementById('set-font') as HTMLInputElement).value),
-      monitorIntervalMs: Number((document.getElementById('set-interval') as HTMLInputElement).value),
-      showHiddenFiles: (document.getElementById('set-hidden') as HTMLInputElement).checked,
-    });
-    fontSize = s.fontSize;
-    document.documentElement.setAttribute('data-theme', s.theme);
-    syncThemeToggle();
-    applyTermTheme();
-    sftpCtrl.setShowHidden(s.showHiddenFiles);
-    for (const tab of tabs.values()) tab.term.options.fontSize = fontSize;
-    fitVisibleTabs();
-    setDlg.close();
+    try {
+      const s = await webApi.updateSettings({
+        theme: (document.getElementById('set-theme') as HTMLSelectElement).value as 'dark' | 'light',
+        fontSize: Number((document.getElementById('set-font') as HTMLInputElement).value),
+        monitorIntervalMs: Number((document.getElementById('set-interval') as HTMLInputElement).value),
+        showHiddenFiles: (document.getElementById('set-hidden') as HTMLInputElement).checked,
+      });
+      fontSize = s.fontSize;
+      document.documentElement.setAttribute('data-theme', s.theme);
+      syncThemeToggle();
+      applyTermTheme();
+      sftpCtrl.setShowHidden(s.showHiddenFiles);
+      for (const tab of tabs.values()) tab.term.options.fontSize = fontSize;
+      fitVisibleTabs();
+      setDlg.close();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '设置没有保存', 'error');
+    }
   });
 
   // Terminal Custom Context Menu Actions
@@ -1436,7 +1458,7 @@ async function copyText(text: string, ok: string): Promise<void> {
     await navigator.clipboard.writeText(text);
     showToast(ok);
   } catch {
-    showToast('复制失败，请在对话框里手动选择');
+    showToast('复制失败，请在对话框里手动选择', 'error');
   }
 }
 

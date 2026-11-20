@@ -166,6 +166,20 @@ export function isCurrentGeneration(ticket: number, latest: number): boolean {
   return ticket > 0 && ticket === latest;
 }
 
+export type PasteDecision = 'send' | 'dismiss';
+
+/** 多行粘贴只认第一次选择。取消或 Esc 之后，残留的提交不能再把内容送进终端。 */
+export function settlePaste(alreadySettled: boolean, choice: PasteDecision): PasteDecision | 'ignore' {
+  if (alreadySettled) return 'ignore';
+  return choice;
+}
+
+/** 含换行且至少两行有内容时，粘贴会马上执行，需要先确认。 */
+export function pasteNeedsConfirm(text: string): boolean {
+  if (!text.includes('\n') && !text.includes('\r')) return false;
+  return text.split(/\r?\n/).filter((line) => line.trim().length > 0).length > 1;
+}
+
 /** current < 0 表示还没定位。向前从第一条开始，向后从最后一条开始，到头之后回绕。 */
 export function nextFindIndex(current: number, count: number, forward: boolean): number {
   if (count <= 0) return -1;
