@@ -101,6 +101,14 @@ export function deletePrompt(kind: 'dir' | 'file' | 'symlink', name: string): De
   };
 }
 
+/** 符号链接在列表里几乎总是 0777。权限框要说明改的是目标，默认值用目标的权限位。 */
+export function chmodPrompt(kind: 'dir' | 'file' | 'symlink'): string {
+  if (kind === 'symlink') {
+    return '这会修改链接指向的文件，不是链接本身。输入它的八进制权限';
+  }
+  return '输入八进制权限 (例如 755 或 644)';
+}
+
 /** 三位或四位八进制。755、0644 可以，999 和空字符串不行。 */
 export function parseOctalMode(raw: string): number | null {
   const text = raw.trim();
