@@ -88,8 +88,10 @@ export class SftpController {
   private readonly closeEditorBtn = document.getElementById('close-editor-btn') as HTMLButtonElement | null;
   private editorOriginalContent = '';
   private isEditorDirty = false;
+  private readonly deps: SftpControllerDeps;
 
-  constructor(private readonly deps: SftpControllerDeps) {
+  constructor(deps: SftpControllerDeps) {
+    this.deps = deps;
     this.bindEvents();
   }
 
@@ -195,15 +197,20 @@ export class SftpController {
     }
   }
 
-  async load(dirPath: string): Promise<void> {
+  /**
+   * `notify`：跳转失败时提示，并留下已经列出的目录。
+   * `defer`：这次失败不提示、不换列表，把结果交回调用方。
+   * 符号链接需要后者。`load` 自己接住列表错误后会正常返回，调用方的 catch 接不到。
+   */
+  async load(dirPath: string, failure: 'notify' | 'defer' = 'notify'): Promise<'shown' | 'failed' | 'idle'> {
     const sid = this.deps.getActiveSshId();
-    if (!sid) return;
+    if (!sid) return 'idle';
     const requested = dirPath || '/';
     const ticket = ++this.loadTicket;
     this.tableEl.classList.add('loading');
     try {
       const list = await webApi.sftpList(sid, requested);
-      if (!this.listingCurrent(sid, ticket)) return;
+      if (!this.listingCurrent(sid, ticket)) return 'idle';
       this.currentDir = requested;
       this.pathInput.value = this.currentDir;
       this.renderBreadcrumbs(this.currentDir);
@@ -213,19 +220,22 @@ export class SftpController {
       this.listedNames = list.map((entry) => entry.name);
       const visible = list.filter((e) => this.showHidden || !e.name.startsWith('.'));
       const sig = `${sid}|${this.currentDir}|${visible.map((e) => `${e.path}:${e.size}:${e.mtimeMs}:${e.mode}`).join('|')}`;
-      if (sig === this.lastSig) return;
+      if (sig === this.lastSig) return 'shown';
       this.lastSig = sig;
       this.renderEntries(visible);
+      return 'shown';
     } catch (err) {
-      if (!this.listingCurrent(sid, ticket)) return;
+      if (!this.listingCurrent(sid, ticket)) return 'idle';
+      if (failure === 'defer') return 'failed';
       const message = err instanceof Error ? err.message : 'SFTP 读取失败';
       if (failedLoadEffect(this.haveListing) === 'keep') {
         this.deps.toast(message, 'error');
         if (!this.pathInput.classList.contains('hidden')) this.pathInput.focus();
-        return;
+        return 'failed';
       }
       this.listedNames = [];
       this.showListingMessage(message, true);
+      return 'failed';
     } finally {
       if (this.listingCurrent(sid, ticket)) this.tableEl.classList.remove('loading');
     }
@@ -291,7 +301,7 @@ export class SftpController {
         } else if (entry.kind === 'file') {
           void this.openEditor(entry.path);
         } else {
-          void this.load(entry.path).catch(() => void this.openEditor(entry.path));
+          void this.openSymlink(entry.path);
         }
       };
 
@@ -318,6 +328,12 @@ export class SftpController {
       onClick();
     });
     parent.appendChild(b);
+  }
+
+  /** 先列目录。列开了就是指向目录的链接。列不开再按文件打开，当前列表留着。 */
+  private async openSymlink(path: string): Promise<void> {
+    const outcome = await this.load(path, 'defer');
+    if (outcome === 'failed') await this.openEditor(path);
   }
 
   private async openEditor(remotePath: string): Promise<void> {
