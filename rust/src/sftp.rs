@@ -181,20 +181,43 @@ pub fn read_text_limited(sess: &Session, file_path: &str, max_bytes: usize) -> R
             break;
         }
     }
+    remote_text_preview(&buf, limit)
+}
+
+/// 编辑器和 MCP 读文本只接受能原样写回的 UTF-8。
+/// 有 NUL，或整段不是 UTF-8 时直接拒绝。不能先换成替换字符再写回去，那样会改掉原字节。
+/// 超过上限时只丢掉末尾没写完的字符，并标成截断，调用方不能把这段写回。
+fn remote_text_preview(buf: &[u8], limit: usize) -> Result<RemoteText, SftpError> {
     let truncated = buf.len() > limit;
-    if truncated {
-        buf.truncate(limit);
-    }
-    if buf.iter().take(1024).any(|byte| *byte == 0) {
+    let window = if truncated { trim_partial_utf8(&buf[..limit]) } else { buf };
+    if window.contains(&0) {
         return Err(SftpError::Rejected("检测到二进制文件，暂不支持在线文本编辑".into()));
     }
-    if looks_like_private_key(&buf) {
+    let text = std::str::from_utf8(window).map_err(|_| {
+        SftpError::Rejected("这个文件不是 UTF-8 文本，没有打开，原文件没有改动".into())
+    })?;
+    if looks_like_private_key(window) {
         return Err(SftpError::Rejected("拒绝返回私钥内容".into()));
     }
     Ok(RemoteText {
-        content: String::from_utf8_lossy(&buf).into_owned(),
+        content: text.to_string(),
         truncated,
     })
+}
+
+fn trim_partial_utf8(buf: &[u8]) -> &[u8] {
+    if std::str::from_utf8(buf).is_ok() {
+        return buf;
+    }
+    let floor = buf.len().saturating_sub(3);
+    let mut end = buf.len();
+    while end > floor {
+        end -= 1;
+        if std::str::from_utf8(&buf[..end]).is_ok() {
+            return &buf[..end];
+        }
+    }
+    buf
 }
 
 pub fn mkdir(sess: &Session, dir_path: &str) -> Result<(), SftpError> {
@@ -885,6 +908,21 @@ mod tests {
         let rejected = write_bytes(&sess, &pipe, b"nope", |_, _| true).unwrap_err();
         assert!(rejected.to_string().contains("不是普通文件"), "{rejected}");
         assert!(std::path::Path::new(&pipe).exists());
+        let binary = format!("{dir}/not-utf8.bin");
+        let raw = b"PDF\xff\xfebinary-tail";
+        write_bytes(&sess, &binary, raw, |_, _| true).unwrap();
+        let refused = read_text_limited(&sess, &binary, 4096).unwrap_err();
+        assert!(refused.to_string().contains("UTF-8"), "{refused}");
+        assert!(!refused.to_string().contains('\u{FFFD}'));
+        assert_eq!(sftp_bytes(&sess, &binary).unwrap(), raw);
+        let mut late_nul = vec![b'a'; 2048];
+        late_nul.extend_from_slice(b"tail");
+        late_nul[1500] = 0;
+        let nul_path = format!("{dir}/late-nul.txt");
+        write_bytes(&sess, &nul_path, &late_nul, |_, _| true).unwrap();
+        let refused = read_text_limited(&sess, &nul_path, 4096).unwrap_err();
+        assert!(refused.to_string().contains("二进制"), "{refused}");
+        assert_eq!(sftp_bytes(&sess, &nul_path).unwrap(), late_nul);
         write_bytes(&sess, &format!("{dir}/after.txt"), b"still-up", |_, _| true).unwrap();
         assert_eq!(sftp_bytes(&sess, &format!("{dir}/after.txt")).unwrap(), b"still-up");
         assert!(uploading_names(&sess, &dir).unwrap().is_empty());
@@ -1065,6 +1103,39 @@ mod tests {
             }
         }
         Err("写入过程中没有临时文件".into())
+    }
+
+    #[test]
+    fn remote_text_refuses_bytes_that_cannot_be_written_back_unchanged() {
+        let text = remote_text_preview("日志：保持原样\n".as_bytes(), 1024).unwrap();
+        assert_eq!(text.content, "日志：保持原样\n");
+        assert!(!text.truncated);
+
+        let mut late_nul = vec![b'a'; 2048];
+        late_nul[1500] = 0;
+        late_nul.extend_from_slice(b"tail");
+        let err = remote_text_preview(&late_nul, 4096).unwrap_err();
+        assert!(err.to_string().contains("二进制"), "{err}");
+
+        let binary = b"PDF\xff\xfebinary";
+        let lossy = String::from_utf8_lossy(binary);
+        assert!(lossy.contains('\u{FFFD}'));
+        assert_ne!(lossy.as_bytes(), binary);
+        let err = remote_text_preview(binary, 4096).unwrap_err();
+        assert!(err.to_string().contains("UTF-8"), "{err}");
+        assert!(!err.to_string().contains('\u{FFFD}'));
+
+        let mut cut = "甲乙丙".as_bytes().to_vec();
+        cut.extend_from_slice("丁".as_bytes());
+        let limit = "甲乙丙".as_bytes().len() + 1;
+        let preview = remote_text_preview(&cut, limit).unwrap();
+        assert!(preview.truncated);
+        assert_eq!(preview.content, "甲乙丙");
+        assert!(std::str::from_utf8(preview.content.as_bytes()).is_ok());
+
+        let key = b"-----BEGIN OPENSSH PRIVATE KEY-----\n";
+        let err = remote_text_preview(key, 4096).unwrap_err();
+        assert!(err.to_string().contains("私钥"), "{err}");
     }
 
     #[test]
