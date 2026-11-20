@@ -131,8 +131,38 @@ pub fn declared_length_too_big(header: Option<&str>) -> bool {
     usize::try_from(len).map(upload_too_big).unwrap_or(true)
 }
 
+/// `stat` 穿过符号链接。没带权限位时无法分辨类型，仍按普通文件读。
+/// 只有类型位是普通文件才打开。管道一读就堵住这条 SFTP，字符设备则没有结束。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadNode {
+    Regular,
+    Directory,
+    Special,
+}
+
+pub fn read_node(perm: Option<u32>) -> ReadNode {
+    let Some(perm) = perm else {
+        return ReadNode::Regular;
+    };
+    match perm & 0o170000 {
+        0o040000 => ReadNode::Directory,
+        0o100000 | 0 => ReadNode::Regular,
+        _ => ReadNode::Special,
+    }
+}
+
+fn ensure_regular_file(sftp: &ssh2::Sftp, path: &str) -> Result<(), SftpError> {
+    let stat = sftp.stat(Path::new(path))?;
+    match read_node(stat.perm) {
+        ReadNode::Regular => Ok(()),
+        ReadNode::Directory => Err(SftpError::Rejected("这是目录，不能当作文件读取".into())),
+        ReadNode::Special => Err(SftpError::Rejected("这不是普通文件，没有读取".into())),
+    }
+}
+
 pub fn read_text(sess: &Session, file_path: &str, max_bytes: usize) -> Result<String, SftpError> {
     let sftp = sess.sftp()?;
+    ensure_regular_file(&sftp, file_path)?;
     let mut file = sftp.open(Path::new(file_path))?;
     let mut buf = Vec::new();
     let mut take = (&mut file).take(max_bytes as u64);
@@ -147,6 +177,7 @@ pub fn write_text(sess: &Session, file_path: &str, content: &str) -> Result<(), 
 pub fn read_bytes_limited(sess: &Session, file_path: &str, max_bytes: usize) -> Result<(Vec<u8>, bool), SftpError> {
     let limit = max_bytes.min(262_144);
     let sftp = sess.sftp()?;
+    ensure_regular_file(&sftp, file_path)?;
     let mut file = sftp.open(Path::new(file_path))?;
     let mut buf = Vec::new();
     let mut tmp = [0u8; 8192];
@@ -179,6 +210,7 @@ fn looks_like_private_key(buf: &[u8]) -> bool {
 pub fn read_text_limited(sess: &Session, file_path: &str, max_bytes: usize) -> Result<RemoteText, SftpError> {
     let limit = max_bytes.min(262_144);
     let sftp = sess.sftp()?;
+    ensure_regular_file(&sftp, file_path)?;
     let mut file = sftp.open(Path::new(file_path))?;
     let mut buf = Vec::new();
     let mut tmp = [0u8; 8192];
@@ -305,6 +337,7 @@ fn remove_rec(sftp: &ssh2::Sftp, file_path: &str) -> Result<(), SftpError> {
 
 pub fn read_chunks(sess: &Session, file_path: &str, mut on_chunk: impl FnMut(&[u8]) -> bool) -> Result<(), SftpError> {
     let sftp = sess.sftp()?;
+    ensure_regular_file(&sftp, file_path)?;
     let mut file = sftp.open(Path::new(file_path))?;
     let mut buf = [0u8; 32_768];
     loop {
@@ -606,6 +639,19 @@ fn write_exclusive(sftp: &ssh2::Sftp, path: &str, bytes: &[u8], mode: u32, on_pr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn special_nodes_are_not_regular_files() {
+        assert_eq!(read_node(Some(0o100644)), ReadNode::Regular);
+        assert_eq!(read_node(Some(0o100000)), ReadNode::Regular);
+        assert_eq!(read_node(Some(0o644)), ReadNode::Regular);
+        assert_eq!(read_node(None), ReadNode::Regular);
+        assert_eq!(read_node(Some(0o040755)), ReadNode::Directory);
+        assert_eq!(read_node(Some(0o010644)), ReadNode::Special);
+        assert_eq!(read_node(Some(0o020666)), ReadNode::Special);
+        assert_eq!(read_node(Some(0o060666)), ReadNode::Special);
+        assert_eq!(read_node(Some(0o140777)), ReadNode::Special);
+    }
 
     #[test]
     fn a_symlink_is_removed_without_walking_into_its_target() {
@@ -1181,6 +1227,41 @@ mod tests {
         assert_eq!(dangling.mode, 0o777, "dangling listed mode {:o}", dangling.mode);
         assert!(chmod(&sess, &format!("{dir}/dangling"), 0o777).is_err());
         assert!(!std::path::Path::new(&format!("{dir}/missing-target")).exists());
+    }
+
+    /// 管道和字符设备不是普通文件。打开后再读会堵住这条 SFTP，设备则没有结束。
+    #[cfg(unix)]
+    #[test]
+    fn fifo_and_device_are_refused_before_a_read() {
+        if !std::path::Path::new("/usr/sbin/sshd").is_file() {
+            return;
+        }
+        if !std::process::Command::new("sudo").args(["-n", "true"]).status().map(|status| status.success()).unwrap_or(false) {
+            return;
+        }
+        let server = LocalSshd::start().unwrap();
+        let sess = connect_sftp(server.port, &server.key).unwrap();
+        sess.set_timeout(1_500);
+        let dir = server.work.clone();
+        let fifo = format!("{dir}/pipe");
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        std::os::unix::fs::symlink("pipe", std::path::Path::new(&dir).join("pipe-link")).unwrap();
+        let entries = list_dir(&sess, &dir).unwrap();
+        let listed = entries.iter().find(|entry| entry.name == "pipe").unwrap();
+        assert_eq!(listed.kind, "file");
+        let started = std::time::Instant::now();
+        let refused = read_text_limited(&sess, &fifo, 4096).unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_millis(800), "读管道花了 {:?}", started.elapsed());
+        assert!(refused.to_string().contains("不是普通文件"), "{refused}");
+        let link_refused = read_bytes_limited(&sess, &format!("{dir}/pipe-link"), 4096).unwrap_err();
+        assert!(link_refused.to_string().contains("不是普通文件"), "{link_refused}");
+        let device = read_bytes_limited(&sess, "/dev/zero", 4096).unwrap_err();
+        assert!(device.to_string().contains("不是普通文件"), "{device}");
+        let file = format!("{dir}/plain.txt");
+        write_bytes(&sess, &file, b"plain", |_, _| true).unwrap();
+        std::os::unix::fs::symlink("plain.txt", std::path::Path::new(&dir).join("plain-link")).unwrap();
+        assert_eq!(read_bytes_limited(&sess, &file, 4096).unwrap().0, b"plain");
+        assert_eq!(read_bytes_limited(&sess, &format!("{dir}/plain-link"), 4096).unwrap().0, b"plain");
     }
 
     #[test]

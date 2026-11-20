@@ -263,9 +263,9 @@ TianShell 是会话和记忆，不是一个用完就丢掉的 SSH 客户端。�
 | --- | --- | --- |
 | `sftp_list` | `host`，可选 `path`（默认 `/`） | 列目录。符号链接的 `permissions` 仍是链接本身；`mode` 是它指向的文件或目录的权限位。断链时 `mode` 仍是链接上的 `0777` |
 | `sftp_mkdir` | `host`，`path` | 拒绝空路径和 `/` |
-| `sftp_read` | `host`，`path`，可选 `max_bytes` | UTF-8，默认 131072，最大 262144。含 NUL、不是 UTF-8，或是私钥内容时会拒绝，不会返回替换字符 |
+| `sftp_read` | `host`，`path`，可选 `max_bytes` | 只读普通文件。管道、设备和套接字会拒绝。UTF-8，默认 131072，最大 262144。含 NUL、不是 UTF-8，或是私钥内容时会拒绝，不会返回替换字符 |
 | `sftp_write` | `host`，`path`，`content` | 覆盖 UTF-8，上限 512KB |
-| `sftp_download` | `host`，`path`，可选 `max_bytes` | 返回 base64，最大 256KB。拒绝私钥 |
+| `sftp_download` | `host`，`path`，可选 `max_bytes` | 只读普通文件。返回 base64，最大 256KB。拒绝私钥 |
 | `sftp_upload` | `host`，`path`，`content_base64` | 解码后上限 512KB。拒绝私钥。响应里不回显内容 |
 
 `system_metrics` 也是另开一条连接做一次采样（CPU、内存、Swap、磁盘、网卡、Top 进程），CPU 和网卡速率仍用两次采样夹大约 200ms。界面标签上的监控走该标签的第二条 SSH：每次只跑一遍探针，用上一拍的差值算 CPU 和网卡速率，不在终端线程上等待。

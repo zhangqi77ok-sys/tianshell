@@ -87,12 +87,17 @@ fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 
-/// 普通下载不能把目录当成文件。打包下载可以针对目录，也可以针对单个文件。
-pub fn file_download_rejected(kind: DownloadKind, is_dir: bool) -> Option<&'static str> {
-    if kind == DownloadKind::File && is_dir {
-        Some("这是目录，请用打包下载")
-    } else {
-        None
+/// 普通下载只接受普通文件。目录仍提示改走打包。
+/// 管道、设备和套接字不能打开来读：管道会堵住这条连接，设备则没有结束。
+/// 打包下载不在这里拒绝。
+pub fn file_download_rejected(kind: DownloadKind, node: crate::sftp::ReadNode) -> Option<&'static str> {
+    if kind != DownloadKind::File {
+        return None;
+    }
+    match node {
+        crate::sftp::ReadNode::Regular => None,
+        crate::sftp::ReadNode::Directory => Some("这是目录，请用打包下载"),
+        crate::sftp::ReadNode::Special => Some("这不是普通文件，没有开始下载"),
     }
 }
 
@@ -234,10 +239,12 @@ mod tests {
 
     #[test]
     fn file_download_rejects_a_directory() {
-        assert_eq!(file_download_rejected(DownloadKind::File, true), Some("这是目录，请用打包下载"));
-        assert_eq!(file_download_rejected(DownloadKind::File, false), None);
-        assert_eq!(file_download_rejected(DownloadKind::Archive, true), None);
-        assert_eq!(file_download_rejected(DownloadKind::Archive, false), None);
+        use crate::sftp::ReadNode;
+        assert_eq!(file_download_rejected(DownloadKind::File, ReadNode::Directory), Some("这是目录，请用打包下载"));
+        assert_eq!(file_download_rejected(DownloadKind::File, ReadNode::Regular), None);
+        assert_eq!(file_download_rejected(DownloadKind::File, ReadNode::Special), Some("这不是普通文件，没有开始下载"));
+        assert_eq!(file_download_rejected(DownloadKind::Archive, ReadNode::Directory), None);
+        assert_eq!(file_download_rejected(DownloadKind::Archive, ReadNode::Special), None);
     }
 
     /// GNU tar 1.35：`tar -C parent '-safe'` 退出码 64，把名字当成 `--safe`。
