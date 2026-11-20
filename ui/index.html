@@ -56,6 +56,7 @@
             <label class="toggle-chip" title="同步向所有已打开终端发送快捷键与命令">
               <input id="broadcast-toggle" type="checkbox" /> 广播输入
             </label>
+            <button id="quick-ops-toggle" class="btn-tool active" type="button" title="折叠/展开常用运维快捷指令条">⚡ 快捷</button>
             <button id="search-toggle" type="button" title="搜索终端内容 (Ctrl+F)">查找</button>
             <button id="theme-toggle" type="button" title="切换暗/亮主题">主题</button>
             <button id="inspector-toggle" type="button" title="折叠/展开右侧监控">监控</button>
@@ -64,6 +65,15 @@
 
         <section class="split-wrap" id="split-wrap">
           <div class="terminal-pane" id="terminal-pane">
+            <div id="quick-ops-bar" class="quick-ops-bar">
+              <div class="quick-ops-header">
+                <span class="quick-ops-label">⚡ 运维动作</span>
+              </div>
+              <div id="quick-ops-list" class="quick-ops-list"></div>
+              <div class="quick-ops-tail">
+                <button id="quick-ops-add" class="btn-quick-add" type="button" title="新增自定义快捷命令">+ 自定义</button>
+              </div>
+            </div>
             <div class="search-bar hidden" id="search-bar">
               <input id="search-input" type="search" placeholder="在当前终端查找…" />
               <button id="search-prev" type="button">上一个</button>

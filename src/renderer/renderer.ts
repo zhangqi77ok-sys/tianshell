@@ -119,8 +119,77 @@ function handleWsEvent(msg: Record<string, unknown>): void {
   }
 }
 
+interface QuickOpItem {
+  icon: string;
+  name: string;
+  category: string;
+  command: string;
+  isBuiltin?: boolean;
+}
+
+const BUILTIN_QUICK_OPS: QuickOpItem[] = [
+  { icon: '📊', name: '负载/内存', category: '诊断', command: 'uptime && free -h', isBuiltin: true },
+  { icon: '🔌', name: '监听端口', category: '网络', command: 'ss -tulnp 2>/dev/null || netstat -tlpn', isBuiltin: true },
+  { icon: '💾', name: '磁盘空间', category: '磁盘', command: 'df -hT', isBuiltin: true },
+  { icon: '⚡', name: '内存Top10', category: '进程', command: 'ps aux --sort=-%mem | head -n 11', isBuiltin: true },
+  { icon: '🚨', name: '系统错误', category: '日志', command: 'journalctl -p 3 -xb -n 30 --no-pager 2>/dev/null || dmesg | tail -n 30', isBuiltin: true },
+  { icon: '🐳', name: 'Docker状态', category: '容器', command: 'docker ps -a 2>/dev/null || podman ps -a', isBuiltin: true },
+];
+
+async function renderQuickOpsBar(): Promise<void> {
+  const container = document.getElementById('quick-ops-list');
+  if (!container) return;
+  container.textContent = '';
+
+  let userSnippets: { id: string; name: string; category: string; command: string }[] = [];
+  try {
+    userSnippets = await webApi.listSnippets();
+  } catch {
+    // fallback
+  }
+
+  const items: QuickOpItem[] = [...BUILTIN_QUICK_OPS];
+  for (const s of userSnippets) {
+    items.push({
+      icon: '⚡',
+      name: s.name,
+      category: s.category || '自定义',
+      command: s.command,
+      isBuiltin: false,
+    });
+  }
+
+  for (const op of items) {
+    const chip = document.createElement('div');
+    chip.className = 'quick-chip';
+    chip.title = `${op.name} [${op.category}]:\n${op.command}`;
+
+    const iconSpan = document.createElement('span');
+    iconSpan.className = 'chip-icon';
+    iconSpan.textContent = op.icon;
+
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'chip-name';
+    nameSpan.textContent = op.name;
+
+    chip.append(iconSpan, nameSpan);
+    chip.addEventListener('click', () => {
+      if (!activeId) {
+        showToast('请先打开或选中一个终端会话');
+        return;
+      }
+      sendInput(`${op.command}\n`);
+      showToast(`已发送: ${op.name}`);
+    });
+    container.appendChild(chip);
+  }
+}
+
 async function refreshLive(kind: string): Promise<void> {
-  if (kind === 'snippets' || kind === 'disk') await monCtrl.refreshSnippets();
+  if (kind === 'snippets' || kind === 'disk') {
+    await monCtrl.refreshSnippets();
+    void renderQuickOpsBar();
+  }
   if (kind === 'history' || kind === 'disk') await monCtrl.refreshHistory();
   if (kind === 'settings' || kind === 'disk') await applySettings();
   if (kind === 'tunnels' || kind === 'disk') monCtrl.refreshTunnelsIfOpen();
@@ -493,6 +562,16 @@ function bindGlobalUi(): void {
   document.getElementById('split-single')?.addEventListener('click', () => setSplitMode('single'));
   document.getElementById('split-horizontal')?.addEventListener('click', () => setSplitMode('horizontal'));
   document.getElementById('split-vertical')?.addEventListener('click', () => setSplitMode('vertical'));
+  document.getElementById('quick-ops-toggle')?.addEventListener('click', () => {
+    const bar = document.getElementById('quick-ops-bar');
+    const btn = document.getElementById('quick-ops-toggle');
+    const isHidden = bar?.classList.toggle('hidden');
+    btn?.classList.toggle('active', !isHidden);
+    fitVisibleTabs();
+  });
+  document.getElementById('quick-ops-add')?.addEventListener('click', () => {
+    (document.getElementById('snippet-dialog') as HTMLDialogElement)?.showModal();
+  });
   document.getElementById('open-tunnels')?.addEventListener('click', () => void monCtrl.openTunnelModal());
   document.getElementById('inspector-toggle')?.addEventListener('click', () => document.getElementById('inspector')?.classList.toggle('hidden'));
   document.getElementById('theme-toggle')?.addEventListener('click', async () => {
@@ -657,6 +736,7 @@ async function boot(): Promise<void> {
     if (status) status.textContent = 'MCP 地址暂时读不到';
   }
   await refreshLive('disk');
+  void renderQuickOpsBar();
 }
 
 void boot();
