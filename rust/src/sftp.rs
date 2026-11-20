@@ -106,9 +106,22 @@ pub fn list_dir(sess: &Session, dir_path: &str) -> Result<Vec<SftpEntry>, SftpEr
 }
 
 pub const MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
+pub const UPLOAD_TOO_BIG_MESSAGE: &str = "上传内容超过 64MB";
 
 pub fn upload_too_big(len: usize) -> bool {
     len > MAX_UPLOAD_BYTES
+}
+
+/// `Content-Length` 已经声明超限时，不必把正文读进内存。
+/// 头缺失或不是数字时返回 false，交给后面的读取上限处理。
+pub fn declared_length_too_big(header: Option<&str>) -> bool {
+    let Some(text) = header.map(str::trim).filter(|text| !text.is_empty()) else {
+        return false;
+    };
+    let Ok(len) = text.parse::<u64>() else {
+        return false;
+    };
+    usize::try_from(len).map(upload_too_big).unwrap_or(true)
 }
 
 pub fn read_text(sess: &Session, file_path: &str, max_bytes: usize) -> Result<String, SftpError> {
@@ -275,5 +288,11 @@ mod tests {
         assert!(!upload_too_big(0));
         assert!(!upload_too_big(MAX_UPLOAD_BYTES));
         assert!(upload_too_big(MAX_UPLOAD_BYTES + 1));
+        assert!(!declared_length_too_big(None));
+        assert!(!declared_length_too_big(Some("")));
+        assert!(!declared_length_too_big(Some("nope")));
+        assert!(!declared_length_too_big(Some(&MAX_UPLOAD_BYTES.to_string())));
+        assert!(declared_length_too_big(Some(&(MAX_UPLOAD_BYTES as u64 + 1).to_string())));
+        assert!(declared_length_too_big(Some(&u64::MAX.to_string())));
     }
 }

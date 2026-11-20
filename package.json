@@ -12,7 +12,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test src/renderer/session-logic.test.ts src/renderer/sftp-logic.test.ts"
+    "test": "node --experimental-strip-types --test src/renderer/session-logic.test.ts src/renderer/sftp-logic.test.ts src/renderer/api-client.test.ts"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",

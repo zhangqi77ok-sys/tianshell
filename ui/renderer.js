@@ -6142,9 +6142,26 @@ WARNING: This link could potentially be dangerous`)) {
       headers.set("content-type", "application/json");
     }
     const resp = await fetch(path, { ...init, headers });
-    const json = await resp.json();
-    if (!json.ok) throw new Error(json.error || `\u8BF7\u6C42\u5931\u8D25 (${resp.status})`);
-    return json.data;
+    return readApiResult(resp.status, await resp.text());
+  }
+  function readApiResult(status, raw) {
+    const body = raw.trim();
+    if (body.startsWith("{")) {
+      try {
+        const parsed = JSON.parse(body);
+        if (parsed && typeof parsed === "object" && typeof parsed.ok === "boolean") {
+          if (!parsed.ok) {
+            const message = typeof parsed.error === "string" && parsed.error ? parsed.error : `\u8BF7\u6C42\u5931\u8D25 (${status})`;
+            throw new Error(message);
+          }
+          return parsed.data;
+        }
+      } catch (err) {
+        if (err instanceof Error && !(err instanceof SyntaxError)) throw err;
+      }
+    }
+    if (status === 413) throw new Error("\u4E0A\u4F20\u5185\u5BB9\u8D85\u8FC7 64MB");
+    throw new Error(body || `\u8BF7\u6C42\u5931\u8D25 (${status})`);
   }
   var webApi = {
     getHosts: () => apiRequest("/api/hosts"),
