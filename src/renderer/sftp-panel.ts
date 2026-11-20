@@ -1,6 +1,7 @@
 import type { SftpEntry, TransferTask } from '../shared/types.js';
 import { webApi } from './api-client.js';
 import { editorWriteGuard } from './session-logic.js';
+import { editorSaveBlock, keepEditorOpen, parseOctalMode, planUploads } from './sftp-logic.js';
 
 export interface SftpControllerDeps {
   getActiveSshId: () => string | null;
@@ -54,6 +55,9 @@ export class SftpController {
   private editingPath: string | null = null;
   private editingSession: string | null = null;
   private editorSaving = false;
+  private editorTruncated = false;
+  private editorClosePending = false;
+  private listedNames: string[] = [];
 
   private readonly pathInput = document.getElementById('sftp-path') as HTMLInputElement;
   private readonly breadcrumbsEl = document.getElementById('sftp-breadcrumbs') as HTMLDivElement;
@@ -107,6 +111,7 @@ export class SftpController {
     }
     if (!sid) {
       this.currentDir = '/';
+      this.listedNames = [];
       this.showListingMessage('空闲。连上 SSH 会话后，这里显示该会话的当前目录。', true);
       if (this.breadcrumbsEl) this.breadcrumbsEl.textContent = '';
       this.deps.onDirChange?.('/');
@@ -199,6 +204,7 @@ export class SftpController {
       this.renderBreadcrumbs(this.currentDir);
       this.showPathInput(false);
       this.deps.onDirChange?.(this.currentDir);
+      this.listedNames = list.map((entry) => entry.name);
       const visible = list.filter((e) => this.showHidden || !e.name.startsWith('.'));
       const sig = `${sid}|${this.currentDir}|${visible.map((e) => `${e.path}:${e.size}:${e.mtimeMs}:${e.mode}`).join('|')}`;
       if (sig === this.lastSig) return;
@@ -206,6 +212,7 @@ export class SftpController {
       this.renderEntries(visible);
     } catch (err) {
       if (!this.listingCurrent(sid, ticket)) return;
+      this.listedNames = [];
       const message = err instanceof Error ? err.message : 'SFTP 读取失败';
       this.showListingMessage(message, true);
     } finally {
@@ -312,6 +319,8 @@ export class SftpController {
       const res = await webApi.sftpReadText(sid, remotePath);
       this.editingPath = remotePath;
       this.editingSession = sid;
+      this.editorTruncated = res.truncated;
+      this.setSaveEnabled(!res.truncated);
       const fileName = remotePath.split('/').pop() || '文件';
       const meta = getFileMeta(fileName, false);
       if (this.editorFileIcon) this.editorFileIcon.textContent = meta.icon;
@@ -360,7 +369,19 @@ export class SftpController {
     this.editorDirtyBadge.textContent = dirty ? '● 未保存' : '✓ 已保存';
   }
 
+  private setSaveEnabled(enabled: boolean): void {
+    const saveBtn = document.getElementById('save-editor-btn') as HTMLButtonElement | null;
+    if (!saveBtn) return;
+    saveBtn.disabled = !enabled;
+    saveBtn.textContent = enabled ? '保存写回 (Ctrl+S)' : '不能写回';
+  }
+
   private async saveEditorContent(): Promise<boolean> {
+    const blocked = editorSaveBlock(this.editorTruncated);
+    if (blocked) {
+      this.deps.toast(blocked, 'error');
+      return false;
+    }
     const decision = editorWriteGuard(this.editingSession, this.deps.getActiveSshId(), this.editorSaving);
     if (decision === 'idle' || decision === 'busy' || !this.editingPath || !this.editingSession) return false;
     if (decision === 'disconnected') {
@@ -385,14 +406,28 @@ export class SftpController {
     }
   }
 
-  private async handleCloseEditor(): Promise<void> {
-    if (this.isEditorDirty) {
-      const ok = await this.deps.confirm('放弃未保存的修改？', '关闭后，这次编辑不会写回远端。', '放弃修改');
-      if (!ok) return;
-    }
+  private finishEditor(): void {
     this.editingPath = null;
     this.editingSession = null;
+    this.editorTruncated = false;
+    this.isEditorDirty = false;
+    this.setSaveEnabled(true);
     this.editorDlg.close();
+  }
+
+  private async handleCloseEditor(): Promise<void> {
+    if (this.editorClosePending) return;
+    if (this.isEditorDirty) {
+      this.editorClosePending = true;
+      let discard = false;
+      try {
+        discard = await this.deps.confirm('放弃未保存的修改？', '关闭后，这次编辑不会写回远端。', '放弃修改');
+      } finally {
+        this.editorClosePending = false;
+      }
+      if (keepEditorOpen(true, discard)) return;
+    }
+    this.finishEditor();
   }
 
   private async triggerDownload(remotePath: string): Promise<void> {
@@ -455,8 +490,8 @@ export class SftpController {
     if (!sid) return;
     const raw = await this.deps.promptText('输入八进制权限 (例如 755 或 644)', entry.mode.toString(8));
     if (!raw) return;
-    const mode = Number.parseInt(raw.trim(), 8);
-    if (Number.isNaN(mode)) return this.deps.toast('权限格式无效', 'error');
+    const mode = parseOctalMode(raw);
+    if (mode === null) return this.deps.toast('权限格式无效，请用三位或四位八进制', 'error');
     try {
       await webApi.sftpChmod(sid, entry.path, mode);
       await this.load(this.currentDir);
@@ -485,19 +520,44 @@ export class SftpController {
   private async uploadFiles(files: FileList | null): Promise<void> {
     const sid = this.deps.getActiveSshId();
     if (!sid || !files?.length) return;
-    const base = this.currentDir === '/' ? '' : this.currentDir;
+    const dir = this.currentDir;
     const batch = Array.from(files);
+    const plan = planUploads(dir, this.listedNames, batch.map((file) => ({ name: file.name, size: file.size })));
+    for (const item of plan.skipped) this.deps.toast(item.reason, 'error');
+    let send = plan.send;
+    if (plan.overwrite.length) {
+      const preview = plan.overwrite.slice(0, 6).join('、');
+      const more = plan.overwrite.length > 6 ? ` 等 ${plan.overwrite.length} 个` : '';
+      const ok = await this.deps.confirm(
+        `覆盖 ${plan.overwrite.length} 个同名文件？`,
+        `这些文件会被替换：${preview}${more}`,
+        '覆盖',
+      );
+      if (!ok) {
+        const skip = new Set(plan.overwrite);
+        send = send.filter((item) => !skip.has(item.name));
+        if (!send.length) {
+          this.deps.toast('没有上传，同名文件保持原样');
+          return;
+        }
+      }
+    }
+    if (!send.length) return;
+    const byName = new Map(batch.map((file) => [file.name, file]));
     let failed = 0;
     let firstError = '';
-    for (const file of batch) {
+    let uploaded = 0;
+    for (const item of send) {
+      const file = byName.get(item.name);
+      if (!file) continue;
       try {
-        await webApi.sftpUploadFile(sid, `${base}/${file.name}`, file);
+        await webApi.sftpUploadFile(sid, item.path, file);
+        uploaded += 1;
       } catch (err) {
         failed += 1;
         if (!firstError) firstError = err instanceof Error ? err.message : '上传失败';
       }
     }
-    const uploaded = batch.length - failed;
     if (failed === 0) {
       this.deps.toast(`已上传 ${uploaded} 个文件`);
       return;
@@ -669,12 +729,16 @@ export class SftpController {
       })();
     });
 
+    this.editorDlg.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      void this.handleCloseEditor();
+    });
     document.getElementById('cancel-editor')?.addEventListener('click', () => void this.handleCloseEditor());
     this.closeEditorBtn?.addEventListener('click', () => void this.handleCloseEditor());
     document.getElementById('editor-form')?.addEventListener('submit', async (e) => {
       e.preventDefault();
       const ok = await this.saveEditorContent();
-      if (ok) this.editorDlg.close();
+      if (ok) this.finishEditor();
     });
   }
 }
