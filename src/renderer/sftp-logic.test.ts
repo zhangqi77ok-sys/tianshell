@@ -7,6 +7,7 @@ import {
   keepEditorOpen,
   chmodPrompt,
   parseOctalMode,
+  transferRunningText,
   planUploads,
   remoteChildPath,
 } from './sftp-logic.ts';
@@ -19,6 +20,14 @@ test('删除符号链接不会说成递归删除目录', () => {
   assert.match(dir.body, /递归删除/);
   const file = deletePrompt('file', 'a.txt');
   assert.match(file.body, /文件会从远端删除/);
+});
+
+test('大小未知的下载不显示成已经完成', () => {
+  assert.equal(transferRunningText(0, 0), '已传输 0 字节');
+  assert.equal(transferRunningText(32768, 0), '已传输 32768 字节');
+  assert.equal(transferRunningText(500, 1000), '50%');
+  assert.equal(transferRunningText(1000, 1000), '100%');
+  assert.doesNotMatch(transferRunningText(32768, 0), /100%/);
 });
 
 test('符号链接的权限框说明改的是目标', () => {

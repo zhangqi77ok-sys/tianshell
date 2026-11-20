@@ -1,7 +1,7 @@
 import type { SftpEntry, TransferTask } from '../shared/types.js';
 import { webApi } from './api-client.js';
 import { editorWriteGuard } from './session-logic.js';
-import { chmodPrompt, deletePrompt, editorSaveBlock, failedLoadEffect, keepEditorOpen, parseOctalMode, planUploads } from './sftp-logic.js';
+import { chmodPrompt, deletePrompt, editorSaveBlock, failedLoadEffect, keepEditorOpen, parseOctalMode, planUploads, transferRunningText } from './sftp-logic.js';
 
 export interface SftpControllerDeps {
   getActiveSshId: () => string | null;
@@ -596,8 +596,8 @@ export class SftpController {
     for (const t of list) {
       const pill = document.createElement('span');
       pill.className = 'tx-pill mono';
-      const pct = t.total > 0 ? Math.min(100, Math.round((t.transferred / t.total) * 100)) : 100;
-      pill.textContent = `${t.direction === 'upload' ? '↑' : '↓'} ${t.filename} · ${t.status === 'done' ? '完成' : t.status === 'running' ? `${pct}%` : t.status}`;
+      const stateText = t.status === 'done' ? '完成' : t.status === 'running' ? transferRunningText(t.transferred, t.total) : t.status;
+      pill.textContent = `${t.direction === 'upload' ? '↑' : '↓'} ${t.filename} · ${stateText}`;
       if (t.status === 'running') {
         const cancel = document.createElement('button');
         cancel.type = 'button';

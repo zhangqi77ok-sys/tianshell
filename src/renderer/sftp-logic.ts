@@ -101,6 +101,18 @@ export function deletePrompt(kind: 'dir' | 'file' | 'symlink', name: string): De
   };
 }
 
+/**
+ * 正在传输时的进度文字。
+ * total 为 0 表示大小未知。以前直接显示 100%，文件还在下时看起来已经完成。
+ */
+export function transferRunningText(transferred: number, total: number): string {
+  if (total > 0) {
+    const pct = Math.min(100, Math.round((transferred / total) * 100));
+    return `${pct}%`;
+  }
+  return `已传输 ${transferred} 字节`;
+}
+
 /** 符号链接在列表里几乎总是 0777。权限框要说明改的是目标，默认值用目标的权限位。 */
 export function chmodPrompt(kind: 'dir' | 'file' | 'symlink'): string {
   if (kind === 'symlink') {
