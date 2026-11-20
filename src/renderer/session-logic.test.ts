@@ -5,7 +5,10 @@ import {
   broadcastRecipients,
   claimSingleFlight,
   editorWriteGuard,
+  inputDelivery,
   isCurrentGeneration,
+  LINK_DOWN_NOTICE_GAP_MS,
+  shouldNotifyLinkDown,
   keystrokeRecipients,
   nextFindIndex,
   pasteNeedsConfirm,
@@ -133,6 +136,16 @@ test('多行粘贴只执行第一次选择，取消后不能再提交', () => {
   assert.equal(pasteNeedsConfirm('echo a\r\necho b'), true);
   assert.equal(pasteNeedsConfirm('echo a\n'), false);
   assert.equal(pasteNeedsConfirm('echo a'), false);
+});
+
+test('工作台连接中断时输入不发出，并在间隔内只提示一次', () => {
+  assert.equal(inputDelivery(true, true), 'send');
+  assert.equal(inputDelivery(false, true), 'no-terminal');
+  assert.equal(inputDelivery(false, false), 'no-terminal');
+  assert.equal(inputDelivery(true, false), 'link-down');
+  assert.equal(shouldNotifyLinkDown(0, 1), true);
+  assert.equal(shouldNotifyLinkDown(1000, 1000 + LINK_DOWN_NOTICE_GAP_MS - 1), false);
+  assert.equal(shouldNotifyLinkDown(1000, 1000 + LINK_DOWN_NOTICE_GAP_MS), true);
 });
 
 test('编辑器只写回打开它的会话，监控只采用仍有效的最新结果', () => {

@@ -166,6 +166,23 @@ export function isCurrentGeneration(ticket: number, latest: number): boolean {
   return ticket > 0 && ticket === latest;
 }
 
+export type InputDelivery = 'send' | 'no-terminal' | 'link-down';
+
+/** 同一段断线里，输入失败只提示一次，避免每个按键都弹一条。 */
+export const LINK_DOWN_NOTICE_GAP_MS = 4000;
+
+/** 有接收终端且工作台连接开着才发送。连接中断和没有终端是两件不同的事。 */
+export function inputDelivery(haveRecipients: boolean, linkOpen: boolean): InputDelivery {
+  if (!haveRecipients) return 'no-terminal';
+  if (!linkOpen) return 'link-down';
+  return 'send';
+}
+
+export function shouldNotifyLinkDown(lastNotifiedAt: number, now: number, gapMs = LINK_DOWN_NOTICE_GAP_MS): boolean {
+  if (lastNotifiedAt <= 0) return true;
+  return now - lastNotifiedAt >= gapMs;
+}
+
 export type PasteDecision = 'send' | 'dismiss';
 
 /** 多行粘贴只认第一次选择。取消或 Esc 之后，残留的提交不能再把内容送进终端。 */
