@@ -11,7 +11,8 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test src/renderer/session-logic.test.ts"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",

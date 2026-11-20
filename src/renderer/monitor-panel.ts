@@ -1,11 +1,13 @@
-import type { CommandSnippet, PublicHost, ServerMetrics } from '../shared/types.js';
+import type { PublicHost, ServerMetrics } from '../shared/types.js';
 import { webApi } from './api-client.js';
 import { formatBytes } from './sftp-panel.js';
 
 export interface MonitorPanelDeps {
-  onSendCommand: (cmd: string) => void;
+  onFillCommand: (cmd: string) => void;
   getHosts: () => PublicHost[];
   toast: (msg: string) => void;
+  confirm: (title: string, body: string) => Promise<boolean>;
+  reloadQuickOps?: () => void;
 }
 
 export class MonitorAndToolsController {
@@ -24,7 +26,6 @@ export class MonitorAndToolsController {
   private readonly hostEl = document.getElementById('mon-host') as HTMLElement;
   private readonly disksEl = document.getElementById('mon-disks') as HTMLElement;
   private readonly procsEl = document.getElementById('mon-procs') as HTMLElement;
-  private readonly snippetsEl = document.getElementById('snippet-list') as HTMLElement;
   private readonly historyEl = document.getElementById('history-list') as HTMLElement;
   private historyQuery = '';
 
@@ -105,7 +106,28 @@ export class MonitorAndToolsController {
     }
 
     this.procsEl.textContent = '';
-    for (const p of metrics.processes.slice(0, 5)) {
+    const head = document.createElement('div');
+    head.className = 'proc-line proc-head';
+    const headName = document.createElement('span');
+    headName.className = 'metric-name';
+    headName.textContent = '进程';
+    const headCpu = document.createElement('span');
+    headCpu.className = 'metric-num';
+    headCpu.textContent = 'CPU';
+    const headMem = document.createElement('span');
+    headMem.className = 'metric-num';
+    headMem.textContent = '内存';
+    head.append(headName, headCpu, headMem);
+    this.procsEl.appendChild(head);
+    const processes = metrics.processes.slice(0, 8);
+    if (!processes.length) {
+      const empty = document.createElement('div');
+      empty.className = 'empty-muted';
+      empty.textContent = '这一拍没有进程数据。';
+      this.procsEl.appendChild(empty);
+      return;
+    }
+    for (const p of processes) {
       const row = document.createElement('div');
       row.className = 'proc-line';
       const name = document.createElement('span');
@@ -142,10 +164,11 @@ export class MonitorAndToolsController {
         return;
       }
       for (const row of rows) {
-        const card = document.createElement('button');
-        card.type = 'button';
+        const card = document.createElement('div');
         card.className = 'history-item';
-        card.title = `发送到终端: ${row.command}`;
+        card.tabIndex = 0;
+        card.title = '填入当前终端，不会直接执行';
+        card.setAttribute('role', 'button');
 
         const meta = document.createElement('div');
         meta.className = 'history-meta';
@@ -191,10 +214,14 @@ export class MonitorAndToolsController {
         cmd.textContent = row.command;
 
         card.append(meta, cmd, copyBtn);
-        card.addEventListener('click', () => {
+        const fill = () => {
           card.classList.add('card-activated');
           setTimeout(() => card.classList.remove('card-activated'), 250);
-          this.deps.onSendCommand(`${row.command}\r`);
+          this.deps.onFillCommand(row.command);
+        };
+        card.addEventListener('click', fill);
+        card.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter' && event.target === card) fill();
         });
         this.historyEl.appendChild(card);
       }
@@ -205,37 +232,6 @@ export class MonitorAndToolsController {
       empty.textContent = '命令历史由当前工作台保存。';
       this.historyEl.appendChild(empty);
     }
-  }
-
-  async refreshSnippets(): Promise<void> {
-    const list = await webApi.listSnippets();
-    this.snippetsEl.textContent = '';
-    for (const item of list) this.renderSnippetCard(item);
-  }
-
-  private renderSnippetCard(item: CommandSnippet): void {
-    const card = document.createElement('div');
-    card.className = 'snippet-card';
-    const left = document.createElement('div');
-    const title = document.createElement('div');
-    title.textContent = `${item.name} [${item.category}]`;
-    const cmd = document.createElement('div');
-    cmd.className = 'mono host-meta';
-    cmd.textContent = item.command;
-    left.append(title, cmd);
-
-    const del = document.createElement('button');
-    del.type = 'button';
-    del.textContent = '删';
-    del.style.padding = '2px 6px';
-    del.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      await webApi.deleteSnippet(item.id);
-      await this.refreshSnippets();
-    });
-    card.append(left, del);
-    card.addEventListener('click', () => this.deps.onSendCommand(`${item.command}\n`));
-    this.snippetsEl.appendChild(card);
   }
 
   refreshTunnelsIfOpen(): void {
@@ -295,8 +291,17 @@ export class MonitorAndToolsController {
       del.type = 'button';
       del.textContent = '删除';
       del.addEventListener('click', async () => {
-        await webApi.deleteTunnel(r.id);
-        await this.renderTunnels();
+        const ok = await this.deps.confirm(
+          `删除隧道「${r.name}」？`,
+          r.active ? '这条转发还在运行，删除后会停掉。' : '这条转发规则会从本机移除。',
+        );
+        if (!ok) return;
+        try {
+          await webApi.deleteTunnel(r.id);
+          await this.renderTunnels();
+        } catch (err) {
+          this.deps.toast(err instanceof Error ? err.message : '删除隧道失败');
+        }
       });
       ops.append(toggle, del);
       row.append(info, ops);
@@ -321,7 +326,7 @@ export class MonitorAndToolsController {
         command: (document.getElementById('snip-cmd') as HTMLTextAreaElement).value,
       });
       snipDlg.close();
-      await this.refreshSnippets();
+      this.deps.reloadQuickOps?.();
     });
 
     const tunDlg = document.getElementById('tunnel-dialog') as HTMLDialogElement;

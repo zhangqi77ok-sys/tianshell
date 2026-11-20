@@ -1,11 +1,22 @@
 import type { HostGroup, PublicHost } from '../shared/types.js';
 import { webApi } from './api-client.js';
 
+export interface HostUiState {
+  connecting: boolean;
+  cancelling: boolean;
+  error: string | null;
+  selected: boolean;
+}
+
 export interface HostTreeDeps {
   onOpenHost: (hostId: string) => void;
+  onSelectHost?: (hostId: string) => void;
+  onCancelConnect?: (hostId: string) => void;
   toast: (msg: string) => void;
   promptText: (title: string, defaultVal?: string) => Promise<string | null>;
+  confirm: (title: string, body: string) => Promise<boolean>;
   getActiveHostIds?: () => Set<string>;
+  getHostUi?: (hostId: string) => HostUiState | undefined;
 }
 
 export class HostTreeController {
@@ -65,7 +76,12 @@ export class HostTreeController {
     const item = document.createElement('div');
     item.className = 'host-item';
     item.id = `host-${h.id}`;
+    const ui = this.deps.getHostUi?.(h.id);
     const isOnline = Boolean(this.deps.getActiveHostIds?.().has(h.id));
+    if (ui?.selected) item.classList.add('selected');
+    if (ui?.connecting) item.classList.add('connecting');
+    if (ui?.error) item.classList.add('failed');
+    item.setAttribute('aria-selected', ui?.selected ? 'true' : 'false');
     const left = document.createElement('div');
     const alias = document.createElement('div');
     alias.className = 'host-alias';
@@ -81,36 +97,66 @@ export class HostTreeController {
     meta.className = 'host-meta mono';
     meta.textContent = `${h.username}@${h.host}:${h.port}`;
     left.append(alias, meta);
+    if (ui?.error) {
+      const err = document.createElement('div');
+      err.className = 'host-error';
+      err.textContent = ui.error;
+      left.append(err);
+    }
 
     const ops = document.createElement('div');
     ops.className = 'host-actions';
     const connectBtn = document.createElement('button');
     connectBtn.type = 'button';
     connectBtn.className = 'host-connect-btn';
-    connectBtn.textContent = '连接';
-    connectBtn.title = '连接此远程主机';
-    connectBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      this.deps.onOpenHost(h.id);
-    });
+    if (ui?.cancelling) {
+      connectBtn.textContent = '取消中';
+      connectBtn.disabled = true;
+    } else if (ui?.connecting) {
+      connectBtn.textContent = '取消';
+      connectBtn.title = '取消这次连接';
+      connectBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.deps.onCancelConnect?.(h.id);
+      });
+    } else {
+      connectBtn.textContent = '连接';
+      connectBtn.title = '连接此远程主机';
+      connectBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.deps.onOpenHost(h.id);
+      });
+    }
     const editBtn = document.createElement('button');
     editBtn.type = 'button';
     editBtn.className = 'host-btn-icon';
     editBtn.textContent = '✏️';
     editBtn.title = '编辑主机配置';
+    editBtn.setAttribute('aria-label', '编辑主机');
     editBtn.addEventListener('click', (e) => { e.stopPropagation(); this.openModal(h); });
     const delBtn = document.createElement('button');
     delBtn.type = 'button';
     delBtn.className = 'host-btn-icon';
     delBtn.textContent = '🗑️';
     delBtn.title = '删除主机';
+    delBtn.setAttribute('aria-label', `删除主机 ${h.alias}`);
     delBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
-      await webApi.deleteHost(h.id);
-      await this.refresh();
+      const ok = await this.deps.confirm(
+        `删除主机「${h.alias}」？`,
+        '这台主机的配置会从本机移除，已保存的密码或私钥也会一起删掉。',
+      );
+      if (!ok) return;
+      try {
+        await webApi.deleteHost(h.id);
+        await this.refresh();
+      } catch (err) {
+        this.deps.toast(err instanceof Error ? err.message : '删除主机失败');
+      }
     });
     ops.append(connectBtn, editBtn, delBtn);
     item.append(left, ops);
+    item.addEventListener('click', () => this.deps.onSelectHost?.(h.id));
     item.addEventListener('dblclick', () => this.deps.onOpenHost(h.id));
     return item;
   }
@@ -133,11 +179,32 @@ export class HostTreeController {
     (document.getElementById('field-jump') as HTMLSelectElement).value = host?.jumpHostId ?? '';
     (document.getElementById('field-tags') as HTMLInputElement).value = (host?.tags ?? []).join(', ');
     (document.getElementById('field-notes') as HTMLInputElement).value = host?.notes ?? '';
-    (document.getElementById('field-password') as HTMLInputElement).value = '';
-    (document.getElementById('field-key') as HTMLTextAreaElement).value = '';
+    const password = document.getElementById('field-password') as HTMLInputElement;
+    const key = document.getElementById('field-key') as HTMLTextAreaElement;
+    const phrase = document.getElementById('field-passphrase') as HTMLInputElement;
+    password.value = '';
+    key.value = '';
+    phrase.value = '';
+    const pick = document.getElementById('pick-key-file') as HTMLInputElement | null;
+    if (pick) pick.value = '';
+    (document.getElementById('field-clear-fp') as HTMLInputElement).checked = false;
+    password.placeholder = host?.authType === 'password' ? '留空则继续使用已保存的密码' : '登录密码';
+    key.placeholder = host?.authType === 'privateKey'
+      ? '留空则继续使用已保存的私钥'
+      : '粘贴 OpenSSH ed25519、PKCS#8 或 PEM 私钥。加密私钥请填写下面的口令';
+    phrase.placeholder = host?.hasPassphrase ? '留空则继续使用已保存的口令' : '私钥口令，没有就留空';
+    this.setAuth(host?.authType ?? 'password');
     (document.getElementById('form-error') as HTMLElement).textContent = '';
     document.getElementById('clear-fp-row')?.classList.toggle('hidden', !host?.fingerprint);
     dlg.showModal();
+  }
+
+  private setAuth(auth: 'password' | 'privateKey'): void {
+    document.querySelectorAll<HTMLInputElement>('input[name="auth"]').forEach((radio) => {
+      radio.checked = radio.value === auth;
+    });
+    document.getElementById('password-field')?.classList.toggle('hidden', auth === 'privateKey');
+    document.getElementById('key-field')?.classList.toggle('hidden', auth !== 'privateKey');
   }
 
   private fillSelect(id: string, defaultLabel: string, opts: Array<{ value: string; label: string }>): void {

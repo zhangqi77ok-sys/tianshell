@@ -80,8 +80,8 @@ export const webApi = {
   updateSettings: (patch: Partial<AppSettings>) =>
     apiRequest<AppSettings>('/api/settings', { method: 'PUT', body: JSON.stringify(patch) }),
 
-  openSession: (payload: { kind: 'ssh' | 'local'; hostId?: string; cols?: number; rows?: number }) =>
-    apiRequest<ConnectInfo>('/api/sessions', { method: 'POST', body: JSON.stringify(payload) }),
+  openSession: (payload: { kind: 'ssh' | 'local'; hostId?: string; cols?: number; rows?: number }, signal?: AbortSignal) =>
+    apiRequest<ConnectInfo>('/api/sessions', { method: 'POST', body: JSON.stringify(payload), signal }),
   closeSession: (sessionId: string) =>
     apiRequest<boolean>(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' }),
 

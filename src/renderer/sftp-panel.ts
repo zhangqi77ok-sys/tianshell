@@ -5,6 +5,8 @@ export interface SftpControllerDeps {
   getActiveSshId: () => string | null;
   toast: (msg: string) => void;
   promptText: (title: string, defaultVal?: string) => Promise<string | null>;
+  confirm: (title: string, body: string, okLabel?: string) => Promise<boolean>;
+  onDirChange?: (dir: string) => void;
 }
 
 export function formatBytes(bytes: number): string {
@@ -43,6 +45,7 @@ function getFileMeta(name: string, isDir: boolean): { icon: string; cls: string 
 
 export class SftpController {
   private currentDir = '/';
+  private boundSession: string | null = null;
   private showHidden = false;
   private lastSig = '';
   private readonly transfers = new Map<string, TransferTask>();
@@ -85,23 +88,40 @@ export class SftpController {
     if (this.deps.getActiveSshId()) void this.load(this.currentDir);
   }
 
+  currentPath(): string {
+    return this.currentDir;
+  }
+
   syncSession(): void {
-    this.lastSig = '';
-    const active = Boolean(this.deps.getActiveSshId());
+    const sid = this.deps.getActiveSshId();
+    const switched = sid !== this.boundSession;
+    this.boundSession = sid;
+    const active = Boolean(sid);
     for (const id of ['sftp-up', 'sftp-path', 'sftp-edit-path', 'sftp-go', 'sftp-mkdir', 'sftp-upload', 'sftp-archive-current', 'sftp-refresh']) {
       const el = document.getElementById(id) as HTMLButtonElement | HTMLInputElement | null;
       if (el) el.disabled = !active;
     }
-    if (active) {
-      void this.load(this.currentDir, true);
-    } else {
-      this.lastSig = '';
-      this.tableEl.classList.add('hidden');
-      this.emptyEl.classList.remove('hidden');
-      this.emptyEl.textContent = '空闲。连上 SSH 会话后，这里显示该会话的当前目录。';
-      this.bodyEl.textContent = '';
+    if (!sid) {
+      this.currentDir = '/';
+      this.showListingMessage('空闲。连上 SSH 会话后，这里显示该会话的当前目录。', true);
       if (this.breadcrumbsEl) this.breadcrumbsEl.textContent = '';
+      this.deps.onDirChange?.('/');
+      return;
     }
+    if (switched) {
+      this.currentDir = '/';
+      this.showListingMessage('正在读取 / …', true);
+      this.deps.onDirChange?.('/');
+    }
+    void this.load(this.currentDir);
+  }
+
+  private showListingMessage(message: string, clearSig: boolean): void {
+    if (clearSig) this.lastSig = '';
+    this.bodyEl.textContent = '';
+    this.tableEl.classList.add('hidden');
+    this.emptyEl.classList.remove('hidden');
+    this.emptyEl.textContent = message;
   }
 
   private renderBreadcrumbs(dirPath: string): void {
@@ -161,23 +181,28 @@ export class SftpController {
     }
   }
 
-  async load(dirPath: string, quiet = false): Promise<void> {
+  async load(dirPath: string): Promise<void> {
     const sid = this.deps.getActiveSshId();
     if (!sid) return;
+    const requested = dirPath || '/';
     this.tableEl.classList.add('loading');
     try {
-      const list = await webApi.sftpList(sid, dirPath);
-      this.currentDir = dirPath || '/';
+      const list = await webApi.sftpList(sid, requested);
+      if (this.deps.getActiveSshId() !== sid) return;
+      this.currentDir = requested;
       this.pathInput.value = this.currentDir;
       this.renderBreadcrumbs(this.currentDir);
       this.showPathInput(false);
+      this.deps.onDirChange?.(this.currentDir);
       const visible = list.filter((e) => this.showHidden || !e.name.startsWith('.'));
-      const sig = `${this.currentDir}|${visible.map((e) => `${e.path}:${e.size}:${e.mtimeMs}:${e.mode}`).join('|')}`;
+      const sig = `${sid}|${this.currentDir}|${visible.map((e) => `${e.path}:${e.size}:${e.mtimeMs}:${e.mode}`).join('|')}`;
       if (sig === this.lastSig) return;
       this.lastSig = sig;
       this.renderEntries(visible);
     } catch (err) {
-      if (!quiet) this.deps.toast(err instanceof Error ? err.message : 'SFTP 读取失败');
+      if (this.deps.getActiveSshId() !== sid) return;
+      const message = err instanceof Error ? err.message : 'SFTP 读取失败';
+      this.showListingMessage(message, true);
     } finally {
       this.tableEl.classList.remove('loading');
     }
@@ -191,6 +216,12 @@ export class SftpController {
 
   private renderEntries(entries: SftpEntry[]): void {
     this.bodyEl.textContent = '';
+    if (!entries.length) {
+      this.tableEl.classList.add('hidden');
+      this.emptyEl.classList.remove('hidden');
+      this.emptyEl.textContent = '这个目录是空的。';
+      return;
+    }
     this.tableEl.classList.remove('hidden');
     this.emptyEl.classList.add('hidden');
     for (const entry of entries) {
@@ -323,7 +354,7 @@ export class SftpController {
       this.editorOriginalContent = this.editorContent.value;
       this.checkEditorDirty();
       this.deps.toast(`已写回远端文件: ${this.editingPath.split('/').pop()}`);
-      void this.load(this.currentDir, true);
+      void this.load(this.currentDir);
       return true;
     } catch (err) {
       this.deps.toast(err instanceof Error ? `保存失败: ${err.message}` : '保存失败');
@@ -331,11 +362,10 @@ export class SftpController {
     }
   }
 
-  private handleCloseEditor(): void {
+  private async handleCloseEditor(): Promise<void> {
     if (this.isEditorDirty) {
-      if (!window.confirm('当前文件存在未保存的修改，确定放弃修改并关闭吗？')) {
-        return;
-      }
+      const ok = await this.deps.confirm('放弃未保存的修改？', '关闭后，这次编辑不会写回远端。', '放弃修改');
+      if (!ok) return;
     }
     this.editorDlg.close();
   }
@@ -388,8 +418,18 @@ export class SftpController {
   private async deleteItem(entry: SftpEntry): Promise<void> {
     const sid = this.deps.getActiveSshId();
     if (!sid) return;
-    await webApi.sftpDelete(sid, entry.path);
-    await this.load(this.currentDir);
+    const isDir = entry.kind === 'dir';
+    const ok = await this.deps.confirm(
+      isDir ? `删除目录「${entry.name}」？` : `删除「${entry.name}」？`,
+      isDir ? '这个目录会递归删除，里面的文件和子目录都会去掉，而且不能恢复。' : '这个文件会从远端删除，不能恢复。',
+    );
+    if (!ok) return;
+    try {
+      await webApi.sftpDelete(sid, entry.path);
+      await this.load(this.currentDir);
+    } catch (err) {
+      this.deps.toast(err instanceof Error ? err.message : '删除失败');
+    }
   }
 
   private async uploadFiles(files: FileList | null): Promise<void> {
@@ -535,7 +575,7 @@ export class SftpController {
         this.updateEditorCursorInfo();
       } else if (e.key === 'Escape') {
         e.preventDefault();
-        this.handleCloseEditor();
+        void this.handleCloseEditor();
       }
     });
 
@@ -548,14 +588,18 @@ export class SftpController {
 
     this.editorReloadBtn?.addEventListener('click', () => {
       if (!this.editingPath) return;
-      if (this.isEditorDirty && !window.confirm('重新载入将覆盖未保存的修改，确定继续吗？')) {
-        return;
-      }
-      void this.openEditor(this.editingPath);
+      const path = this.editingPath;
+      void (async () => {
+        if (this.isEditorDirty) {
+          const ok = await this.deps.confirm('重新载入这个文件？', '未保存的修改会被远端内容覆盖。', '重新载入');
+          if (!ok) return;
+        }
+        await this.openEditor(path);
+      })();
     });
 
-    document.getElementById('cancel-editor')?.addEventListener('click', () => this.handleCloseEditor());
-    this.closeEditorBtn?.addEventListener('click', () => this.handleCloseEditor());
+    document.getElementById('cancel-editor')?.addEventListener('click', () => void this.handleCloseEditor());
+    this.closeEditorBtn?.addEventListener('click', () => void this.handleCloseEditor());
     document.getElementById('editor-form')?.addEventListener('submit', async (e) => {
       e.preventDefault();
       const ok = await this.saveEditorContent();

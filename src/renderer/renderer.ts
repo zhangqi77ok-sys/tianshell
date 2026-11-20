@@ -6,6 +6,7 @@ import type { ConnectInfo, ServerMetrics, TransferTask } from '../shared/types.j
 import { connectWs, resolveClientToken, webApi } from './api-client.js';
 import { HostTreeController } from './host-tree.js';
 import { MonitorAndToolsController } from './monitor-panel.js';
+import { broadcastRecipients, nextFindIndex, seedBroadcastChecks, type BroadcastTab } from './session-logic.js';
 import { SftpController } from './sftp-panel.js';
 
 interface TabState {
@@ -42,6 +43,47 @@ const TERM_THEME = {
   brightWhite: '#f2f2f2',
 };
 
+const TERM_THEME_LIGHT = {
+  background: '#f6f3ec',
+  foreground: '#1c1915',
+  cursor: '#1c1915',
+  cursorAccent: '#f6f3ec',
+  selectionBackground: '#c9daf8',
+  black: '#1c1915',
+  red: '#c2410c',
+  green: '#3f6212',
+  yellow: '#a16207',
+  blue: '#1d4ed8',
+  magenta: '#7e22ce',
+  cyan: '#0f766e',
+  white: '#44403c',
+  brightBlack: '#78716c',
+  brightRed: '#dc2626',
+  brightGreen: '#15803d',
+  brightYellow: '#ca8a04',
+  brightBlue: '#2563eb',
+  brightMagenta: '#a21caf',
+  brightCyan: '#0e7490',
+  brightWhite: '#1c1915',
+};
+
+function termTheme(): typeof TERM_THEME {
+  return document.documentElement.getAttribute('data-theme') === 'light' ? TERM_THEME_LIGHT : TERM_THEME;
+}
+
+function applyTermTheme(): void {
+  const theme = termTheme();
+  for (const tab of tabs.values()) tab.term.options.theme = theme;
+}
+
+function syncThemeToggle(): void {
+  const btn = document.getElementById('theme-toggle');
+  if (!btn) return;
+  const light = document.documentElement.getAttribute('data-theme') === 'light';
+  btn.textContent = light ? '亮色' : '暗色';
+  btn.title = light ? '当前是亮色，点击改成暗色' : '当前是暗色，点击改成亮色';
+}
+
 type SplitMode = 'single' | 'horizontal' | 'vertical';
 type ViewMode = 'terminal' | 'sftp' | 'monitor';
 let currentView: ViewMode = 'terminal';
@@ -50,13 +92,60 @@ let secondaryId: string | null = null;
 let activeId: string | null = null;
 let fontSize = 14;
 const tabs = new Map<string, TabState>();
-const pendingConnections = new Map<string, { alias: string; host?: string; port?: number }>();
+interface PendingConnect {
+  alias: string;
+  detail: string;
+  abort: AbortController;
+  cancelled: boolean;
+}
+const pendingConnections = new Map<string, PendingConnect>();
+const cancelledHostIds = new Set<string>();
+const hostErrors = new Map<string, string>();
+const broadcastChecked = new Set<string>();
+let selectedHostId: string | null = null;
 const toastEl = document.getElementById('toast') as HTMLElement;
+let toastTimer = 0;
 
-function showToast(msg: string): void {
+function markSelectedHost(hostId: string | null): void {
+  selectedHostId = hostId;
+  document.querySelectorAll('.host-item').forEach((el) => {
+    const selected = hostId !== null && el.id === `host-${hostId}`;
+    el.classList.toggle('selected', selected);
+    el.setAttribute('aria-selected', selected ? 'true' : 'false');
+  });
+}
+
+function showToast(msg: string, kind: 'info' | 'error' = 'info'): void {
+  window.clearTimeout(toastTimer);
   toastEl.textContent = msg;
+  toastEl.classList.toggle('error', kind === 'error');
   toastEl.classList.add('show');
-  setTimeout(() => toastEl.classList.remove('show'), 2600);
+  toastTimer = window.setTimeout(() => toastEl.classList.remove('show'), kind === 'error' ? 4600 : 2200);
+}
+
+function confirmAction(title: string, body: string, okLabel = '删除'): Promise<boolean> {
+  const dlg = document.getElementById('confirm-dialog') as HTMLDialogElement;
+  const form = document.getElementById('confirm-form') as HTMLFormElement;
+  const ok = document.getElementById('confirm-ok') as HTMLButtonElement;
+  (document.getElementById('confirm-title') as HTMLElement).textContent = title;
+  (document.getElementById('confirm-body') as HTMLElement).textContent = body;
+  ok.textContent = okLabel;
+  return new Promise((resolve) => {
+    const onCancel = () => finish(false);
+    const finish = (value: boolean) => {
+      dlg.removeEventListener('cancel', onCancel);
+      dlg.close();
+      form.onsubmit = null;
+      resolve(value);
+    };
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      finish(true);
+    };
+    (document.getElementById('cancel-confirm') as HTMLElement).onclick = () => finish(false);
+    dlg.addEventListener('cancel', onCancel);
+    dlg.showModal();
+  });
 }
 
 function promptText(title: string, defaultVal = ''): Promise<string | null> {
@@ -84,19 +173,35 @@ const sftpCtrl = new SftpController({
   },
   toast: showToast,
   promptText,
+  confirm: confirmAction,
+  onDirChange: () => updateSessionContext(),
 });
 
 const treeCtrl = new HostTreeController({
-  onOpenHost: (hostId) => void openSshTab(hostId),
+  onOpenHost: (hostId) => void openSshTab(hostId, true),
+  onSelectHost: (hostId) => markSelectedHost(hostId),
+  onCancelConnect: (hostId) => cancelConnect(hostId),
   toast: showToast,
   promptText,
-  getActiveHostIds: () => new Set(Array.from(tabs.values()).map(t => t.info.hostId).filter(Boolean) as string[]),
+  confirm: confirmAction,
+  getActiveHostIds: () => new Set(Array.from(tabs.values()).filter((t) => !t.closed).map((t) => t.info.hostId).filter(Boolean) as string[]),
+  getHostUi: (hostId) => {
+    const pending = pendingConnections.get(hostId);
+    return {
+      connecting: Boolean(pending) && !pending?.cancelled,
+      cancelling: Boolean(pending?.cancelled),
+      error: hostErrors.get(hostId) ?? null,
+      selected: selectedHostId === hostId,
+    };
+  },
 });
 
 const monCtrl = new MonitorAndToolsController({
-  onSendCommand: (cmd) => sendInput(cmd),
+  onFillCommand: (cmd) => fillCommand(cmd),
   getHosts: () => treeCtrl.hosts,
   toast: showToast,
+  confirm: confirmAction,
+  reloadQuickOps: () => { void renderQuickOpsBar(); },
 });
 
 function handleWsEvent(msg: Record<string, unknown>): void {
@@ -107,7 +212,16 @@ function handleWsEvent(msg: Record<string, unknown>): void {
   } else if ((type === 'term:closed' || type === 'session:closed') && typeof msg.sessionId === 'string') {
     markClosed(msg.sessionId);
   } else if (type === 'session:opened' && msg.session && typeof msg.session === 'object') {
-    const info = msg.session as ConnectInfo;
+    const info = msg.session as ConnectInfo & { hostId?: string };
+    if (info.hostId && cancelledHostIds.has(info.hostId)) {
+      cancelledHostIds.delete(info.hostId);
+      pendingConnections.delete(info.hostId);
+      void webApi.closeSession(info.sessionId);
+      renderTabs();
+      treeCtrl.render();
+      if (tabs.size === 0) showIdleEmpty();
+      return;
+    }
     if (info.sessionId) createTermInstance(info);
   } else if (type === 'metrics:update' && typeof msg.sessionId === 'string') {
     const tab = tabs.get(msg.sessionId);
@@ -127,6 +241,7 @@ interface QuickOpItem {
   category: string;
   command: string;
   isBuiltin?: boolean;
+  id?: string;
 }
 
 const BUILTIN_QUICK_OPS: QuickOpItem[] = [
@@ -158,6 +273,7 @@ async function renderQuickOpsBar(): Promise<void> {
       category: s.category || '自定义',
       command: s.command,
       isBuiltin: false,
+      id: s.id,
     });
   }
 
@@ -175,13 +291,34 @@ async function renderQuickOpsBar(): Promise<void> {
     nameSpan.textContent = op.name;
 
     chip.append(iconSpan, nameSpan);
+    if (op.id) {
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'chip-del';
+      del.textContent = '×';
+      del.title = `删除「${op.name}」`;
+      del.setAttribute('aria-label', `删除快捷命令 ${op.name}`);
+      del.addEventListener('click', (event) => {
+        event.stopPropagation();
+        void (async () => {
+          const ok = await confirmAction(`删除快捷命令「${op.name}」？`, '这条命令会从本机的快捷命令里移除。');
+          if (!ok || !op.id) return;
+          try {
+            await webApi.deleteSnippet(op.id);
+            await renderQuickOpsBar();
+          } catch (err) {
+            showToast(err instanceof Error ? err.message : '删除快捷命令失败', 'error');
+          }
+        })();
+      });
+      chip.append(del);
+    }
     chip.addEventListener('click', () => {
       if (!activeId) {
-        showToast('请先打开或选中一个终端会话');
+        showToast('请先打开或选中一个终端会话', 'error');
         return;
       }
       sendInput(`${op.command}\n`);
-      showToast(`已发送: ${op.name}`);
       document.getElementById('nav-ops-menu')?.classList.add('hidden');
       switchView('terminal');
     });
@@ -191,7 +328,6 @@ async function renderQuickOpsBar(): Promise<void> {
 
 async function refreshLive(kind: string): Promise<void> {
   if (kind === 'snippets' || kind === 'disk') {
-    await monCtrl.refreshSnippets();
     void renderQuickOpsBar();
   }
   if (kind === 'history' || kind === 'disk') await monCtrl.refreshHistory();
@@ -202,10 +338,42 @@ async function refreshLive(kind: string): Promise<void> {
 
 const ws = connectWs(handleWsEvent, () => { void refreshLive('disk'); });
 
+function tabModels(): BroadcastTab[] {
+  return Array.from(tabs.entries()).map(([id, tab]) => ({
+    id,
+    kind: tab.info.kind === 'local' ? 'local' : 'ssh',
+    closed: tab.closed,
+  }));
+}
+
+function dispatchInput(ids: string[], data: string): void {
+  if (!ids.length || ws.readyState !== WebSocket.OPEN) return;
+  if (ids.length === 1) {
+    ws.send(JSON.stringify({ type: 'term:input', sessionId: ids[0], data }));
+    return;
+  }
+  ws.send(JSON.stringify({ type: 'term:broadcast', sessionIds: ids, data }));
+}
+
 function sendInput(data: string): void {
-  if (!activeId || ws.readyState !== WebSocket.OPEN) return;
-  const broadcast = (document.getElementById('broadcast-toggle') as HTMLInputElement).checked;
-  ws.send(JSON.stringify(broadcast ? { type: 'term:broadcast', sessionIds: Array.from(tabs.keys()), data } : { type: 'term:input', sessionId: activeId, data }));
+  const enabled = (document.getElementById('broadcast-toggle') as HTMLInputElement).checked;
+  dispatchInput(broadcastRecipients(activeId, tabModels(), Array.from(broadcastChecked), enabled), data);
+}
+
+function sendToActive(data: string): void {
+  dispatchInput(broadcastRecipients(activeId, tabModels(), [], false), data);
+}
+
+function fillCommand(cmd: string): void {
+  const text = cmd.replace(/[\r\n]+$/, '');
+  if (!text) return;
+  switchView('terminal');
+  document.getElementById('nav-ops-menu')?.classList.add('hidden');
+  if (!activeId || tabs.get(activeId)?.closed) {
+    showToast('先打开一个仍连接的终端，再把命令填进去', 'error');
+    return;
+  }
+  sendToActive(text);
 }
 
 function showTerminalContextMenu(x: number, y: number, sessionId: string): void {
@@ -298,9 +466,7 @@ function createTermInstance(info: ConnectInfo): void {
     if (t && t.term.hasSelection()) {
       const sel = t.term.getSelection();
       if (sel && sel.trim().length > 0) {
-        void navigator.clipboard.writeText(sel).then(() => {
-          showToast(`已自动复制 ${sel.length} 字符`);
-        }).catch(() => {});
+        void navigator.clipboard.writeText(sel).catch(() => {});
       }
     }
   });
@@ -329,7 +495,7 @@ function createTermInstance(info: ConnectInfo): void {
     // 本地管道终端开启换行归位；远端 SSH PTY 自己发 CR，不能再转换以免打乱网格
     convertEol: info.kind === 'local',
     scrollback: 8000,
-    theme: TERM_THEME,
+    theme: termTheme(),
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
@@ -397,29 +563,51 @@ function updateNavHostBadge(tab: TabState | undefined): void {
     return;
   }
 
+  const who = tab.info.kind === 'local' ? '本机终端' : `${tab.info.username}@${tab.info.host}`;
   if (tab.closed) {
     dot.className = 'status-dot closed';
     aliasEl.textContent = tab.info.kind === 'local' ? '本机终端' : tab.info.alias;
-    ipEl.textContent = tab.info.kind === 'local' ? '(Local - 已断开)' : `(${tab.info.host} - 已断开)`;
+    ipEl.textContent = `${who} 已断开`;
   } else {
     dot.className = 'status-dot connected';
     aliasEl.textContent = tab.info.kind === 'local' ? '本机终端' : tab.info.alias;
-    ipEl.textContent = tab.info.kind === 'local' ? '(Local)' : `(${tab.info.host})`;
+    ipEl.textContent = who;
   }
+}
+
+function updateSessionContext(): void {
+  const el = document.getElementById('session-context');
+  const tab = activeId ? tabs.get(activeId) : undefined;
+  updateNavHostBadge(tab);
+  if (!el) return;
+  if (!tab) {
+    el.textContent = '没有选中的会话';
+    return;
+  }
+  const who = tab.info.kind === 'local' ? '本机终端' : `${tab.info.username}@${tab.info.host}`;
+  let text = tab.closed ? `${who} · 已断开` : who;
+  if (currentView === 'sftp' && tab.info.kind === 'ssh' && !tab.closed) {
+    text += ` · ${sftpCtrl.currentPath()}`;
+  }
+  el.textContent = text;
+}
+
+function setViewTab(id: string, selected: boolean): void {
+  const btn = document.getElementById(id);
+  btn?.classList.toggle('active', selected);
+  btn?.setAttribute('aria-selected', selected ? 'true' : 'false');
 }
 
 function switchView(view: ViewMode): void {
   currentView = view;
-  const btnTerm = document.getElementById('nav-btn-terminal');
-  const btnSftp = document.getElementById('nav-btn-sftp');
-  const btnMon = document.getElementById('nav-btn-monitor');
+  document.querySelector('.app')?.setAttribute('data-view', view);
   const viewTerm = document.getElementById('view-terminal');
   const viewSftp = document.getElementById('view-sftp');
   const viewMon = document.getElementById('view-monitor');
 
-  btnTerm?.classList.toggle('active', view === 'terminal');
-  btnSftp?.classList.toggle('active', view === 'sftp');
-  btnMon?.classList.toggle('active', view === 'monitor');
+  setViewTab('nav-btn-terminal', view === 'terminal');
+  setViewTab('nav-btn-sftp', view === 'sftp');
+  setViewTab('nav-btn-monitor', view === 'monitor');
 
   viewTerm?.classList.toggle('active', view === 'terminal');
   viewSftp?.classList.toggle('active', view === 'sftp');
@@ -442,6 +630,7 @@ function switchView(view: ViewMode): void {
     const tab = activeId ? tabs.get(activeId) : undefined;
     showMetricsFor(tab);
   }
+  updateSessionContext();
 }
 
 function showMetricsFor(tab: TabState | undefined): void {
@@ -456,11 +645,12 @@ function markClosed(sessionId: string): void {
   const tab = tabs.get(sessionId);
   if (!tab || tab.closed) return;
   tab.closed = true;
+  broadcastChecked.delete(sessionId);
   tab.term.writeln('\r\n\x1b[33m[会话已断开]\x1b[0m');
   if (activeId === sessionId) {
     showMetricsFor(tab);
     sftpCtrl.syncSession();
-    updateNavHostBadge(tab);
+    updateSessionContext();
   }
   renderTabs();
 }
@@ -530,7 +720,7 @@ function updateSplitLayout(): void {
     if (isVisible) {
       fitTab(tab);
       if (isPrimary) {
-        tab.term.focus();
+        if (currentView === 'terminal') tab.term.focus();
         showMetricsFor(tab);
       }
     }
@@ -546,13 +736,16 @@ function selectTab(sessionId: string | null): void {
     secondaryId = null;
     currentSplitMode = 'single';
     updateSplitControls();
-    document.getElementById('term-empty')?.classList.remove('hidden');
+    showIdleEmpty();
     monCtrl.renderMetrics(null, 'idle');
-    updateNavHostBadge(undefined);
     renderTabs();
     sftpCtrl.syncSession();
+    updateSessionContext();
     return;
   }
+
+  const chosen = tabs.get(sessionId);
+  if (chosen?.info.hostId) markSelectedHost(chosen.info.hostId);
 
   document.getElementById('term-empty')?.classList.add('hidden');
 
@@ -587,7 +780,11 @@ function selectTab(sessionId: string | null): void {
     renderTabs();
     sftpCtrl.syncSession();
   }
-  updateNavHostBadge(tabs.get(sessionId));
+  updateSessionContext();
+}
+
+function broadcastOn(): boolean {
+  return (document.getElementById('broadcast-toggle') as HTMLInputElement | null)?.checked ?? false;
 }
 
 function renderTabs(): void {
@@ -598,6 +795,28 @@ function renderTabs(): void {
     const isSecondary = currentSplitMode !== 'single' && id === secondaryId;
     const chip = document.createElement('div');
     chip.className = `tab-chip${isPrimary ? ' active' : ''}${tab.closed ? ' closed' : ''}`;
+    chip.setAttribute('role', 'tab');
+    chip.setAttribute('aria-selected', isPrimary ? 'true' : 'false');
+    if (broadcastOn() && !tab.closed) {
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.className = 'tab-bcast';
+      const isCurrent = id === activeId;
+      const local = tab.info.kind === 'local';
+      box.title = isCurrent
+        ? '当前终端总会收到'
+        : local
+          ? '勾选后，广播才会进入这个本机终端'
+          : '勾选后，广播会进入这个会话';
+      box.checked = isCurrent || broadcastChecked.has(id);
+      box.disabled = isCurrent;
+      box.addEventListener('click', (event) => event.stopPropagation());
+      box.addEventListener('change', () => {
+        if (box.checked) broadcastChecked.add(id);
+        else broadcastChecked.delete(id);
+      });
+      chip.appendChild(box);
+    }
     const dot = document.createElement('span');
     dot.className = 'tab-dot';
     const label = document.createElement('span');
@@ -618,121 +837,263 @@ function renderTabs(): void {
       }
     }
 
+    if (tab.closed && tab.info.kind === 'ssh' && tab.info.hostId) {
+      const reconnect = document.createElement('button');
+      reconnect.type = 'button';
+      reconnect.className = 'tab-reconnect';
+      reconnect.textContent = '重连';
+      const hostId = tab.info.hostId;
+      reconnect.addEventListener('click', (event) => {
+        event.stopPropagation();
+        void openSshTab(hostId, currentView === 'terminal');
+      });
+      chip.appendChild(reconnect);
+    }
+
     const closeBtn = document.createElement('button');
     closeBtn.type = 'button';
     closeBtn.textContent = '×';
+    closeBtn.setAttribute('aria-label', '关闭会话');
     closeBtn.style.padding = '0 4px';
     closeBtn.addEventListener('click', (e) => { e.stopPropagation(); void closeTab(id); });
     chip.appendChild(closeBtn);
     chip.addEventListener('click', () => selectTab(id));
     bar.appendChild(chip);
   }
-  for (const [, p] of pendingConnections) {
+  for (const [hostId, pending] of pendingConnections) {
     const chip = document.createElement('div');
     chip.className = 'tab-chip connecting active';
     const dot = document.createElement('span');
     dot.className = 'tab-dot spin';
     const label = document.createElement('span');
-    label.textContent = `${p.alias} (连接中...)`;
+    label.textContent = `${pending.alias}（${pending.detail}）`;
     chip.append(dot, label);
+    if (!pending.cancelled) {
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.className = 'tab-reconnect';
+      cancel.textContent = '取消';
+      cancel.addEventListener('click', (event) => {
+        event.stopPropagation();
+        cancelConnect(hostId);
+      });
+      chip.appendChild(cancel);
+    }
     bar.appendChild(chip);
   }
 }
 
-async function closeTab(sessionId: string): Promise<void> {
+async function disposeTab(sessionId: string, selectFallback: boolean): Promise<void> {
   const tab = tabs.get(sessionId);
   if (!tab) return;
-  await webApi.closeSession(sessionId);
+  try {
+    await webApi.closeSession(sessionId);
+  } catch {
+    // 会话可能已经在服务端断开。
+  }
   tab.term.dispose();
   tab.slot.remove();
   tabs.delete(sessionId);
-  treeCtrl.render();
-
-  if (secondaryId === sessionId) {
-    secondaryId = null;
-  }
+  broadcastChecked.delete(sessionId);
+  if (secondaryId === sessionId) secondaryId = null;
   if (tabs.size < 2 && currentSplitMode !== 'single') {
     currentSplitMode = 'single';
     updateSplitControls();
     document.getElementById('terminal-stage')?.classList.remove('split-h', 'split-v');
   }
-
+  treeCtrl.render();
   if (activeId === sessionId) {
-    selectTab(Array.from(tabs.keys()).pop() ?? null);
-  } else {
+    if (selectFallback) selectTab(Array.from(tabs.keys()).pop() ?? null);
+    else {
+      activeId = null;
+      renderTabs();
+      updateSessionContext();
+      if (tabs.size === 0) showIdleEmpty();
+    }
+  } else if (selectFallback) {
     updateSplitLayout();
+  } else {
+    renderTabs();
   }
 }
 
-async function openSshTab(hostId: string): Promise<void> {
-  const existingTab = Array.from(tabs.values()).find((t) => t.info.hostId === hostId && !t.closed);
-  if (existingTab) {
-    selectTab(existingTab.info.sessionId);
-    switchView('terminal');
-    showToast(`已切换至: ${existingTab.info.alias}`);
+async function closeTab(sessionId: string): Promise<void> {
+  await disposeTab(sessionId, true);
+}
+
+function jumpPhrase(hostId: string): string {
+  const host = treeCtrl.hosts.find((item) => item.id === hostId);
+  if (!host?.jumpHostId) return '';
+  const jump = treeCtrl.hosts.find((item) => item.id === host.jumpHostId);
+  return jump ? `经跳板机 ${jump.alias}` : '经跳板机';
+}
+
+function showIdleEmpty(): void {
+  const el = document.getElementById('term-empty');
+  if (!el) return;
+  el.classList.remove('hidden');
+  el.replaceChildren();
+  const title = document.createElement('p');
+  title.className = 'empty-kicker';
+  title.textContent = '没有打开的终端';
+  const sub = document.createElement('p');
+  sub.textContent = '双击左侧主机，或使用上方「本机终端」。';
+  el.append(title, sub);
+}
+
+function showConnectEmpty(title: string, sub: string, isError = false): void {
+  if (tabs.size > 0) return;
+  const el = document.getElementById('term-empty');
+  if (!el) return;
+  el.classList.remove('hidden');
+  el.replaceChildren();
+  const heading = document.createElement('p');
+  heading.className = 'empty-kicker';
+  heading.textContent = title;
+  const detail = document.createElement('p');
+  if (isError) detail.className = 'empty-error';
+  detail.textContent = sub;
+  el.append(heading, detail);
+}
+
+function cancelConnect(hostId: string): void {
+  const pending = pendingConnections.get(hostId);
+  if (!pending || pending.cancelled) return;
+  pending.cancelled = true;
+  pending.detail = '正在取消';
+  cancelledHostIds.add(hostId);
+  pending.abort.abort();
+  renderTabs();
+  treeCtrl.render();
+}
+
+async function openSshTab(hostId: string, showTerminal: boolean): Promise<void> {
+  const live = Array.from(tabs.values()).find((tab) => tab.info.hostId === hostId && !tab.closed);
+  if (live) {
+    selectTab(live.info.sessionId);
     return;
   }
   if (pendingConnections.has(hostId)) return;
-  const host = treeCtrl.hosts.find((h) => h.id === hostId);
-  const alias = host ? host.alias : '远程主机';
-  pendingConnections.set(hostId, { alias, host: host?.host, port: host?.port });
+  const stale = Array.from(tabs.entries()).find(([, tab]) => tab.info.hostId === hostId && tab.closed);
+  if (stale) await disposeTab(stale[0], true);
 
-  const hostEl = document.getElementById(`host-${hostId}`);
-  hostEl?.classList.add('connecting');
-
-  const termEmpty = document.getElementById('term-empty');
-  if (termEmpty && tabs.size === 0) {
-    termEmpty.classList.remove('hidden');
-    termEmpty.innerHTML = `
-      <div class="connecting-box">
-        <div class="connecting-spinner"></div>
-        <div class="connecting-title">正在连接 ${alias}...</div>
-        <div class="connecting-sub">${host ? `${host.username}@${host.host}:${host.port}` : ''} · 正在协商密钥并分配终端</div>
-      </div>
-    `;
-  }
+  cancelledHostIds.delete(hostId);
+  const host = treeCtrl.hosts.find((item) => item.id === hostId);
+  const alias = host?.alias ?? '远程主机';
+  const via = jumpPhrase(hostId);
+  const detail = via ? `正在连接，${via}` : '正在连接';
+  const abort = new AbortController();
+  pendingConnections.set(hostId, { alias, detail, abort, cancelled: false });
+  hostErrors.delete(hostId);
+  selectedHostId = hostId;
+  if (showTerminal) switchView('terminal');
+  const target = host ? `${host.username}@${host.host}:${host.port}` : alias;
+  showConnectEmpty(`正在连接 ${alias}`, via ? `${target} · ${via}` : target);
   renderTabs();
+  treeCtrl.render();
 
   try {
     const grid = measureGrid();
-    const info = (await webApi.openSession({ kind: 'ssh', hostId, cols: grid.cols, rows: grid.rows })) as ConnectInfo & { hostId?: string };
+    const info = (await webApi.openSession({ kind: 'ssh', hostId, cols: grid.cols, rows: grid.rows }, abort.signal)) as ConnectInfo & { hostId?: string };
     if (!info.hostId) info.hostId = hostId;
-    pendingConnections.delete(hostId);
-    hostEl?.classList.remove('connecting');
-    if (termEmpty) {
-      termEmpty.innerHTML = '<div>没有打开的终端</div><small>双击左侧主机，或使用「本机终端」。</small>';
+    const pending = pendingConnections.get(hostId);
+    if (pending?.cancelled || cancelledHostIds.has(hostId) || abort.signal.aborted) {
+      pendingConnections.delete(hostId);
+      cancelledHostIds.delete(hostId);
+      await webApi.closeSession(info.sessionId).catch(() => undefined);
+      renderTabs();
+      treeCtrl.render();
+      if (tabs.size === 0) showIdleEmpty();
+      return;
     }
+    pendingConnections.delete(hostId);
+    hostErrors.delete(hostId);
     createTermInstance(info);
-    const tab = activeId ? tabs.get(activeId) : undefined;
+    const tab = tabs.get(info.sessionId);
     if (tab) requestAnimationFrame(() => fitTab(tab));
   } catch (err) {
+    const pending = pendingConnections.get(hostId);
     pendingConnections.delete(hostId);
-    hostEl?.classList.remove('connecting');
-    if (termEmpty) {
-      termEmpty.innerHTML = '<div>没有打开的终端</div><small>双击左侧主机，或使用「本机终端」。</small>';
+    if (abort.signal.aborted || pending?.cancelled) {
+      renderTabs();
+      treeCtrl.render();
+      if (tabs.size === 0) showIdleEmpty();
+      return;
     }
+    const raw = err instanceof Error ? err.message : '连接失败';
+    const message = via && !raw.includes('跳板') ? `${via} 连接失败：${raw}` : raw;
+    hostErrors.set(hostId, message);
+    showConnectEmpty(`连接 ${alias} 失败`, message, true);
+    showToast(message, 'error');
     renderTabs();
-    showToast(err instanceof Error ? err.message : '连接失败');
+    treeCtrl.render();
   }
 }
 
-function findInActiveTerm(needle: string, forward = false): void {
-  if (!activeId || !needle) return;
-  const tab = tabs.get(activeId);
-  if (!tab) return;
+let findNeedle = '';
+let findSessionId: string | null = null;
+let findCursor = -1;
+let findHits: Array<{ row: number; col: number }> = [];
+
+function setFindCount(text: string, title = ''): void {
+  const el = document.getElementById('search-count');
+  if (!el) return;
+  el.textContent = text;
+  el.title = title;
+}
+
+function collectHits(tab: TabState, needle: string): Array<{ row: number; col: number }> {
+  const hits: Array<{ row: number; col: number }> = [];
   const buf = tab.term.buffer.active;
-  const start = forward ? 0 : buf.length - 1;
-  const end = forward ? buf.length : -1;
-  const step = forward ? 1 : -1;
-  for (let row = start; row !== end; row += step) {
-    const col = (buf.getLine(row)?.translateToString() ?? '').toLowerCase().indexOf(needle.toLowerCase());
-    if (col !== -1) {
-      tab.term.scrollToLine(Math.max(0, row - 3));
-      tab.term.select(col, row, needle.length);
-      return;
+  const lowered = needle.toLowerCase();
+  for (let row = 0; row < buf.length; row += 1) {
+    const line = (buf.getLine(row)?.translateToString() ?? '').toLowerCase();
+    let from = 0;
+    while (from < line.length) {
+      const col = line.indexOf(lowered, from);
+      if (col === -1) break;
+      hits.push({ row, col });
+      from = col + Math.max(1, lowered.length);
     }
   }
-  showToast(`未找到 "${needle}"`);
+  return hits;
+}
+
+function findInActiveTerm(needle: string, forward = true): void {
+  const trimmed = needle.trim();
+  if (!activeId || !trimmed) {
+    setFindCount('');
+    return;
+  }
+  const tab = tabs.get(activeId);
+  if (!tab) return;
+  if (trimmed !== findNeedle || activeId !== findSessionId) {
+    findNeedle = trimmed;
+    findSessionId = activeId;
+    findHits = collectHits(tab, trimmed);
+    findCursor = -1;
+  }
+  if (!findHits.length) {
+    setFindCount('0/0', '没有匹配');
+    return;
+  }
+  const previous = findCursor;
+  findCursor = nextFindIndex(findCursor, findHits.length, forward);
+  const hit = findHits[findCursor];
+  if (!hit) return;
+  tab.term.scrollToLine(Math.max(0, hit.row - 3));
+  tab.term.select(hit.col, hit.row, trimmed.length);
+  const wrapped = previous >= 0 && ((forward && findCursor < previous) || (!forward && findCursor > previous));
+  setFindCount(`${findCursor + 1}/${findHits.length}`, wrapped ? '已从另一头继续' : '');
+}
+
+function openFind(): void {
+  switchView('terminal');
+  const bar = document.getElementById('search-bar');
+  bar?.classList.remove('hidden');
+  const input = document.getElementById('search-input') as HTMLInputElement | null;
+  input?.focus();
+  input?.select();
 }
 
 function bindGlobalUi(): void {
@@ -746,11 +1107,24 @@ function bindGlobalUi(): void {
   const navOpsMenu = document.getElementById('nav-ops-menu');
   navOpsToggle?.addEventListener('click', (e) => {
     e.stopPropagation();
-    navOpsMenu?.classList.toggle('hidden');
+    const open = navOpsMenu?.classList.toggle('hidden') === false;
+    navOpsToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+  const moreBtn = document.getElementById('nav-more');
+  const moreWrap = moreBtn?.parentElement;
+  moreBtn?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const open = moreWrap?.classList.toggle('open') ?? false;
+    moreBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
   });
   window.addEventListener('click', (e) => {
     if (navOpsMenu && !navOpsMenu.classList.contains('hidden') && !navOpsMenu.contains(e.target as Node) && e.target !== navOpsToggle) {
       navOpsMenu.classList.add('hidden');
+      navOpsToggle?.setAttribute('aria-expanded', 'false');
+    }
+    if (moreWrap?.classList.contains('open') && !moreWrap.contains(e.target as Node)) {
+      moreWrap.classList.remove('open');
+      moreBtn?.setAttribute('aria-expanded', 'false');
     }
   });
   window.addEventListener('keydown', (e) => {
@@ -767,6 +1141,7 @@ function bindGlobalUi(): void {
     const isCollapsed = sidebar.classList.toggle('collapsed');
     sideToggleBtn.textContent = isCollapsed ? '▶' : '◀';
     sideToggleBtn.title = isCollapsed ? '展开左侧栏' : '收起左侧栏';
+    sideToggleBtn.setAttribute('aria-label', sideToggleBtn.title);
     requestAnimationFrame(() => fitVisibleTabs());
   });
 
@@ -780,54 +1155,42 @@ function bindGlobalUi(): void {
     const grid = measureGrid();
     createTermInstance(await webApi.openSession({ kind: 'local', cols: grid.cols, rows: grid.rows }));
   };
-  document.getElementById('open-local')?.addEventListener('click', handleOpenLocal);
-  document.getElementById('new-tab-local')?.addEventListener('click', handleOpenLocal);
+  document.getElementById('new-tab-local')?.addEventListener('click', () => void handleOpenLocal());
 
   document.getElementById('split-single')?.addEventListener('click', () => setSplitMode('single'));
   document.getElementById('split-horizontal')?.addEventListener('click', () => setSplitMode('horizontal'));
   document.getElementById('split-vertical')?.addEventListener('click', () => setSplitMode('vertical'));
-  document.getElementById('quick-ops-add')?.addEventListener('click', () => {
-    (document.getElementById('snippet-dialog') as HTMLDialogElement)?.showModal();
+  document.getElementById('broadcast-toggle')?.addEventListener('change', () => {
+    broadcastChecked.clear();
+    if (broadcastOn()) {
+      for (const id of seedBroadcastChecks(tabModels())) broadcastChecked.add(id);
+    }
+    renderTabs();
   });
   document.getElementById('open-tunnels')?.addEventListener('click', () => void monCtrl.openTunnelModal());
   document.getElementById('theme-toggle')?.addEventListener('click', async () => {
     const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
     document.documentElement.setAttribute('data-theme', next);
+    syncThemeToggle();
+    applyTermTheme();
     await webApi.updateSettings({ theme: next });
+    moreWrap?.classList.remove('open');
   });
-  document.getElementById('search-toggle')?.addEventListener('click', () => document.getElementById('search-bar')?.classList.toggle('hidden'));
+  document.getElementById('search-toggle')?.addEventListener('click', () => openFind());
   document.getElementById('search-close')?.addEventListener('click', () => document.getElementById('search-bar')?.classList.add('hidden'));
   document.getElementById('search-prev')?.addEventListener('click', () => findInActiveTerm((document.getElementById('search-input') as HTMLInputElement).value, false));
   document.getElementById('search-next')?.addEventListener('click', () => findInActiveTerm((document.getElementById('search-input') as HTMLInputElement).value, true));
-
-  // Split pane vertical drag resizer
-  const handle = document.getElementById('split-handle');
-  const termPane = document.getElementById('terminal-pane');
-  const sftpPane = document.getElementById('sftp-pane');
-  const wrap = document.getElementById('split-wrap');
-  handle?.addEventListener('mousedown', (down) => {
-    if (!termPane || !sftpPane || !wrap) return;
-    down.preventDefault();
-    const startY = down.clientY;
-    const startH = termPane.getBoundingClientRect().height;
-    const onMove = (mv: MouseEvent) => {
-      const nextH = Math.max(160, Math.min(wrap.getBoundingClientRect().height - 140, startH + (mv.clientY - startY)));
-      termPane.style.flex = `0 0 ${nextH}px`;
-      sftpPane.style.flex = '1 1 auto';
-      sftpPane.style.maxHeight = 'none';
-      fitVisibleTabs();
-    };
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+  document.getElementById('search-input')?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    findInActiveTerm((event.target as HTMLInputElement).value, !event.shiftKey);
   });
 
   const setDlg = document.getElementById('settings-dialog') as HTMLDialogElement;
-  document.getElementById('open-settings')?.addEventListener('click', () => setDlg.showModal());
-  document.getElementById('open-settings-top')?.addEventListener('click', () => setDlg.showModal());
+  document.getElementById('open-settings')?.addEventListener('click', () => {
+    setDlg.showModal();
+    moreWrap?.classList.remove('open');
+  });
   document.getElementById('cancel-settings')?.addEventListener('click', () => setDlg.close());
   document.getElementById('settings-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -839,6 +1202,8 @@ function bindGlobalUi(): void {
     });
     fontSize = s.fontSize;
     document.documentElement.setAttribute('data-theme', s.theme);
+    syncThemeToggle();
+    applyTermTheme();
     sftpCtrl.setShowHidden(s.showHiddenFiles);
     for (const tab of tabs.values()) { tab.term.options.fontSize = fontSize; tab.fit.fit(); }
     setDlg.close();
@@ -879,25 +1244,18 @@ function bindGlobalUi(): void {
     if (!activeId) return;
     const tab = tabs.get(activeId);
     if (!tab) return;
-    tab.term.clear();
-    sendInput('clear\n');
+    tab.term.write('\x1b[2J\x1b[3J\x1b[H');
   });
 
   document.getElementById('ctx-search')?.addEventListener('click', () => {
     document.getElementById('terminal-context-menu')?.classList.add('hidden');
-    document.getElementById('search-bar')?.classList.remove('hidden');
-    (document.getElementById('search-input') as HTMLInputElement)?.focus();
+    openFind();
   });
 
   document.getElementById('ctx-select-all')?.addEventListener('click', () => {
     document.getElementById('terminal-context-menu')?.classList.add('hidden');
     if (!activeId) return;
-    const tab = tabs.get(activeId);
-    if (tab) {
-      tab.term.selectAll();
-      const sel = tab.term.getSelection();
-      if (sel) void copyText(sel, `已全选并复制 ${sel.length} 字符`);
-    }
+    tabs.get(activeId)?.term.selectAll();
   });
 
   window.addEventListener('click', (e) => {
@@ -914,11 +1272,12 @@ function bindGlobalUi(): void {
 }
 
 window.addEventListener('keydown', (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f' && activeId) {
-    e.preventDefault();
-    document.getElementById('search-bar')?.classList.remove('hidden');
-    (document.getElementById('search-input') as HTMLInputElement).focus();
-  }
+  if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'f') return;
+  const el = document.activeElement as HTMLElement | null;
+  if (!el || el.closest('dialog')) return;
+  if (!el.closest('#search-bar, #terminal-stage, .xterm')) return;
+  e.preventDefault();
+  openFind();
 });
 
 window.addEventListener('resize', () => {
@@ -939,6 +1298,8 @@ async function applySettings(): Promise<void> {
   const s = await webApi.getSettings();
   fontSize = s.fontSize;
   document.documentElement.setAttribute('data-theme', s.theme);
+  syncThemeToggle();
+  applyTermTheme();
   sftpCtrl.setShowHidden(s.showHiddenFiles);
   const theme = document.getElementById('set-theme') as HTMLSelectElement | null;
   const font = document.getElementById('set-font') as HTMLInputElement | null;
@@ -1001,12 +1362,23 @@ async function showMcpDialog(): Promise<void> {
 async function boot(): Promise<void> {
   bindGlobalUi();
   switchView('terminal');
-  updateNavHostBadge(undefined);
+  syncThemeToggle();
+  updateSessionContext();
   document.getElementById('open-mcp')?.addEventListener('click', () => void showMcpDialog().catch((err: unknown) => {
     showToast(err instanceof Error ? err.message : '读不到 MCP 地址');
   }));
   document.getElementById('close-mcp')?.addEventListener('click', () => {
     (document.getElementById('mcp-dialog') as HTMLDialogElement).close();
+  });
+  document.getElementById('mcp-token-toggle')?.addEventListener('click', () => {
+    const input = document.getElementById('mcp-token') as HTMLInputElement;
+    const hidden = input.type === 'password';
+    input.type = hidden ? 'text' : 'password';
+    const btn = document.getElementById('mcp-token-toggle');
+    if (btn) btn.textContent = hidden ? '隐藏' : '显示';
+  });
+  document.getElementById('mcp-token-copy')?.addEventListener('click', () => {
+    void copyText((document.getElementById('mcp-token') as HTMLInputElement).value, '已复制令牌');
   });
   document.getElementById('copy-cursor')?.addEventListener('click', () => {
     void copyText((document.getElementById('mcp-cursor') as HTMLTextAreaElement).value, '已复制 Cursor 配置');
