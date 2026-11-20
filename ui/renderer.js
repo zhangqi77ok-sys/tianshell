@@ -6737,6 +6737,12 @@ WARNING: This link could potentially be dangerous`)) {
       body: "\u8FD9\u4E2A\u6587\u4EF6\u4F1A\u4ECE\u8FDC\u7AEF\u5220\u9664\uFF0C\u4E0D\u80FD\u6062\u590D\u3002"
     };
   }
+  function chmodPrompt(kind) {
+    if (kind === "symlink") {
+      return "\u8FD9\u4F1A\u4FEE\u6539\u94FE\u63A5\u6307\u5411\u7684\u6587\u4EF6\uFF0C\u4E0D\u662F\u94FE\u63A5\u672C\u8EAB\u3002\u8F93\u5165\u5B83\u7684\u516B\u8FDB\u5236\u6743\u9650";
+    }
+    return "\u8F93\u5165\u516B\u8FDB\u5236\u6743\u9650 (\u4F8B\u5982 755 \u6216 644)";
+  }
   function parseOctalMode(raw) {
     const text = raw.trim();
     if (!/^[0-7]{3,4}$/.test(text)) return null;
@@ -7248,7 +7254,7 @@ WARNING: This link could potentially be dangerous`)) {
     async chmodItem(entry) {
       const sid = this.deps.getActiveSshId();
       if (!sid) return;
-      const raw = await this.deps.promptText("\u8F93\u5165\u516B\u8FDB\u5236\u6743\u9650 (\u4F8B\u5982 755 \u6216 644)", entry.mode.toString(8));
+      const raw = await this.deps.promptText(chmodPrompt(entry.kind), entry.mode.toString(8));
       if (!raw) return;
       const mode = parseOctalMode(raw);
       if (mode === null) return this.deps.toast("\u6743\u9650\u683C\u5F0F\u65E0\u6548\uFF0C\u8BF7\u7528\u4E09\u4F4D\u6216\u56DB\u4F4D\u516B\u8FDB\u5236", "error");

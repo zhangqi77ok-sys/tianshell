@@ -261,7 +261,7 @@ TianShell 是会话和记忆，不是一个用完就丢掉的 SSH 客户端。�
 
 | 工具 | 参数 | 限制 |
 | --- | --- | --- |
-| `sftp_list` | `host`，可选 `path`（默认 `/`） | 列目录 |
+| `sftp_list` | `host`，可选 `path`（默认 `/`） | 列目录。符号链接的 `permissions` 仍是链接本身；`mode` 是它指向的文件或目录的权限位。断链时 `mode` 仍是链接上的 `0777` |
 | `sftp_mkdir` | `host`，`path` | 拒绝空路径和 `/` |
 | `sftp_read` | `host`，`path`，可选 `max_bytes` | UTF-8，默认 131072，最大 262144。含 NUL、不是 UTF-8，或是私钥内容时会拒绝，不会返回替换字符 |
 | `sftp_write` | `host`，`path`，`content` | 覆盖 UTF-8，上限 512KB |

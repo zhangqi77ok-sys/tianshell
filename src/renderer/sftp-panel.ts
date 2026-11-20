@@ -1,7 +1,7 @@
 import type { SftpEntry, TransferTask } from '../shared/types.js';
 import { webApi } from './api-client.js';
 import { editorWriteGuard } from './session-logic.js';
-import { deletePrompt, editorSaveBlock, failedLoadEffect, keepEditorOpen, parseOctalMode, planUploads } from './sftp-logic.js';
+import { chmodPrompt, deletePrompt, editorSaveBlock, failedLoadEffect, keepEditorOpen, parseOctalMode, planUploads } from './sftp-logic.js';
 
 export interface SftpControllerDeps {
   getActiveSshId: () => string | null;
@@ -515,7 +515,7 @@ export class SftpController {
   private async chmodItem(entry: SftpEntry): Promise<void> {
     const sid = this.deps.getActiveSshId();
     if (!sid) return;
-    const raw = await this.deps.promptText('输入八进制权限 (例如 755 或 644)', entry.mode.toString(8));
+    const raw = await this.deps.promptText(chmodPrompt(entry.kind), entry.mode.toString(8));
     if (!raw) return;
     const mode = parseOctalMode(raw);
     if (mode === null) return this.deps.toast('权限格式无效，请用三位或四位八进制', 'error');

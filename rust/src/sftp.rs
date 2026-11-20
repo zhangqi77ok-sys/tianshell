@@ -80,22 +80,33 @@ pub fn list_dir(sess: &Session, dir_path: &str) -> Result<Vec<SftpEntry>, SftpEr
             continue;
         }
         let stat = item.1;
-        let mode = stat.perm.unwrap_or(0);
-        let kind = if (mode & 0o170000) == 0o040000 {
+        let link_mode = stat.perm.unwrap_or(0);
+        let kind = if (link_mode & 0o170000) == 0o040000 {
             "dir"
-        } else if (mode & 0o170000) == 0o120000 {
+        } else if (link_mode & 0o170000) == 0o120000 {
             "symlink"
         } else {
             "file"
         };
+        let path = format!("{}/{}", dir_path.trim_end_matches('/'), name);
+        // 符号链接自己几乎总是 0777。权限框用这个数字，确认就会把目标改成 0777。
+        // 列表里的权限串仍表示链接本身；数字给目标的权限位，确认时不会放宽目标。
+        let mut mode = link_mode & 0o777;
+        if kind == "symlink" {
+            if let Ok(target) = sftp.stat(Path::new(&path)) {
+                if let Some(perm) = target.perm {
+                    mode = perm & 0o777;
+                }
+            }
+        }
         entries.push(SftpEntry {
             name: name.clone(),
-            path: format!("{}/{}", dir_path.trim_end_matches('/'), name),
+            path,
             kind: kind.to_string(),
             size: stat.size.unwrap_or(0),
             mtime_ms: stat.mtime.unwrap_or(0) * 1000,
-            mode: mode & 0o777,
-            permissions: format_unix_mode(mode),
+            mode,
+            permissions: format_unix_mode(link_mode),
         });
     }
     Ok(entries)
@@ -234,8 +245,18 @@ pub fn rename(sess: &Session, old_path: &str, new_path: &str) -> Result<(), Sftp
 
 pub fn chmod(sess: &Session, file_path: &str, mode: u32) -> Result<(), SftpError> {
     let sftp = sess.sftp()?;
-    let mut stat = sftp.stat(Path::new(file_path))?;
-    stat.perm = Some(mode);
+    // `stat` 穿过符号链接。目标不存在就停下来，不会新建文件。
+    // 只提交权限位。把读到的大小一起送回去时，目录上的 truncate 会失败，
+    // 调用方看到错误，但权限可能已经被改掉。
+    sftp.stat(Path::new(file_path))?;
+    let stat = ssh2::FileStat {
+        size: None,
+        uid: None,
+        gid: None,
+        perm: Some(mode),
+        mtime: None,
+        atime: None,
+    };
     sftp.setstat(Path::new(file_path), stat)?;
     Ok(())
 }
@@ -981,8 +1002,15 @@ mod tests {
             if !unlocked.success() {
                 return Err("测试用户不能用于公钥登录".into());
             }
-            let dir = std::path::PathBuf::from(format!("/tmp/tianshell-qa/pr23-overwrite-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
+            // 两个实时测试会同时启动。目录和端口按进程号会撞在同一把密钥上，ssh-keygen 拒绝覆盖。
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(1);
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let dir = std::path::PathBuf::from(format!(
+                "/tmp/tianshell-qa/pr23-overwrite-{}-{}",
+                std::process::id(),
+                n
+            ));
             std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
             let work = dir.join("work");
             std::fs::create_dir_all(&work).map_err(|err| err.to_string())?;
@@ -1002,7 +1030,9 @@ mod tests {
                 }
             }
             std::fs::copy(client.with_extension("pub"), dir.join("authorized_keys")).map_err(|err| err.to_string())?;
-            let port = (20_000 + (std::process::id() % 10_000)) as u16;
+            let port = (20_000
+                + ((std::process::id() as u64).wrapping_mul(131) + n.wrapping_mul(997)) % 20_000)
+                as u16;
             let pid_file = dir.join("sshd.pid");
             let log_file = dir.join("sshd.log");
             let config = format!(
@@ -1103,6 +1133,54 @@ mod tests {
             }
         }
         Err("写入过程中没有临时文件".into())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_permission_value_is_the_target_mode() {
+        if !std::path::Path::new("/usr/sbin/sshd").is_file() {
+            return;
+        }
+        if !std::process::Command::new("sudo").args(["-n", "true"]).status().map(|status| status.success()).unwrap_or(false) {
+            return;
+        }
+        let server = LocalSshd::start().unwrap();
+        let sess = connect_sftp(server.port, &server.key).unwrap();
+        let dir = server.work.clone();
+        let file = format!("{dir}/secret.txt");
+        write_bytes(&sess, &file, b"secret", |_, _| true).unwrap();
+        chmod(&sess, &file, 0o600).unwrap();
+        std::os::unix::fs::symlink("secret.txt", std::path::Path::new(&dir).join("alias")).unwrap();
+        let entries = list_dir(&sess, &dir).unwrap();
+        let link = entries.iter().find(|entry| entry.name == "alias").unwrap();
+        assert_eq!(link.kind, "symlink");
+        assert!(link.permissions.starts_with('l'), "{}", link.permissions);
+        assert_eq!(link.mode, 0o600, "listed mode {:o}", link.mode);
+        chmod(&sess, &format!("{dir}/alias"), link.mode).unwrap();
+        assert_eq!(sftp_mode(&sess, &file).unwrap() & 0o777, 0o600);
+        assert!(std::fs::symlink_metadata(format!("{dir}/alias")).unwrap().file_type().is_symlink());
+        chmod(&sess, &format!("{dir}/alias"), 0o640).unwrap();
+        assert_eq!(sftp_mode(&sess, &file).unwrap() & 0o777, 0o640);
+
+        let folder = format!("{dir}/private-dir");
+        sess.sftp().unwrap().mkdir(Path::new(&folder), 0o755).unwrap();
+        chmod(&sess, &folder, 0o700).unwrap();
+        std::os::unix::fs::symlink("private-dir", std::path::Path::new(&dir).join("dir-alias")).unwrap();
+        let entries = list_dir(&sess, &dir).unwrap();
+        let dir_link = entries.iter().find(|entry| entry.name == "dir-alias").unwrap();
+        assert_eq!(dir_link.kind, "symlink");
+        assert_eq!(dir_link.mode, 0o700, "dir listed mode {:o}", dir_link.mode);
+        chmod(&sess, &format!("{dir}/dir-alias"), dir_link.mode).unwrap();
+        assert_eq!(sftp_mode(&sess, &folder).unwrap() & 0o777, 0o700);
+
+        std::os::unix::fs::symlink("missing-target", std::path::Path::new(&dir).join("dangling")).unwrap();
+        let entries = list_dir(&sess, &dir).unwrap();
+        let dangling = entries.iter().find(|entry| entry.name == "dangling").unwrap();
+        assert_eq!(dangling.kind, "symlink");
+        assert!(dangling.permissions.starts_with('l'), "{}", dangling.permissions);
+        assert_eq!(dangling.mode, 0o777, "dangling listed mode {:o}", dangling.mode);
+        assert!(chmod(&sess, &format!("{dir}/dangling"), 0o777).is_err());
+        assert!(!std::path::Path::new(&format!("{dir}/missing-target")).exists());
     }
 
     #[test]

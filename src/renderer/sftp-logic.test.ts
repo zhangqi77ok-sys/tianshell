@@ -5,6 +5,7 @@ import {
   editorSaveBlock,
   failedLoadEffect,
   keepEditorOpen,
+  chmodPrompt,
   parseOctalMode,
   planUploads,
   remoteChildPath,
@@ -18,6 +19,13 @@ test('删除符号链接不会说成递归删除目录', () => {
   assert.match(dir.body, /递归删除/);
   const file = deletePrompt('file', 'a.txt');
   assert.match(file.body, /文件会从远端删除/);
+});
+
+test('符号链接的权限框说明改的是目标', () => {
+  assert.match(chmodPrompt('symlink'), /指向的文件/);
+  assert.match(chmodPrompt('symlink'), /不是链接本身/);
+  assert.doesNotMatch(chmodPrompt('file'), /链接/);
+  assert.match(chmodPrompt('dir'), /八进制/);
 });
 
 test('只预览了前一段的文件不能写回', () => {
