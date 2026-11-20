@@ -1,7 +1,7 @@
 import type { SftpEntry, TransferTask } from '../shared/types.js';
 import { webApi } from './api-client.js';
 import { editorWriteGuard } from './session-logic.js';
-import { editorSaveBlock, keepEditorOpen, parseOctalMode, planUploads } from './sftp-logic.js';
+import { editorSaveBlock, failedLoadEffect, keepEditorOpen, parseOctalMode, planUploads } from './sftp-logic.js';
 
 export interface SftpControllerDeps {
   getActiveSshId: () => string | null;
@@ -58,6 +58,7 @@ export class SftpController {
   private editorTruncated = false;
   private editorClosePending = false;
   private listedNames: string[] = [];
+  private haveListing = false;
 
   private readonly pathInput = document.getElementById('sftp-path') as HTMLInputElement;
   private readonly breadcrumbsEl = document.getElementById('sftp-breadcrumbs') as HTMLDivElement;
@@ -112,6 +113,7 @@ export class SftpController {
     if (!sid) {
       this.currentDir = '/';
       this.listedNames = [];
+      this.haveListing = false;
       this.showListingMessage('空闲。连上 SSH 会话后，这里显示该会话的当前目录。', true);
       if (this.breadcrumbsEl) this.breadcrumbsEl.textContent = '';
       this.deps.onDirChange?.('/');
@@ -119,6 +121,8 @@ export class SftpController {
     }
     if (switched) {
       this.currentDir = '/';
+      this.listedNames = [];
+      this.haveListing = false;
       this.showListingMessage('正在读取 / …', true);
       this.deps.onDirChange?.('/');
     }
@@ -202,6 +206,7 @@ export class SftpController {
       this.currentDir = requested;
       this.pathInput.value = this.currentDir;
       this.renderBreadcrumbs(this.currentDir);
+      this.haveListing = true;
       this.showPathInput(false);
       this.deps.onDirChange?.(this.currentDir);
       this.listedNames = list.map((entry) => entry.name);
@@ -212,8 +217,13 @@ export class SftpController {
       this.renderEntries(visible);
     } catch (err) {
       if (!this.listingCurrent(sid, ticket)) return;
-      this.listedNames = [];
       const message = err instanceof Error ? err.message : 'SFTP 读取失败';
+      if (failedLoadEffect(this.haveListing) === 'keep') {
+        this.deps.toast(message, 'error');
+        if (!this.pathInput.classList.contains('hidden')) this.pathInput.focus();
+        return;
+      }
+      this.listedNames = [];
       this.showListingMessage(message, true);
     } finally {
       if (this.listingCurrent(sid, ticket)) this.tableEl.classList.remove('loading');
@@ -596,15 +606,15 @@ export class SftpController {
     this.breadcrumbsEl?.addEventListener('dblclick', () => this.showPathInput(true));
     this.pathInput?.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
+        e.preventDefault();
         void this.load(this.pathInput.value);
-        this.showPathInput(false);
       } else if (e.key === 'Escape') {
+        this.pathInput.value = this.currentDir;
         this.showPathInput(false);
       }
     });
     this.goBtn?.addEventListener('click', () => {
       void this.load(this.pathInput.value);
-      this.showPathInput(false);
     });
     document.getElementById('sftp-refresh')?.addEventListener('click', () => void this.load(this.currentDir));
     document.getElementById('sftp-mkdir')?.addEventListener('click', async () => {
