@@ -10,8 +10,10 @@ import {
   acceptLiveMetrics,
   broadcastRecipients,
   claimSingleFlight,
+  inputDelivery,
   keystrokeRecipients,
   nextFindIndex,
+  shouldNotifyLinkDown,
   planSessionOpen,
   resizeIfChanged,
   seedBroadcastChecks,
@@ -377,8 +379,19 @@ function tabModels(): BroadcastTab[] {
   }));
 }
 
+let lastLinkDownNotice = 0;
+
 function dispatchInput(ids: string[], data: string): void {
-  if (!ids.length || ws.readyState !== WebSocket.OPEN) return;
+  const delivery = inputDelivery(ids.length > 0, ws.readyState === WebSocket.OPEN);
+  if (delivery === 'no-terminal') return;
+  if (delivery === 'link-down') {
+    const now = Date.now();
+    if (data && shouldNotifyLinkDown(lastLinkDownNotice, now)) {
+      lastLinkDownNotice = now;
+      showToast('和本机工作台暂时断开，刚才的输入没有发出', 'error');
+    }
+    return;
+  }
   if (ids.length === 1) {
     ws.send(JSON.stringify({ type: 'term:input', sessionId: ids[0], data }));
     return;

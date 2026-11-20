@@ -6631,6 +6631,16 @@ WARNING: This link could potentially be dangerous`)) {
   function isCurrentGeneration(ticket, latest) {
     return ticket > 0 && ticket === latest;
   }
+  var LINK_DOWN_NOTICE_GAP_MS = 4e3;
+  function inputDelivery(haveRecipients, linkOpen) {
+    if (!haveRecipients) return "no-terminal";
+    if (!linkOpen) return "link-down";
+    return "send";
+  }
+  function shouldNotifyLinkDown(lastNotifiedAt, now, gapMs = LINK_DOWN_NOTICE_GAP_MS) {
+    if (lastNotifiedAt <= 0) return true;
+    return now - lastNotifiedAt >= gapMs;
+  }
   function settlePaste(alreadySettled, choice) {
     if (alreadySettled) return "ignore";
     return choice;
@@ -8084,8 +8094,18 @@ ${op.command}`;
       closed: tab.closed
     }));
   }
+  var lastLinkDownNotice = 0;
   function dispatchInput(ids, data) {
-    if (!ids.length || ws.readyState !== WebSocket.OPEN) return;
+    const delivery = inputDelivery(ids.length > 0, ws.readyState === WebSocket.OPEN);
+    if (delivery === "no-terminal") return;
+    if (delivery === "link-down") {
+      const now = Date.now();
+      if (data && shouldNotifyLinkDown(lastLinkDownNotice, now)) {
+        lastLinkDownNotice = now;
+        showToast("\u548C\u672C\u673A\u5DE5\u4F5C\u53F0\u6682\u65F6\u65AD\u5F00\uFF0C\u521A\u624D\u7684\u8F93\u5165\u6CA1\u6709\u53D1\u51FA", "error");
+      }
+      return;
+    }
     if (ids.length === 1) {
       ws.send(JSON.stringify({ type: "term:input", sessionId: ids[0], data }));
       return;
