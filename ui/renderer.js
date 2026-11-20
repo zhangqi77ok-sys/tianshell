@@ -6645,7 +6645,7 @@ WARNING: This link could potentially be dangerous`)) {
   function quickCommandInput(command, shell = "posix") {
     const text = command.replace(/[\r\n]+$/, "");
     if (!text.trim()) return "";
-    if (shell === "powershell") return `\x1B${text}\r`;
+    if (shell === "powershell") return `\x1B[1;5H\x1B[1;5F${text}\r`;
     return `${text}
 `;
   }

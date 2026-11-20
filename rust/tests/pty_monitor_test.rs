@@ -276,7 +276,8 @@ fn replace_pending_line(session: &mut LocalShellSession, captured: &CapturedPty,
 
 #[test]
 fn quick_command_replaces_pending_line_at_end_and_middle() {
-    let (mut session, reader) = LocalShellSession::spawn(None).unwrap();
+    // 宽屏避免半行标记被 80 列折成单独一行，被误当成已经执行。
+    let (mut session, reader) = LocalShellSession::open(None, 200, 24).unwrap();
     let captured = CapturedPty::start(reader);
     let ready = captured.wait_until_ready(Duration::from_secs(8));
     assert!(shell_prompt_ready(&ready), "shell never became ready: {ready}");

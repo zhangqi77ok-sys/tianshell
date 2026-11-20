@@ -189,15 +189,14 @@ export type QuickCommandShell = 'posix' | 'powershell';
  * 快捷命令要单独成行。字节必须和 Rust `quick_command_input` 一致。
  *
  * Bash 的 Ctrl+U 只删光标左边，所以先 Ctrl+E 到行尾再 Ctrl+U。
- * 本机 PowerShell 默认是 PSReadLine 的 Windows 模式：Ctrl+U 没有绑定，
- * Ctrl+A 也不会把后面的命令换成整行。Escape 撤销还没提交的编辑，
- * 随后的 Ctrl+U 让命令历史丢掉半行，空行上不再改内容。PowerShell 用 CR 提交。
- * 不发送 Ctrl+C。用户若把 PSReadLine 改成 Emacs 模式，Escape 会变成组合键前缀，这条序列不以该模式为准。
+ * 本机 PowerShell 默认是 PSReadLine 的 Windows 模式。powershell.exe 会把裸的 Ctrl+U 显示成 ^U，
+ * Escape 和 Ctrl+A 也清不掉半行。Ctrl+Home 再 Ctrl+End 会删到开头和末尾，光标在中间也删得掉整行。
+ * PowerShell 用 CR 提交。不发送 Ctrl+C。Emacs 模式不绑定这两键，这条序列以 Windows 默认模式为准。
  */
 export function quickCommandInput(command: string, shell: QuickCommandShell = 'posix'): string {
   const text = command.replace(/[\r\n]+$/, '');
   if (!text.trim()) return '';
-  if (shell === 'powershell') return `\u001b\u0015${text}\r`;
+  if (shell === 'powershell') return `\u001b[1;5H\u001b[1;5F${text}\r`;
   return `\u0005\u0015${text}\n`;
 }
 
