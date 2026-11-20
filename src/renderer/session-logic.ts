@@ -166,6 +166,18 @@ export function isCurrentGeneration(ticket: number, latest: number): boolean {
   return ticket > 0 && ticket === latest;
 }
 
+/** 空列表要分清「还没有命令」和「这次搜索没有匹配」。 */
+export function historyEmptyText(query: string): string {
+  const q = query.trim();
+  if (!q) return '还没有命令历史。在终端里回车，或让 MCP 执行命令后会出现在这里。';
+  return `没有匹配「${q}」的命令`;
+}
+
+/** 已经列出过历史时，刷新失败不能把那些命令换成一句说明。 */
+export function historyAfterFailedRefresh(haveList: boolean): 'keep' | 'show-error' {
+  return haveList ? 'keep' : 'show-error';
+}
+
 export type InputDelivery = 'send' | 'no-terminal' | 'link-down';
 
 /** 同一段断线里，输入失败只提示一次，避免每个按键都弹一条。 */
