@@ -1623,6 +1623,9 @@ button.danger:hover:not(:disabled) {
   color: #f59e0b;
   font-weight: 500;
 }
+.sftp-item-name.file-link {
+  color: #38bdf8;
+}
 .sftp-item-name.file-sh {
   color: #4ade80;
 }

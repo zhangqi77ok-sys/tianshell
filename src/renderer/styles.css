@@ -551,6 +551,7 @@ button.danger:hover:not(:disabled) { background: rgba(244, 63, 94, 0.1); border-
 .sftp-item-name { transition: color 0.15s ease; cursor: pointer; user-select: none; }
 .sftp-item-name:hover { color: var(--accent); text-decoration: underline; }
 .sftp-item-name.file-dir { color: #f59e0b; font-weight: 500; }
+.sftp-item-name.file-link { color: #38bdf8; }
 .sftp-item-name.file-sh { color: #4ade80; }
 .sftp-item-name.file-conf { color: #38bdf8; }
 .sftp-item-name.file-archive { color: #fb923c; }

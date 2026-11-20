@@ -1,7 +1,7 @@
 import type { SftpEntry, TransferTask } from '../shared/types.js';
 import { webApi } from './api-client.js';
 import { editorWriteGuard } from './session-logic.js';
-import { editorSaveBlock, failedLoadEffect, keepEditorOpen, parseOctalMode, planUploads } from './sftp-logic.js';
+import { deletePrompt, editorSaveBlock, failedLoadEffect, keepEditorOpen, parseOctalMode, planUploads } from './sftp-logic.js';
 
 export interface SftpControllerDeps {
   getActiveSshId: () => string | null;
@@ -23,8 +23,9 @@ export function formatBytes(bytes: number): string {
   return `${v.toFixed(1)} ${units[u]}`;
 }
 
-function getFileMeta(name: string, isDir: boolean): { icon: string; cls: string } {
-  if (isDir) return { icon: '📁', cls: 'file-dir' };
+function getFileMeta(name: string, kind: 'dir' | 'file' | 'symlink'): { icon: string; cls: string } {
+  if (kind === 'symlink') return { icon: '🔗', cls: 'file-link' };
+  if (kind === 'dir') return { icon: '📁', cls: 'file-dir' };
   const dot = name.lastIndexOf('.');
   const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
   switch (ext) {
@@ -256,7 +257,7 @@ export class SftpController {
       const nameTd = document.createElement('td');
       const nameBtn = document.createElement('span');
       const isDir = entry.kind === 'dir';
-      const meta = getFileMeta(entry.name, isDir);
+      const meta = getFileMeta(entry.name, entry.kind);
       nameBtn.textContent = `${meta.icon} ${entry.name}`;
       nameBtn.style.cursor = 'pointer';
       nameBtn.className = `sftp-item-name ${meta.cls}`;
@@ -332,7 +333,7 @@ export class SftpController {
       this.editorTruncated = res.truncated;
       this.setSaveEnabled(!res.truncated);
       const fileName = remotePath.split('/').pop() || '文件';
-      const meta = getFileMeta(fileName, false);
+      const meta = getFileMeta(fileName, 'file');
       if (this.editorFileIcon) this.editorFileIcon.textContent = meta.icon;
       this.editorPathEl.textContent = res.truncated ? `${remotePath}（仅预览前 256KB）` : remotePath;
       this.editorPathEl.title = remotePath;
@@ -513,11 +514,8 @@ export class SftpController {
   private async deleteItem(entry: SftpEntry): Promise<void> {
     const sid = this.deps.getActiveSshId();
     if (!sid) return;
-    const isDir = entry.kind === 'dir';
-    const ok = await this.deps.confirm(
-      isDir ? `删除目录「${entry.name}」？` : `删除「${entry.name}」？`,
-      isDir ? '这个目录会递归删除，里面的文件和子目录都会去掉，而且不能恢复。' : '这个文件会从远端删除，不能恢复。',
-    );
+    const prompt = deletePrompt(entry.kind, entry.name);
+    const ok = await this.deps.confirm(prompt.title, prompt.body);
     if (!ok) return;
     try {
       await webApi.sftpDelete(sid, entry.path);

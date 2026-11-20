@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  deletePrompt,
   editorSaveBlock,
   failedLoadEffect,
   keepEditorOpen,
@@ -8,6 +9,16 @@ import {
   planUploads,
   remoteChildPath,
 } from './sftp-logic.ts';
+
+test('删除符号链接不会说成递归删除目录', () => {
+  const link = deletePrompt('symlink', 'link');
+  assert.match(link.title, /链接/);
+  assert.match(link.body, /不会删除它指向的/);
+  const dir = deletePrompt('dir', 'logs');
+  assert.match(dir.body, /递归删除/);
+  const file = deletePrompt('file', 'a.txt');
+  assert.match(file.body, /文件会从远端删除/);
+});
 
 test('只预览了前一段的文件不能写回', () => {
   assert.equal(editorSaveBlock(false), null);

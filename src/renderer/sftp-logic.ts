@@ -76,6 +76,31 @@ export function planUploads(dir: string, existingNames: readonly string[], files
   return { send, skipped, overwrite };
 }
 
+export interface DeletePrompt {
+  title: string;
+  body: string;
+}
+
+/** 符号链接只去掉链接。目录才递归。不能把指向目录的链接说成要删掉目标。 */
+export function deletePrompt(kind: 'dir' | 'file' | 'symlink', name: string): DeletePrompt {
+  if (kind === 'symlink') {
+    return {
+      title: `删除链接「${name}」？`,
+      body: '只会去掉这个符号链接，不会删除它指向的文件或目录。',
+    };
+  }
+  if (kind === 'dir') {
+    return {
+      title: `删除目录「${name}」？`,
+      body: '这个目录会递归删除，里面的文件和子目录都会去掉，而且不能恢复。',
+    };
+  }
+  return {
+    title: `删除「${name}」？`,
+    body: '这个文件会从远端删除，不能恢复。',
+  };
+}
+
 /** 三位或四位八进制。755、0644 可以，999 和空字符串不行。 */
 export function parseOctalMode(raw: string): number | null {
   const text = raw.trim();

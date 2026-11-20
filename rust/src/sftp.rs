@@ -70,28 +70,13 @@ pub fn list_dir(sess: &Session, dir_path: &str) -> Result<Vec<SftpEntry>, SftpEr
         }
         let stat = item.1;
         let mode = stat.perm.unwrap_or(0);
-        let mut kind = if (mode & 0o170000) == 0o040000 {
+        let kind = if (mode & 0o170000) == 0o040000 {
             "dir"
         } else if (mode & 0o170000) == 0o120000 {
             "symlink"
         } else {
             "file"
         };
-        if kind == "symlink" {
-            let full_path = if dir_path == "/" {
-                format!("/{}", name)
-            } else {
-                format!("{}/{}", dir_path.trim_end_matches('/'), name)
-            };
-            if let Ok(target_stat) = sftp.stat(Path::new(&full_path)) {
-                let target_mode = target_stat.perm.unwrap_or(0);
-                if (target_mode & 0o170000) == 0o040000 {
-                    kind = "dir";
-                } else {
-                    kind = "file";
-                }
-            }
-        }
         entries.push(SftpEntry {
             name: name.clone(),
             path: format!("{}/{}", dir_path.trim_end_matches('/'), name),
@@ -229,9 +214,25 @@ pub fn remove_path(sess: &Session, file_path: &str) -> Result<(), SftpError> {
     remove_rec(&sftp, file_path)
 }
 
+/// `stat` 会穿过符号链接。链接指向目录时，跟着走就会删掉目标里的内容。
+/// 链接本身只做 unlink。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoveAction {
+    Unlink,
+    Recurse,
+}
+
+pub fn remove_action(is_symlink: bool, is_dir: bool) -> RemoveAction {
+    if is_symlink || !is_dir {
+        RemoveAction::Unlink
+    } else {
+        RemoveAction::Recurse
+    }
+}
+
 fn remove_rec(sftp: &ssh2::Sftp, file_path: &str) -> Result<(), SftpError> {
-    let stat = sftp.stat(Path::new(file_path))?;
-    if stat.is_dir() {
+    let stat = sftp.lstat(Path::new(file_path))?;
+    if remove_action(stat.file_type().is_symlink(), stat.is_dir()) == RemoveAction::Recurse {
         for item in sftp.readdir(Path::new(file_path))? {
             let name = item.0.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if name == "." || name == ".." || name.is_empty() {
@@ -282,6 +283,36 @@ pub fn write_bytes(sess: &Session, file_path: &str, bytes: &[u8], mut on_progres
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_symlink_is_removed_without_walking_into_its_target() {
+        assert_eq!(remove_action(true, true), RemoveAction::Unlink);
+        assert_eq!(remove_action(true, false), RemoveAction::Unlink);
+        assert_eq!(remove_action(false, true), RemoveAction::Recurse);
+        assert_eq!(remove_action(false, false), RemoveAction::Unlink);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_symlink_metadata_selects_unlink_and_leaves_the_target() {
+        let root = std::env::temp_dir().join(format!("ts-unlink-{}", std::process::id()));
+        let real = root.join("real");
+        let keep = real.join("keep");
+        std::fs::create_dir_all(&keep).unwrap();
+        std::fs::write(keep.join("data.txt"), b"keep-me").unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let followed = std::fs::metadata(&link).unwrap();
+        assert!(followed.is_dir());
+        assert_eq!(remove_action(false, followed.is_dir()), RemoveAction::Recurse);
+        let own = std::fs::symlink_metadata(&link).unwrap();
+        let action = remove_action(own.file_type().is_symlink(), own.file_type().is_dir());
+        assert_eq!(action, RemoveAction::Unlink);
+        std::fs::remove_file(&link).unwrap();
+        assert!(keep.join("data.txt").is_file());
+        assert_eq!(std::fs::read(keep.join("data.txt")).unwrap(), b"keep-me");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn upload_limit_is_64_mebibytes() {
