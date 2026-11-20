@@ -668,6 +668,10 @@ async fn stream_file_download(state: AppState, id: String, remote: String) -> Re
         let tid_job = tid_progress.clone();
         let outcome = with_ssh(&state_for_task, &session_id, move |session| {
             let sftp = session.sftp().map_err(|err| err.to_string())?;
+            let stat = sftp.stat(Path::new(&remote_job)).map_err(|err| err.to_string())?;
+            if let Some(message) = crate::download_grant::file_download_rejected(DownloadKind::File, crate::sftp::read_node(stat.perm)) {
+                return Err(message.to_string());
+            }
             let mut file = sftp.open(Path::new(&remote_job)).map_err(|err| err.to_string())?;
             if let Some(sender) = lock(&slot_job).take() {
                 let _ = sender.send(Ok(()));
@@ -1114,7 +1118,7 @@ async fn issue_download_grant(
             let stat = sftp
                 .stat(std::path::Path::new(&remote_check))
                 .map_err(|err| format!("远端路径不可用：{err}"))?;
-            if let Some(message) = crate::download_grant::file_download_rejected(kind, stat.is_dir()) {
+            if let Some(message) = crate::download_grant::file_download_rejected(kind, crate::sftp::read_node(stat.perm)) {
                 return Err(message.to_string());
             }
             Ok(())
