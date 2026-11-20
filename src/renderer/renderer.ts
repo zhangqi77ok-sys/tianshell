@@ -42,6 +42,9 @@ const TERM_THEME = {
   brightWhite: '#f2f2f2',
 };
 
+type SplitMode = 'single' | 'horizontal' | 'vertical';
+let currentSplitMode: SplitMode = 'single';
+let secondaryId: string | null = null;
 let activeId: string | null = null;
 let fontSize = 14;
 const tabs = new Map<string, TabState>();
@@ -140,6 +143,11 @@ function createTermInstance(info: ConnectInfo): void {
   const stage = document.getElementById('terminal-stage') as HTMLElement;
   const slot = document.createElement('div');
   slot.className = 'term-slot hidden';
+  slot.addEventListener('pointerdown', () => {
+    if (activeId !== info.sessionId) {
+      selectTab(info.sessionId);
+    }
+  });
   stage.appendChild(slot);
 
   const term = new Terminal({
@@ -219,39 +227,160 @@ function markClosed(sessionId: string): void {
   renderTabs();
 }
 
-function selectTab(sessionId: string | null): void {
-  activeId = sessionId;
-  document.getElementById('term-empty')?.classList.toggle('hidden', tabs.size > 0);
+function setSplitMode(mode: SplitMode): void {
+  if (mode !== 'single' && tabs.size < 2) {
+    showToast('分屏需要至少打开 2 个终端会话');
+    return;
+  }
+  currentSplitMode = mode;
+  updateSplitControls();
+  updateSplitLayout();
+}
+
+function updateSplitControls(): void {
+  document.getElementById('split-single')?.classList.toggle('active', currentSplitMode === 'single');
+  document.getElementById('split-horizontal')?.classList.toggle('active', currentSplitMode === 'horizontal');
+  document.getElementById('split-vertical')?.classList.toggle('active', currentSplitMode === 'vertical');
+}
+
+function fitVisibleTabs(): void {
+  if (activeId) {
+    const tab = tabs.get(activeId);
+    if (tab) fitTab(tab);
+  }
+  if (currentSplitMode !== 'single' && secondaryId && secondaryId !== activeId) {
+    const secTab = tabs.get(secondaryId);
+    if (secTab) fitTab(secTab);
+  }
+}
+
+function updateSplitLayout(): void {
+  const stageEl = document.getElementById('terminal-stage');
+  if (!stageEl) return;
+
+  if (currentSplitMode !== 'single' && tabs.size < 2) {
+    currentSplitMode = 'single';
+    updateSplitControls();
+  }
+
+  if (currentSplitMode !== 'single') {
+    if (!secondaryId || !tabs.has(secondaryId) || secondaryId === activeId) {
+      const other = Array.from(tabs.keys()).find((id) => id !== activeId);
+      secondaryId = other ?? null;
+    }
+  } else {
+    secondaryId = null;
+  }
+
+  if (currentSplitMode !== 'single' && !secondaryId) {
+    currentSplitMode = 'single';
+    updateSplitControls();
+  }
+
+  stageEl.classList.toggle('split-h', currentSplitMode === 'horizontal');
+  stageEl.classList.toggle('split-v', currentSplitMode === 'vertical');
+
   for (const [id, tab] of tabs) {
-    const isAct = id === activeId;
-    tab.slot.classList.toggle('hidden', !isAct);
-    if (isAct) {
+    const isPrimary = id === activeId;
+    const isSecondary = currentSplitMode !== 'single' && id === secondaryId;
+    const isVisible = isPrimary || isSecondary;
+
+    tab.slot.classList.toggle('hidden', !isVisible);
+    tab.slot.classList.toggle('active-pane', isPrimary);
+
+    if (isVisible) {
       fitTab(tab);
-      tab.term.focus();
-      showMetricsFor(tab);
+      if (isPrimary) {
+        tab.term.focus();
+        showMetricsFor(tab);
+      }
     }
   }
-  if (!activeId) monCtrl.renderMetrics(null, 'idle');
+
   renderTabs();
   sftpCtrl.syncSession();
+}
+
+function selectTab(sessionId: string | null): void {
+  if (!sessionId) {
+    activeId = null;
+    secondaryId = null;
+    currentSplitMode = 'single';
+    updateSplitControls();
+    document.getElementById('term-empty')?.classList.remove('hidden');
+    monCtrl.renderMetrics(null, 'idle');
+    renderTabs();
+    sftpCtrl.syncSession();
+    return;
+  }
+
+  document.getElementById('term-empty')?.classList.add('hidden');
+
+  if (currentSplitMode !== 'single') {
+    if (sessionId === secondaryId) {
+      const prevActive = activeId;
+      activeId = sessionId;
+      secondaryId = prevActive;
+    } else {
+      activeId = sessionId;
+      if (secondaryId === activeId) {
+        const other = Array.from(tabs.keys()).find((id) => id !== activeId);
+        secondaryId = other ?? null;
+      }
+    }
+    updateSplitLayout();
+  } else {
+    activeId = sessionId;
+    secondaryId = null;
+    for (const [id, tab] of tabs) {
+      const isAct = id === activeId;
+      tab.slot.classList.toggle('hidden', !isAct);
+      tab.slot.classList.toggle('active-pane', isAct);
+      if (isAct) {
+        fitTab(tab);
+        tab.term.focus();
+        showMetricsFor(tab);
+      }
+    }
+    renderTabs();
+    sftpCtrl.syncSession();
+  }
 }
 
 function renderTabs(): void {
   const bar = document.getElementById('tabs') as HTMLElement;
   bar.textContent = '';
   for (const [id, tab] of tabs) {
+    const isPrimary = id === activeId;
+    const isSecondary = currentSplitMode !== 'single' && id === secondaryId;
     const chip = document.createElement('div');
-    chip.className = `tab-chip${id === activeId ? ' active' : ''}${tab.closed ? ' closed' : ''}`;
+    chip.className = `tab-chip${isPrimary ? ' active' : ''}${tab.closed ? ' closed' : ''}`;
     const dot = document.createElement('span');
     dot.className = 'tab-dot';
     const label = document.createElement('span');
     label.textContent = tab.info.kind === 'local' ? '本机' : tab.info.alias;
+    chip.append(dot, label);
+
+    if (currentSplitMode !== 'single') {
+      if (isPrimary) {
+        const badge = document.createElement('span');
+        badge.className = 'pane-badge primary';
+        badge.textContent = '主屏';
+        chip.appendChild(badge);
+      } else if (isSecondary) {
+        const badge = document.createElement('span');
+        badge.className = 'pane-badge secondary';
+        badge.textContent = '副屏';
+        chip.appendChild(badge);
+      }
+    }
+
     const closeBtn = document.createElement('button');
     closeBtn.type = 'button';
     closeBtn.textContent = '×';
     closeBtn.style.padding = '0 4px';
     closeBtn.addEventListener('click', (e) => { e.stopPropagation(); void closeTab(id); });
-    chip.append(dot, label, closeBtn);
+    chip.appendChild(closeBtn);
     chip.addEventListener('click', () => selectTab(id));
     bar.appendChild(chip);
   }
@@ -275,7 +404,21 @@ async function closeTab(sessionId: string): Promise<void> {
   tab.slot.remove();
   tabs.delete(sessionId);
   treeCtrl.render();
-  selectTab(Array.from(tabs.keys()).pop() ?? null);
+
+  if (secondaryId === sessionId) {
+    secondaryId = null;
+  }
+  if (tabs.size < 2 && currentSplitMode !== 'single') {
+    currentSplitMode = 'single';
+    updateSplitControls();
+    document.getElementById('terminal-stage')?.classList.remove('split-h', 'split-v');
+  }
+
+  if (activeId === sessionId) {
+    selectTab(Array.from(tabs.keys()).pop() ?? null);
+  } else {
+    updateSplitLayout();
+  }
 }
 
 async function openSshTab(hostId: string): Promise<void> {
@@ -347,6 +490,9 @@ function bindGlobalUi(): void {
     const grid = measureGrid();
     createTermInstance(await webApi.openSession({ kind: 'local', cols: grid.cols, rows: grid.rows }));
   });
+  document.getElementById('split-single')?.addEventListener('click', () => setSplitMode('single'));
+  document.getElementById('split-horizontal')?.addEventListener('click', () => setSplitMode('horizontal'));
+  document.getElementById('split-vertical')?.addEventListener('click', () => setSplitMode('vertical'));
   document.getElementById('open-tunnels')?.addEventListener('click', () => void monCtrl.openTunnelModal());
   document.getElementById('inspector-toggle')?.addEventListener('click', () => document.getElementById('inspector')?.classList.toggle('hidden'));
   document.getElementById('theme-toggle')?.addEventListener('click', async () => {
@@ -374,8 +520,7 @@ function bindGlobalUi(): void {
       termPane.style.flex = `0 0 ${nextH}px`;
       sftpPane.style.flex = '1 1 auto';
       sftpPane.style.maxHeight = 'none';
-      const tab = activeId ? tabs.get(activeId) : undefined;
-      if (tab) fitTab(tab);
+      fitVisibleTabs();
     };
     const onUp = () => {
       window.removeEventListener('mousemove', onMove);
@@ -413,20 +558,17 @@ window.addEventListener('keydown', (e) => {
 });
 
 window.addEventListener('resize', () => {
-  const tab = activeId ? tabs.get(activeId) : undefined;
-  if (tab) fitTab(tab);
+  fitVisibleTabs();
 });
 const stage = document.getElementById('terminal-stage');
 if (stage && 'ResizeObserver' in window) {
   const observer = new ResizeObserver(() => {
-    const tab = activeId ? tabs.get(activeId) : undefined;
-    if (tab) fitTab(tab);
+    fitVisibleTabs();
   });
   observer.observe(stage);
 }
 void document.fonts?.ready.then(() => {
-  const tab = activeId ? tabs.get(activeId) : undefined;
-  if (tab) fitTab(tab);
+  fitVisibleTabs();
 });
 
 async function applySettings(): Promise<void> {
