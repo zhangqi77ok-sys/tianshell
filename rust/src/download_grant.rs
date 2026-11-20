@@ -21,9 +21,10 @@ pub struct ArchiveRequest {
     pub filename: String,
 }
 
-/// 把远端路径收成一条 `tar -C parent name`。
+/// 把远端路径收成一条 `tar -C parent -- name`。
 /// 路径 `/` 不能收成名字 `root`，否则打的是 `/root`，不是文件系统根。
 /// 整个根目录也不打包：里面有 `/proc` 这类特殊文件，而且会占住这条 SFTP 连接。
+/// `--` 后面才是目录名。否则 `-safe`、`--exclude` 这类合法名字会被 tar 当成选项。
 pub fn archive_request(remote: &str) -> Result<ArchiveRequest, &'static str> {
     if remote.is_empty() {
         return Err("缺少 path 参数");
@@ -47,7 +48,7 @@ pub fn archive_request(remote: &str) -> Result<ArchiveRequest, &'static str> {
         return Err("不会打包这个路径");
     }
     Ok(ArchiveRequest {
-        command: format!("tar -czf - -C {} {}", shell_quote(parent), shell_quote(name)),
+        command: format!("tar -czf - -C {} -- {}", shell_quote(parent), shell_quote(name)),
         filename: format!("{name}.tar.gz"),
     })
 }
@@ -202,7 +203,7 @@ mod tests {
         assert!(archive_request("//").is_err());
         assert!(archive_request(" / ").is_err());
         let home = archive_request("/root").unwrap();
-        assert_eq!(home.command, "tar -czf - -C '/' 'root'");
+        assert_eq!(home.command, "tar -czf - -C '/' -- 'root'");
         assert_eq!(home.filename, "root.tar.gz");
         assert!(!home.command.contains("-C '/' '.'"));
     }
@@ -210,10 +211,14 @@ mod tests {
     #[test]
     fn archive_command_uses_the_parent_and_the_leaf() {
         let log = archive_request("/var/log/").unwrap();
-        assert_eq!(log.command, "tar -czf - -C '/var' 'log'");
+        assert_eq!(log.command, "tar -czf - -C '/var' -- 'log'");
         assert_eq!(log.filename, "log.tar.gz");
         let quoted = archive_request("/tmp/o'brien").unwrap();
-        assert_eq!(quoted.command, "tar -czf - -C '/tmp' 'o'\\''brien'");
+        assert_eq!(quoted.command, "tar -czf - -C '/tmp' -- 'o'\\''brien'");
+        let dashed = archive_request("/tmp/qa/-safe").unwrap();
+        assert_eq!(dashed.command, "tar -czf - -C '/tmp/qa' -- '-safe'");
+        let long = archive_request("/tmp/qa/--exclude").unwrap();
+        assert_eq!(long.command, "tar -czf - -C '/tmp/qa' -- '--exclude'");
         assert_eq!(archive_request("/tmp/a;rm").unwrap_err(), "路径包含非法字符");
     }
 
@@ -233,6 +238,37 @@ mod tests {
         assert_eq!(file_download_rejected(DownloadKind::File, false), None);
         assert_eq!(file_download_rejected(DownloadKind::Archive, true), None);
         assert_eq!(file_download_rejected(DownloadKind::Archive, false), None);
+    }
+
+    /// GNU tar 1.35：`tar -C parent '-safe'` 退出码 64，把名字当成 `--safe`。
+    /// `--` 之后同一目录能打出来，成员里有 `note.txt`。
+    #[cfg(unix)]
+    #[test]
+    fn tar_archives_dash_prefixed_names_as_directories() {
+        let root = std::env::temp_dir().join(format!("ts-archive-{}", std::process::id()));
+        let parent = root.join("qa");
+        for name in ["-safe", "--exclude"] {
+            let leaf = parent.join(name);
+            std::fs::create_dir_all(&leaf).unwrap();
+            std::fs::write(leaf.join("note.txt"), b"marker").unwrap();
+            let remote = leaf.to_string_lossy().into_owned();
+            let req = archive_request(&remote).unwrap();
+            assert!(req.command.contains(&format!(" -- '{}'", name)), "{}", req.command);
+            let packed = std::process::Command::new("sh").arg("-c").arg(&req.command).output().expect("sh");
+            let stderr = String::from_utf8_lossy(&packed.stderr);
+            assert!(packed.status.success(), "{name}: {stderr}");
+            let mut listed = std::process::Command::new("tar")
+                .args(["-tzf", "-"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("tar");
+            std::io::Write::write_all(&mut listed.stdin.take().unwrap(), &packed.stdout).unwrap();
+            let listed = listed.wait_with_output().unwrap();
+            let members = String::from_utf8_lossy(&listed.stdout);
+            assert!(members.contains(&format!("{name}/note.txt")), "{name}: {members}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
