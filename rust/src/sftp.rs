@@ -270,7 +270,8 @@ pub fn write_bytes(sess: &Session, file_path: &str, bytes: &[u8], mut on_progres
     let sftp = sess.sftp()?;
     let target = follow_write_target(file_path, |path| classify_node(&sftp, path))?;
     let temp = staged_upload_path(&target.path, &uuid::Uuid::new_v4().simple().to_string())?;
-    if let Err(err) = write_exclusive(&sftp, &temp, bytes, &mut on_progress) {
+    let mode = staging_mode(target.mode);
+    if let Err(err) = write_exclusive(&sftp, &temp, bytes, mode, &mut on_progress) {
         let _ = sftp.unlink(Path::new(&temp));
         return Err(err);
     }
@@ -343,47 +344,64 @@ fn follow_write_target(start: &str, mut inspect: impl FnMut(&str) -> Result<Node
             NodeKind::Missing => return Ok(WriteTarget { path: current, mode: None }),
             NodeKind::Directory => return Err(SftpError::Rejected("这是目录，不能当作文件写入".into())),
             NodeKind::Other => return Err(SftpError::Rejected("这个路径不是普通文件，没有写入".into())),
-            NodeKind::File { mode } => return Ok(WriteTarget { path: current, mode }),
+            NodeKind::File { mode } => {
+                // 服务端没给出权限时按仅所有者处理，避免临时文件先变成 0644。
+                return Ok(WriteTarget { path: current, mode: Some(mode.unwrap_or(0o600)) });
+            }
             NodeKind::Symlink(link) => current = join_link_target(&current, &link),
         }
     }
     Err(SftpError::Rejected("符号链接套得太深，没有写入".into()))
 }
 
+/// 已有文件用它自己的权限位创建临时文件。新文件仍是 0644。
+/// 不能先用 0644 再改回 0600，那段时间里替换内容可被其他用户读取。
+fn staging_mode(existing: Option<u32>) -> u32 {
+    match existing {
+        Some(mode) => mode & 0o777,
+        None => 0o644,
+    }
+}
+
 fn join_link_target(current: &str, link: &str) -> String {
     if link.starts_with('/') {
-        return normalize_posix(link);
+        return tidy_path(link);
     }
     let parent = parent_posix(current);
-    normalize_posix(&format!("{parent}/{link}"))
+    let joined = if parent == "." {
+        link.to_string()
+    } else if parent == "/" {
+        format!("/{link}")
+    } else {
+        format!("{parent}/{link}")
+    };
+    tidy_path(&joined)
 }
 
 fn parent_posix(path: &str) -> String {
     match path.rfind('/') {
-        Some(0) | None => "/".to_string(),
-        Some(index) => path[..index].to_string(),
+        Some(0) => "/".to_string(),
+        Some(index) => {
+            let parent = &path[..index];
+            if parent.is_empty() { "/".to_string() } else { parent.to_string() }
+        }
+        None => ".".to_string(),
     }
 }
 
-fn normalize_posix(path: &str) -> String {
+/// 只去掉 `.` 和重复斜杠。`..` 留给文件系统解析。
+/// 父目录本身是符号链接时，按字符串消掉 `..` 会写到另一个文件。
+fn tidy_path(path: &str) -> String {
     let absolute = path.starts_with('/');
     let mut parts = Vec::new();
     for part in path.split('/') {
         if part.is_empty() || part == "." {
             continue;
         }
-        if part == ".." {
-            if absolute {
-                parts.pop();
-            } else {
-                parts.push("..");
-            }
-            continue;
-        }
         parts.push(part);
     }
     if absolute {
-        format!("/{}", parts.join("/"))
+        if parts.is_empty() { "/".to_string() } else { format!("/{}", parts.join("/")) }
     } else if parts.is_empty() {
         ".".to_string()
     } else {
@@ -399,6 +417,8 @@ fn staged_upload_path(dest: &str, nonce: &str) -> Result<String, SftpError> {
     let staged = format!(".{name}.tianshell-uploading-{nonce}");
     if parent == "/" {
         Ok(format!("/{staged}"))
+    } else if parent == "." {
+        Ok(staged)
     } else {
         Ok(format!("{parent}/{staged}"))
     }
@@ -412,7 +432,7 @@ fn split_file_name(path: &str) -> Result<(&str, &str), SftpError> {
     let (parent, name) = match trimmed.rfind('/') {
         Some(0) => ("/", &trimmed[1..]),
         Some(index) => (&trimmed[..index], &trimmed[index + 1..]),
-        None => ("/", trimmed),
+        None => (".", trimmed),
     };
     if name.is_empty() || name == "." || name == ".." {
         return Err(SftpError::Rejected("不能写入这个路径".into()));
@@ -420,11 +440,11 @@ fn split_file_name(path: &str) -> Result<(&str, &str), SftpError> {
     Ok((parent, name))
 }
 
-fn write_exclusive(sftp: &ssh2::Sftp, path: &str, bytes: &[u8], on_progress: &mut impl FnMut(u64, u64) -> bool) -> Result<(), SftpError> {
+fn write_exclusive(sftp: &ssh2::Sftp, path: &str, bytes: &[u8], mode: u32, on_progress: &mut impl FnMut(u64, u64) -> bool) -> Result<(), SftpError> {
     let mut file = sftp.open_mode(
         Path::new(path),
         ssh2::OpenFlags::WRITE | ssh2::OpenFlags::EXCLUSIVE,
-        0o644,
+        staging_mode(Some(mode)) as i32,
         ssh2::OpenType::File,
     )?;
     let total = bytes.len() as u64;
@@ -481,23 +501,29 @@ mod tests {
         assert!(staged_upload_path("/var/app.log", "ab/cd").is_err());
         assert!(staged_upload_path("/", "abc").is_err());
         assert!(staged_upload_path("/var/..", "abc").is_err());
+        assert_eq!(staged_upload_path("notes.txt", "abc123").unwrap(), ".notes.txt.tianshell-uploading-abc123");
+        assert_eq!(staging_mode(Some(0o600)), 0o600);
+        assert_eq!(staging_mode(Some(0o1644)), 0o644);
+        assert_eq!(staging_mode(None), 0o644);
     }
 
     #[test]
     fn write_target_follows_a_file_symlink_and_rejects_a_directory() {
-        assert_eq!(join_link_target("/qa/sub/link", "../real/data.txt"), "/qa/real/data.txt");
+        assert_eq!(join_link_target("/qa/sub/link", "../real/data.txt"), "/qa/sub/../real/data.txt");
         assert_eq!(join_link_target("/qa/link", "/abs/data.txt"), "/abs/data.txt");
+        assert_eq!(join_link_target("notes.txt", "other.txt"), "other.txt");
+        assert_eq!(join_link_target("dir/link", "../other.txt"), "dir/../other.txt");
         let file = follow_write_target("/qa/sub/link", |path| {
             if path == "/qa/sub/link" {
                 Ok(NodeKind::Symlink("../real/data.txt".into()))
-            } else if path == "/qa/real/data.txt" {
+            } else if path == "/qa/sub/../real/data.txt" {
                 Ok(NodeKind::File { mode: Some(0o700) })
             } else {
                 Ok(NodeKind::Missing)
             }
         })
         .unwrap();
-        assert_eq!(file.path, "/qa/real/data.txt");
+        assert_eq!(file.path, "/qa/sub/../real/data.txt");
         assert_eq!(file.mode, Some(0o700));
         let missing = follow_write_target("/qa/new.txt", |_| Ok(NodeKind::Missing)).unwrap();
         assert_eq!(missing.mode, None);
@@ -591,6 +617,58 @@ mod tests {
         assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o600);
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
         assert_eq!(std::fs::read_link(&link).unwrap(), real);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_replacement_is_unreadable_before_the_first_byte() {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let root = std::env::temp_dir().join(format!("ts-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mode = staging_mode(Some(0o600));
+        assert_eq!(mode, 0o600);
+        let temp = root.join(".keep.txt.tianshell-uploading-abc123");
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(mode).open(&temp).unwrap();
+        let before = std::fs::symlink_metadata(&temp).unwrap().permissions().mode() & 0o777;
+        assert_eq!(before & 0o077, 0);
+        file.write_all(b"secret-bytes").unwrap();
+        let during = std::fs::symlink_metadata(&temp).unwrap().permissions().mode() & 0o777;
+        assert_eq!(during & 0o077, 0);
+        let wide = root.join("wide.txt");
+        std::fs::OpenOptions::new().write(true).create_new(true).mode(0o644).open(&wide).unwrap();
+        let wide_mode = std::fs::symlink_metadata(&wide).unwrap().permissions().mode() & 0o777;
+        assert_ne!(wide_mode & 0o044, 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_parent_dotdot_follows_the_filesystem_not_the_lexical_path() {
+        let root = std::env::temp_dir().join(format!("ts-lex-{}", std::process::id()));
+        let var_dir = root.join("var");
+        let data_log = root.join("data").join("log");
+        std::fs::create_dir_all(&var_dir).unwrap();
+        std::fs::create_dir_all(&data_log).unwrap();
+        let victim = var_dir.join("only-here.txt");
+        let physical = root.join("data").join("only-here.txt");
+        std::fs::write(&victim, b"do-not-touch").unwrap();
+        std::fs::write(&physical, b"physical-original").unwrap();
+        std::os::unix::fs::symlink(&data_log, var_dir.join("log")).unwrap();
+        std::os::unix::fs::symlink("../only-here.txt", data_log.join("pointer")).unwrap();
+        let start = var_dir.join("log").join("pointer");
+        let target = follow_write_target(start.to_str().unwrap(), local_node).unwrap();
+        let resolved = std::fs::canonicalize(&target.path).unwrap();
+        assert_eq!(resolved, std::fs::canonicalize(&physical).unwrap());
+        assert_ne!(resolved, std::fs::canonicalize(&victim).unwrap());
+        std::fs::write(&target.path, b"updated-physical").unwrap();
+        assert_eq!(std::fs::read(&physical).unwrap(), b"updated-physical");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"do-not-touch");
+        let temp = staged_upload_path(&target.path, "abc123").unwrap();
+        std::fs::write(&temp, b"staged").unwrap();
+        assert_eq!(std::fs::canonicalize(&temp).unwrap().parent().unwrap(), std::fs::canonicalize(root.join("data")).unwrap());
+        assert!(!var_dir.join(".only-here.txt.tianshell-uploading-abc123").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 
