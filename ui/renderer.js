@@ -6642,6 +6642,12 @@ WARNING: This link could potentially be dangerous`)) {
   function clearScreenInput() {
     return "\f";
   }
+  function quickCommandInput(command) {
+    const text = command.replace(/[\r\n]+$/, "");
+    if (!text.trim()) return "";
+    return `${text}
+`;
+  }
   var LINK_DOWN_NOTICE_GAP_MS = 4e3;
   function inputDelivery(haveRecipients, linkOpen) {
     if (!haveRecipients) return "no-terminal";
@@ -8086,8 +8092,12 @@ ${op.command}`;
           showToast("\u8BF7\u5148\u6253\u5F00\u6216\u9009\u4E2D\u4E00\u4E2A\u7EC8\u7AEF\u4F1A\u8BDD", "error");
           return;
         }
-        sendInput(`${op.command}
-`);
+        const line = quickCommandInput(op.command);
+        if (!line) {
+          showToast("\u8FD9\u6761\u5FEB\u6377\u547D\u4EE4\u662F\u7A7A\u7684", "error");
+          return;
+        }
+        sendInput(line);
         document.getElementById("nav-ops-menu")?.classList.add("hidden");
         switchView("terminal");
       });

@@ -6,6 +6,7 @@ import {
   claimSingleFlight,
   editorWriteGuard,
   clearScreenInput,
+  quickCommandInput,
   historyAfterFailedRefresh,
   historyEmptyText,
   inputDelivery,
@@ -139,6 +140,14 @@ test('多行粘贴只执行第一次选择，取消后不能再提交', () => {
   assert.equal(pasteNeedsConfirm('echo a\r\necho b'), true);
   assert.equal(pasteNeedsConfirm('echo a\n'), false);
   assert.equal(pasteNeedsConfirm('echo a'), false);
+});
+
+test('快捷命令先清掉未回车的半行，再单独执行', () => {
+  assert.equal(quickCommandInput('uptime && free -h'), '\u0015uptime && free -h\n');
+  assert.equal(quickCommandInput('df -hT\n'), '\u0015df -hT\n');
+  assert.equal(quickCommandInput(''), '');
+  assert.equal(quickCommandInput('   \n'), '');
+  assert.equal(quickCommandInput('echo PARTIALQuptime'), '\u0015echo PARTIALQuptime\n');
 });
 
 test('清空屏幕送给 shell，而不是本地擦除', () => {

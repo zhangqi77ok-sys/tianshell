@@ -11,6 +11,7 @@ import {
   broadcastRecipients,
   claimSingleFlight,
   clearScreenInput,
+  quickCommandInput,
   inputDelivery,
   keystrokeRecipients,
   nextFindIndex,
@@ -352,7 +353,12 @@ async function renderQuickOpsBar(): Promise<void> {
         showToast('请先打开或选中一个终端会话', 'error');
         return;
       }
-      sendInput(`${op.command}\n`);
+      const line = quickCommandInput(op.command);
+      if (!line) {
+        showToast('这条快捷命令是空的', 'error');
+        return;
+      }
+      sendInput(line);
       document.getElementById('nav-ops-menu')?.classList.add('hidden');
       switchView('terminal');
     });

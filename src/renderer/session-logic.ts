@@ -183,6 +183,16 @@ export function clearScreenInput(): string {
   return '\u000c';
 }
 
+/**
+ * 快捷命令要单独执行。Ctrl+U 丢掉还没回车的半行，再送出命令和换行。
+ * 命令汇编器同样把 Ctrl+U 当成清掉未提交输入。不发送 Ctrl+C，避免打断正在跑的程序。
+ */
+export function quickCommandInput(command: string): string {
+  const text = command.replace(/[\r\n]+$/, '');
+  if (!text.trim()) return '';
+  return `\u0015${text}\n`;
+}
+
 export type InputDelivery = 'send' | 'no-terminal' | 'link-down';
 
 /** 同一段断线里，输入失败只提示一次，避免每个按键都弹一条。 */

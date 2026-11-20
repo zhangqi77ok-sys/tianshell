@@ -527,6 +527,10 @@ mod tests {
         wiped.feed("\u{7f}");
         wiped.feed("\u{7f}");
         assert_eq!(wiped.feed("\r"), Vec::<String>::new());
+        let mut replaced = LineAssembler::new();
+        replaced.feed("echo PARTIAL");
+        let submitted = replaced.feed("\u{15}uptime && free -h\n");
+        assert_eq!(submitted, vec!["uptime && free -h".to_string()]);
     }
 
     #[test]
