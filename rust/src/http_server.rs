@@ -737,7 +737,6 @@ async fn stream_archive_download(state: AppState, id: String, remote: String) ->
         Err(message) => return json_err(StatusCode::BAD_REQUEST, message),
     };
     let filename = packed.filename.clone();
-    let command = packed.command;
 
     let tid = Uuid::new_v4().to_string();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -761,6 +760,9 @@ async fn stream_archive_download(state: AppState, id: String, remote: String) ->
         let fname_job = fname.clone();
         let tid_job = tid_progress.clone();
         let outcome = with_ssh(&state_for_task, &session_id, move |session| {
+            // 用户看到的路径可能是指向目录的符号链接。按原路径打包只会收进链接本身。
+            let source = crate::sftp::archive_tree(session, &remote_job).map_err(|err| err.to_string())?;
+            let command = archive_request(&source).map_err(|message| message.to_string())?.command;
             session.set_blocking(true);
             let mut channel = session.channel_session().map_err(|err| err.to_string())?;
             channel.exec(&command).map_err(|err| format!("执行远端打包失败: {err}"))?;
