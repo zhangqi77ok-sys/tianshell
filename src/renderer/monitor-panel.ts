@@ -17,7 +17,10 @@ export class MonitorAndToolsController {
   private readonly swapBar = document.getElementById('mon-swap-bar') as HTMLElement;
   private readonly rxEl = document.getElementById('mon-rx') as HTMLElement;
   private readonly txEl = document.getElementById('mon-tx') as HTMLElement;
+  private readonly diskReadEl = document.getElementById('mon-disk-read') as HTMLElement | null;
+  private readonly diskWriteEl = document.getElementById('mon-disk-write') as HTMLElement | null;
   private readonly loadEl = document.getElementById('mon-load') as HTMLElement;
+  private readonly loadDetailEl = document.getElementById('mon-load-detail') as HTMLElement | null;
   private readonly hostEl = document.getElementById('mon-host') as HTMLElement;
   private readonly disksEl = document.getElementById('mon-disks') as HTMLElement;
   private readonly procsEl = document.getElementById('mon-procs') as HTMLElement;
@@ -49,7 +52,10 @@ export class MonitorAndToolsController {
       this.swapBar.style.width = '0%';
       this.rxEl.textContent = '—';
       this.txEl.textContent = '—';
+      if (this.diskReadEl) this.diskReadEl.textContent = '—';
+      if (this.diskWriteEl) this.diskWriteEl.textContent = '—';
       this.loadEl.textContent = '—';
+      if (this.loadDetailEl) this.loadDetailEl.textContent = '1m / 5m / 15m';
       this.disksEl.textContent = '';
       this.procsEl.textContent = '';
       return;
@@ -70,7 +76,18 @@ export class MonitorAndToolsController {
 
     this.rxEl.textContent = `${formatBytes(metrics.net.rxBytesPerSec)}/s`;
     this.txEl.textContent = `${formatBytes(metrics.net.txBytesPerSec)}/s`;
-    this.loadEl.textContent = metrics.loadAvg.map((x) => x.toFixed(2)).join('  ');
+
+    if (this.diskReadEl) {
+      this.diskReadEl.textContent = metrics.diskIo ? `${formatBytes(metrics.diskIo.readBytesPerSec)}/s` : '0 B/s';
+    }
+    if (this.diskWriteEl) {
+      this.diskWriteEl.textContent = metrics.diskIo ? `${formatBytes(metrics.diskIo.writeBytesPerSec)}/s` : '0 B/s';
+    }
+
+    this.loadEl.textContent = metrics.loadAvg[0].toFixed(2);
+    if (this.loadDetailEl) {
+      this.loadDetailEl.textContent = `5m: ${metrics.loadAvg[1].toFixed(2)}  15m: ${metrics.loadAvg[2].toFixed(2)}`;
+    }
 
     this.disksEl.textContent = '';
     for (const d of metrics.disks.slice(0, 4)) {

@@ -6992,7 +6992,10 @@ WARNING: This link could potentially be dangerous`)) {
     swapBar = document.getElementById("mon-swap-bar");
     rxEl = document.getElementById("mon-rx");
     txEl = document.getElementById("mon-tx");
+    diskReadEl = document.getElementById("mon-disk-read");
+    diskWriteEl = document.getElementById("mon-disk-write");
     loadEl = document.getElementById("mon-load");
+    loadDetailEl = document.getElementById("mon-load-detail");
     hostEl = document.getElementById("mon-host");
     disksEl = document.getElementById("mon-disks");
     procsEl = document.getElementById("mon-procs");
@@ -7018,7 +7021,10 @@ WARNING: This link could potentially be dangerous`)) {
         this.swapBar.style.width = "0%";
         this.rxEl.textContent = "\u2014";
         this.txEl.textContent = "\u2014";
+        if (this.diskReadEl) this.diskReadEl.textContent = "\u2014";
+        if (this.diskWriteEl) this.diskWriteEl.textContent = "\u2014";
         this.loadEl.textContent = "\u2014";
+        if (this.loadDetailEl) this.loadDetailEl.textContent = "1m / 5m / 15m";
         this.disksEl.textContent = "";
         this.procsEl.textContent = "";
         return;
@@ -7034,7 +7040,16 @@ WARNING: This link could potentially be dangerous`)) {
       this.swapEl.textContent = metrics.swapTotalKb > 0 ? `${formatBytes(metrics.swapUsedKb * 1024)} / ${formatBytes(metrics.swapTotalKb * 1024)}` : "\u2014";
       this.rxEl.textContent = `${formatBytes(metrics.net.rxBytesPerSec)}/s`;
       this.txEl.textContent = `${formatBytes(metrics.net.txBytesPerSec)}/s`;
-      this.loadEl.textContent = metrics.loadAvg.map((x) => x.toFixed(2)).join("  ");
+      if (this.diskReadEl) {
+        this.diskReadEl.textContent = metrics.diskIo ? `${formatBytes(metrics.diskIo.readBytesPerSec)}/s` : "0 B/s";
+      }
+      if (this.diskWriteEl) {
+        this.diskWriteEl.textContent = metrics.diskIo ? `${formatBytes(metrics.diskIo.writeBytesPerSec)}/s` : "0 B/s";
+      }
+      this.loadEl.textContent = metrics.loadAvg[0].toFixed(2);
+      if (this.loadDetailEl) {
+        this.loadDetailEl.textContent = `5m: ${metrics.loadAvg[1].toFixed(2)}  15m: ${metrics.loadAvg[2].toFixed(2)}`;
+      }
       this.disksEl.textContent = "";
       for (const d of metrics.disks.slice(0, 4)) {
         const row = document.createElement("div");

@@ -858,26 +858,30 @@ button.danger:hover:not(:disabled) {
 }
 .bento-kpi-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 12px;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 10px;
 }
 .bento-kpi-card {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 12px 14px;
+  padding: 10px 12px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
+  min-width: 0;
 }
 .kpi-label {
-  font-size: 11px;
+  font-size: 10.5px;
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .kpi-val {
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 700;
   color: #fff;
   font-family:
@@ -885,11 +889,20 @@ button.danger:hover:not(:disabled) {
     Consolas,
     monospace;
 }
+.kpi-sub-hint {
+  font-size: 10px;
+  color: var(--muted);
+  font-family:
+    "JetBrains Mono",
+    Consolas,
+    monospace;
+  margin-top: 2px;
+}
 .kpi-network-row {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  font-size: 11px;
+  font-size: 10.5px;
   margin-top: 2px;
 }
 .bento-detail-grid {

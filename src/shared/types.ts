@@ -99,6 +99,13 @@ export interface NetStat {
   totalTxBytes: number;
 }
 
+export interface DiskIoStat {
+  readBytesPerSec: number;
+  writeBytesPerSec: number;
+  readIops: number;
+  writeIops: number;
+}
+
 export interface ProcessStat {
   pid: number;
   user: string;
@@ -119,6 +126,7 @@ export interface ServerMetrics {
   swapUsedKb: number;
   disks: DiskStat[];
   net: NetStat;
+  diskIo?: DiskIoStat;
   processes: ProcessStat[];
 }
 

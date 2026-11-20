@@ -181,12 +181,23 @@
                   <div class="meter"><div id="mon-swap-bar" class="meter-fill amber"></div></div>
                 </div>
                 <div class="bento-kpi-card">
-                  <div class="kpi-label">网络与系统负载</div>
+                  <div class="kpi-label">网络流量 (Net I/O)</div>
                   <div class="kpi-network-row">
                     <div><small>下行 RX: </small><span id="mon-rx" class="mono">—</span></div>
                     <div><small>上行 TX: </small><span id="mon-tx" class="mono">—</span></div>
-                    <div><small>平均负载: </small><span id="mon-load" class="mono">—</span></div>
                   </div>
+                </div>
+                <div class="bento-kpi-card">
+                  <div class="kpi-label">磁盘 I/O (Disk I/O)</div>
+                  <div class="kpi-network-row">
+                    <div><small>读速率: </small><span id="mon-disk-read" class="mono">—</span></div>
+                    <div><small>写速率: </small><span id="mon-disk-write" class="mono">—</span></div>
+                  </div>
+                </div>
+                <div class="bento-kpi-card">
+                  <div class="kpi-label">系统平均负载 (Load)</div>
+                  <div class="kpi-val" id="mon-load">—</div>
+                  <div class="kpi-sub-hint" id="mon-load-detail">1m / 5m / 15m</div>
                 </div>
               </div>
 

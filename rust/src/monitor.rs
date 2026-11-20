@@ -11,6 +11,7 @@ echo __LOAD__; cat /proc/loadavg 2>/dev/null || uptime; \
 echo __CPU__; head -n 1 /proc/stat 2>/dev/null || true; \
 echo __MEM__; cat /proc/meminfo 2>/dev/null || true; \
 echo __NET__; cat /proc/net/dev 2>/dev/null || true; \
+echo __DISKIO__; cat /proc/diskstats 2>/dev/null || true; \
 echo __DF__; df -kP 2>/dev/null || df -k 2>/dev/null || true; \
 echo __PS__; ps -eo pid,user,pcpu,pmem,comm --sort=-pcpu 2>/dev/null | head -n 9 || true";
 
@@ -26,6 +27,18 @@ pub struct DiskStat {
     pub avail_kb: u64,
     #[serde(rename = "usePercent")]
     pub use_percent: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiskIoStat {
+    #[serde(rename = "readBytesPerSec")]
+    pub read_bytes_per_sec: f64,
+    #[serde(rename = "writeBytesPerSec")]
+    pub write_bytes_per_sec: f64,
+    #[serde(rename = "readIops")]
+    pub read_iops: f64,
+    #[serde(rename = "writeIops")]
+    pub write_iops: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +85,8 @@ pub struct ServerMetrics {
     pub swap_used_kb: u64,
     pub disks: Vec<DiskStat>,
     pub net: NetStat,
+    #[serde(rename = "diskIo")]
+    pub disk_io: DiskIoStat,
     pub processes: Vec<ProcessStat>,
 }
 
@@ -126,6 +141,12 @@ pub fn parse_metrics_sample(raw: &str) -> ServerMetrics {
             tx_bytes_per_sec: 0.0,
             total_rx_bytes: total_rx,
             total_tx_bytes: total_tx,
+        },
+        disk_io: DiskIoStat {
+            read_bytes_per_sec: 0.0,
+            write_bytes_per_sec: 0.0,
+            read_iops: 0.0,
+            write_iops: 0.0,
         },
         processes,
     }
@@ -233,6 +254,13 @@ pub fn metrics_from_samples(first_raw: &str, second_raw: &str, elapsed_secs: f64
     metrics.net.tx_bytes_per_sec = tx2.saturating_sub(tx1) as f64 / dt;
     metrics.net.total_rx_bytes = rx2;
     metrics.net.total_tx_bytes = tx2;
+
+    let (r_sec1, w_sec1, r_op1, w_op1) = disk_io_totals_raw(first_raw);
+    let (r_sec2, w_sec2, r_op2, w_op2) = disk_io_totals_raw(second_raw);
+    metrics.disk_io.read_bytes_per_sec = (r_sec2.saturating_sub(r_sec1) * 512) as f64 / dt;
+    metrics.disk_io.write_bytes_per_sec = (w_sec2.saturating_sub(w_sec1) * 512) as f64 / dt;
+    metrics.disk_io.read_iops = r_op2.saturating_sub(r_op1) as f64 / dt;
+    metrics.disk_io.write_iops = w_op2.saturating_sub(w_op1) as f64 / dt;
     metrics
 }
 
@@ -279,6 +307,78 @@ fn sum_net(lines: &[&str]) -> (u64, u64) {
     (rx, tx)
 }
 
+fn is_disk_device(dev: &str) -> bool {
+    if dev.starts_with("sd") || dev.starts_with("vd") {
+        return dev.len() == 3 && dev.chars().nth(2).map(|c| c.is_ascii_lowercase()).unwrap_or(false);
+    }
+    if dev.starts_with("xvd") {
+        return dev.len() == 4 && dev.chars().nth(3).map(|c| c.is_ascii_lowercase()).unwrap_or(false);
+    }
+    if dev.starts_with("nvme") {
+        return dev.contains('n') && !dev.contains('p');
+    }
+    if dev.starts_with("mmcblk") {
+        return !dev.contains('p');
+    }
+    false
+}
+
+fn disk_io_totals(sec: &HashMap<String, Vec<&str>>) -> (u64, u64, u64, u64) {
+    sum_disk_io(sec.get("DISKIO").map(Vec::as_slice).unwrap_or(&[]))
+}
+
+fn disk_io_totals_raw(raw: &str) -> (u64, u64, u64, u64) {
+    let sec = split_sections(raw);
+    disk_io_totals(&sec)
+}
+
+fn sum_disk_io(lines: &[&str]) -> (u64, u64, u64, u64) {
+    let mut total_r_sec = 0u64;
+    let mut total_w_sec = 0u64;
+    let mut total_r_ops = 0u64;
+    let mut total_w_ops = 0u64;
+    let mut matched_any = false;
+
+    for line in lines {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() >= 14 {
+            let dev = cols[2];
+            if is_disk_device(dev) {
+                matched_any = true;
+                let r_ops: u64 = cols[3].parse().unwrap_or(0);
+                let r_sec: u64 = cols[5].parse().unwrap_or(0);
+                let w_ops: u64 = cols[7].parse().unwrap_or(0);
+                let w_sec: u64 = cols[9].parse().unwrap_or(0);
+                total_r_ops = total_r_ops.saturating_add(r_ops);
+                total_r_sec = total_r_sec.saturating_add(r_sec);
+                total_w_ops = total_w_ops.saturating_add(w_ops);
+                total_w_sec = total_w_sec.saturating_add(w_sec);
+            }
+        }
+    }
+
+    if !matched_any {
+        for line in lines {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            if cols.len() >= 14 {
+                let dev = cols[2];
+                if !dev.starts_with("loop") && !dev.starts_with("ram") && !dev.starts_with("sr") {
+                    let r_ops: u64 = cols[3].parse().unwrap_or(0);
+                    let r_sec: u64 = cols[5].parse().unwrap_or(0);
+                    let w_ops: u64 = cols[7].parse().unwrap_or(0);
+                    let w_sec: u64 = cols[9].parse().unwrap_or(0);
+                    total_r_ops = total_r_ops.saturating_add(r_ops);
+                    total_r_sec = total_r_sec.saturating_add(r_sec);
+                    total_w_ops = total_w_ops.saturating_add(w_ops);
+                    total_w_sec = total_w_sec.saturating_add(w_sec);
+                }
+            }
+        }
+    }
+
+    (total_r_sec, total_w_sec, total_r_ops, total_w_ops)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,6 +399,8 @@ SwapTotal: 100 kB
 SwapFree: 100 kB
 __NET__
 eth0: 1000 0 0 0 0 0 0 0 500 0 0 0 0 0 0 0
+__DISKIO__
+   8       0 sda 100 0 2000 100 50 0 1000 50 0 100 150 0 0 0 0 0
 __DF__
 Filesystem 1K-blocks Used Available Use% Mounted on
 /dev/sda1 1000 100 900 10% /
@@ -323,6 +425,8 @@ SwapTotal: 100 kB
 SwapFree: 100 kB
 __NET__
 eth0: 3000 0 0 0 0 0 0 0 2500 0 0 0 0 0 0 0
+__DISKIO__
+   8       0 sda 200 0 6000 200 150 0 3000 150 0 200 350 0 0 0 0
 __DF__
 Filesystem 1K-blocks Used Available Use% Mounted on
 /dev/sda1 1000 100 900 10% /
@@ -362,6 +466,10 @@ PID USER %CPU %MEM COMMAND
         assert!((second.cpu_percent - 80.0).abs() < 0.05, "cpu {}", second.cpu_percent);
         assert!((second.net.rx_bytes_per_sec - 2000.0).abs() < 0.05, "rx {}", second.net.rx_bytes_per_sec);
         assert!((second.net.tx_bytes_per_sec - 2000.0).abs() < 0.05, "tx {}", second.net.tx_bytes_per_sec);
+        assert!((second.disk_io.read_bytes_per_sec - 2048000.0).abs() < 1.0, "disk read {}", second.disk_io.read_bytes_per_sec);
+        assert!((second.disk_io.write_bytes_per_sec - 1024000.0).abs() < 1.0, "disk write {}", second.disk_io.write_bytes_per_sec);
+        assert!((second.disk_io.read_iops - 100.0).abs() < 0.1, "read iops {}", second.disk_io.read_iops);
+        assert!((second.disk_io.write_iops - 100.0).abs() < 0.1, "write iops {}", second.disk_io.write_iops);
         assert!(started.elapsed() < Duration::from_millis(50), "probe fold slept: {:?}", started.elapsed());
     }
 }
