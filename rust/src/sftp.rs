@@ -513,6 +513,54 @@ fn classify_node(sftp: &ssh2::Sftp, path: &str) -> Result<NodeKind, SftpError> {
     }
 }
 
+/// 打包时，路径最后一截如果是指向目录的符号链接，`tar` 会只收这个链接，不会收目录里的文件。
+/// 先跟到最终目录再打包。目录里面的符号链接不跟。`..` 不按字符串消掉。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ArchiveNode {
+    Directory,
+    Symlink(String),
+    Other,
+    Missing,
+}
+
+pub fn archive_tree(sess: &Session, requested: &str) -> Result<String, SftpError> {
+    let sftp = sess.sftp()?;
+    follow_archive_tree(requested, |path| match sftp.lstat(Path::new(path)) {
+        Err(err) if is_missing(&err) => Ok(ArchiveNode::Missing),
+        Err(err) => Err(err.into()),
+        Ok(stat) => {
+            if stat.file_type().is_symlink() {
+                let link = sftp.readlink(Path::new(path))?;
+                let text = link.to_str().ok_or_else(|| SftpError::Rejected("符号链接目标不是文本，没有打包".into()))?;
+                Ok(ArchiveNode::Symlink(text.to_string()))
+            } else if stat.is_dir() {
+                Ok(ArchiveNode::Directory)
+            } else {
+                Ok(ArchiveNode::Other)
+            }
+        }
+    })
+}
+
+fn follow_archive_tree(start: &str, mut inspect: impl FnMut(&str) -> Result<ArchiveNode, SftpError>) -> Result<String, SftpError> {
+    let trimmed = start.trim_end_matches('/');
+    let original = if trimmed.is_empty() { "/".to_string() } else { trimmed.to_string() };
+    let mut current = original.clone();
+    let mut followed = false;
+    for _ in 0..8 {
+        match inspect(&current)? {
+            ArchiveNode::Symlink(link) => {
+                followed = true;
+                current = join_link_target(&current, &link);
+            }
+            ArchiveNode::Directory if followed => return Ok(current),
+            ArchiveNode::Directory | ArchiveNode::Other => return Ok(original),
+            ArchiveNode::Missing => return Err(SftpError::Rejected("远端路径不可用，没有打包".into())),
+        }
+    }
+    Err(SftpError::Rejected("符号链接套得太深，没有打包".into()))
+}
+
 fn follow_write_target(start: &str, mut inspect: impl FnMut(&str) -> Result<NodeKind, SftpError>) -> Result<WriteTarget, SftpError> {
     let mut current = start.to_string();
     for _ in 0..8 {
@@ -639,6 +687,59 @@ fn write_exclusive(sftp: &ssh2::Sftp, path: &str, bytes: &[u8], mode: u32, on_pr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_directory_symlink_uses_the_target_directory() {
+        let resolved = follow_archive_tree("/tmp/qa/link", |path| match path {
+            "/tmp/qa/link" => Ok(ArchiveNode::Symlink("real".into())),
+            "/tmp/qa/real" => Ok(ArchiveNode::Directory),
+            other => panic!("{other}"),
+        })
+        .unwrap();
+        assert_eq!(resolved, "/tmp/qa/real");
+
+        let plain = follow_archive_tree("/tmp/qa/real", |path| {
+            assert_eq!(path, "/tmp/qa/real");
+            Ok(ArchiveNode::Directory)
+        })
+        .unwrap();
+        assert_eq!(plain, "/tmp/qa/real");
+
+        let file_link = follow_archive_tree("/tmp/qa/file-link", |path| match path {
+            "/tmp/qa/file-link" => Ok(ArchiveNode::Symlink("a.txt".into())),
+            "/tmp/qa/a.txt" => Ok(ArchiveNode::Other),
+            other => panic!("{other}"),
+        })
+        .unwrap();
+        assert_eq!(file_link, "/tmp/qa/file-link");
+
+        let dotted = follow_archive_tree("/tmp/qa/link", |path| match path {
+            "/tmp/qa/link" => Ok(ArchiveNode::Symlink("../secret".into())),
+            "/tmp/qa/../secret" => Ok(ArchiveNode::Directory),
+            other => panic!("{other}"),
+        })
+        .unwrap();
+        assert_eq!(dotted, "/tmp/qa/../secret");
+
+        let absolute = follow_archive_tree("/tmp/qa/link", |path| match path {
+            "/tmp/qa/link" => Ok(ArchiveNode::Symlink("/var/data".into())),
+            "/var/data" => Ok(ArchiveNode::Directory),
+            other => panic!("{other}"),
+        })
+        .unwrap();
+        assert_eq!(absolute, "/var/data");
+
+        let missing = follow_archive_tree("/tmp/qa/link", |path| match path {
+            "/tmp/qa/link" => Ok(ArchiveNode::Symlink("missing".into())),
+            "/tmp/qa/missing" => Ok(ArchiveNode::Missing),
+            other => panic!("{other}"),
+        })
+        .unwrap_err();
+        assert!(missing.to_string().contains("没有打包"), "{missing}");
+
+        let deep = follow_archive_tree("/tmp/qa/a", |_| Ok(ArchiveNode::Symlink("a".into()))).unwrap_err();
+        assert!(deep.to_string().contains("太深"), "{deep}");
+    }
 
     #[test]
     fn special_nodes_are_not_regular_files() {
@@ -1119,6 +1220,17 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn tar_members(command: &str) -> String {
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("{command} | tar -tzvf -"))
+            .output()
+            .expect("tar");
+        assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stderr), String::from_utf8_lossy(&output.stdout));
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    #[cfg(unix)]
     fn read_sshd_log(path: &std::path::Path) -> String {
         let output = std::process::Command::new("sudo").args(["-n", "cat", "--", path.to_str().unwrap_or("")]).output();
         match output {
@@ -1262,6 +1374,41 @@ mod tests {
         std::os::unix::fs::symlink("plain.txt", std::path::Path::new(&dir).join("plain-link")).unwrap();
         assert_eq!(read_bytes_limited(&sess, &file, 4096).unwrap().0, b"plain");
         assert_eq!(read_bytes_limited(&sess, &format!("{dir}/plain-link"), 4096).unwrap().0, b"plain");
+    }
+
+    /// 路径本身是指向目录的符号链接时，原来的 tar 命令只收链接。跟到目录后，包里才有文件。
+    /// 目录内部的符号链接仍然只保存链接。
+    #[cfg(unix)]
+    #[test]
+    fn archive_of_a_directory_symlink_contains_the_target_files() {
+        if !std::path::Path::new("/usr/sbin/sshd").is_file() || !std::path::Path::new("/usr/bin/tar").is_file() {
+            return;
+        }
+        if !std::process::Command::new("sudo").args(["-n", "true"]).status().map(|status| status.success()).unwrap_or(false) {
+            return;
+        }
+        let server = LocalSshd::start().unwrap();
+        let sess = connect_sftp(server.port, &server.key).unwrap();
+        let dir = server.work.clone();
+        let real = std::path::Path::new(&dir).join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("a.txt"), b"secret-bytes\n").unwrap();
+        std::os::unix::fs::symlink("/etc/hostname", real.join("host")).unwrap();
+        std::os::unix::fs::symlink("real", std::path::Path::new(&dir).join("link")).unwrap();
+
+        let resolved = archive_tree(&sess, &format!("{dir}/link")).unwrap();
+        assert_eq!(resolved, format!("{dir}/real"));
+        assert_eq!(archive_tree(&sess, &format!("{dir}/real")).unwrap(), format!("{dir}/real"));
+
+        let fixed = crate::download_grant::archive_request(&resolved).unwrap();
+        let listing = tar_members(&fixed.command);
+        assert!(listing.contains("a.txt"), "{listing}");
+        assert!(listing.contains("host") && listing.contains("->"), "{listing}");
+
+        let old = crate::download_grant::archive_request(&format!("{dir}/link")).unwrap();
+        let old_listing = tar_members(&old.command);
+        assert!(!old_listing.contains("a.txt"), "{old_listing}");
+        assert!(old_listing.contains("link ->"), "{old_listing}");
     }
 
     #[test]
