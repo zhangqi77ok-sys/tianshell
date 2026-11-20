@@ -6654,6 +6654,9 @@ WARNING: This link could potentially be dangerous`)) {
   function keepEditorOpen(dirty, discardConfirmed) {
     return dirty && !discardConfirmed;
   }
+  function failedLoadEffect(haveListing) {
+    return haveListing ? "keep" : "show-error";
+  }
   function remoteChildPath(dir, name) {
     const trimmed = name.trim();
     if (!trimmed || trimmed === "." || trimmed === "..") return null;
@@ -6781,6 +6784,7 @@ WARNING: This link could potentially be dangerous`)) {
     editorTruncated = false;
     editorClosePending = false;
     listedNames = [];
+    haveListing = false;
     pathInput = document.getElementById("sftp-path");
     breadcrumbsEl = document.getElementById("sftp-breadcrumbs");
     editPathBtn = document.getElementById("sftp-edit-path");
@@ -6827,6 +6831,7 @@ WARNING: This link could potentially be dangerous`)) {
       if (!sid) {
         this.currentDir = "/";
         this.listedNames = [];
+        this.haveListing = false;
         this.showListingMessage("\u7A7A\u95F2\u3002\u8FDE\u4E0A SSH \u4F1A\u8BDD\u540E\uFF0C\u8FD9\u91CC\u663E\u793A\u8BE5\u4F1A\u8BDD\u7684\u5F53\u524D\u76EE\u5F55\u3002", true);
         if (this.breadcrumbsEl) this.breadcrumbsEl.textContent = "";
         this.deps.onDirChange?.("/");
@@ -6834,6 +6839,8 @@ WARNING: This link could potentially be dangerous`)) {
       }
       if (switched) {
         this.currentDir = "/";
+        this.listedNames = [];
+        this.haveListing = false;
         this.showListingMessage("\u6B63\u5728\u8BFB\u53D6 / \u2026", true);
         this.deps.onDirChange?.("/");
       }
@@ -6909,6 +6916,7 @@ WARNING: This link could potentially be dangerous`)) {
         this.currentDir = requested;
         this.pathInput.value = this.currentDir;
         this.renderBreadcrumbs(this.currentDir);
+        this.haveListing = true;
         this.showPathInput(false);
         this.deps.onDirChange?.(this.currentDir);
         this.listedNames = list.map((entry) => entry.name);
@@ -6919,8 +6927,13 @@ WARNING: This link could potentially be dangerous`)) {
         this.renderEntries(visible);
       } catch (err) {
         if (!this.listingCurrent(sid, ticket)) return;
-        this.listedNames = [];
         const message = err instanceof Error ? err.message : "SFTP \u8BFB\u53D6\u5931\u8D25";
+        if (failedLoadEffect(this.haveListing) === "keep") {
+          this.deps.toast(message, "error");
+          if (!this.pathInput.classList.contains("hidden")) this.pathInput.focus();
+          return;
+        }
+        this.listedNames = [];
         this.showListingMessage(message, true);
       } finally {
         if (this.listingCurrent(sid, ticket)) this.tableEl.classList.remove("loading");
@@ -7278,15 +7291,15 @@ WARNING: This link could potentially be dangerous`)) {
       this.breadcrumbsEl?.addEventListener("dblclick", () => this.showPathInput(true));
       this.pathInput?.addEventListener("keydown", (e) => {
         if (e.key === "Enter") {
+          e.preventDefault();
           void this.load(this.pathInput.value);
-          this.showPathInput(false);
         } else if (e.key === "Escape") {
+          this.pathInput.value = this.currentDir;
           this.showPathInput(false);
         }
       });
       this.goBtn?.addEventListener("click", () => {
         void this.load(this.pathInput.value);
-        this.showPathInput(false);
       });
       document.getElementById("sftp-refresh")?.addEventListener("click", () => void this.load(this.currentDir));
       document.getElementById("sftp-mkdir")?.addEventListener("click", async () => {

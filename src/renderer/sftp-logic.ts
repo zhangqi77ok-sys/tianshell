@@ -33,6 +33,11 @@ export function keepEditorOpen(dirty: boolean, discardConfirmed: boolean): boole
   return dirty && !discardConfirmed;
 }
 
+/** 已经列出过目录时，跳转失败不能把这份列表和同名检查清掉。 */
+export function failedLoadEffect(haveListing: boolean): 'keep' | 'show-error' {
+  return haveListing ? 'keep' : 'show-error';
+}
+
 /** 把名字接到当前目录下。斜杠、空名和 .. 都不能出去。 */
 export function remoteChildPath(dir: string, name: string): string | null {
   const trimmed = name.trim();

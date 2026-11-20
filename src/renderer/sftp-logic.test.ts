@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   editorSaveBlock,
+  failedLoadEffect,
   keepEditorOpen,
   parseOctalMode,
   planUploads,
@@ -11,6 +12,11 @@ import {
 test('只预览了前一段的文件不能写回', () => {
   assert.equal(editorSaveBlock(false), null);
   assert.match(editorSaveBlock(true) ?? '', /截掉/);
+});
+
+test('目录跳转失败时留下已经列出的文件', () => {
+  assert.equal(failedLoadEffect(true), 'keep');
+  assert.equal(failedLoadEffect(false), 'show-error');
 });
 
 test('未确认放弃时，编辑器保持打开', () => {
