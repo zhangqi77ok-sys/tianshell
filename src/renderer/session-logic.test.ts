@@ -8,6 +8,8 @@ import {
   isCurrentGeneration,
   keystrokeRecipients,
   nextFindIndex,
+  pasteNeedsConfirm,
+  settlePaste,
   planSessionOpen,
   resizeIfChanged,
   seedBroadcastChecks,
@@ -120,6 +122,17 @@ test('重复点击和隐藏终端不会再发一次动作或尺寸', () => {
   assert.equal(resizeIfChanged({ cols: 80, rows: 24 }, 80, 24), null);
   assert.equal(resizeIfChanged(null, 12, 24), null);
   assert.equal(resizeIfChanged(null, 80, 4), null);
+});
+
+test('多行粘贴只执行第一次选择，取消后不能再提交', () => {
+  assert.equal(settlePaste(false, 'send'), 'send');
+  assert.equal(settlePaste(false, 'dismiss'), 'dismiss');
+  assert.equal(settlePaste(true, 'send'), 'ignore');
+  assert.equal(settlePaste(true, 'dismiss'), 'ignore');
+  assert.equal(pasteNeedsConfirm('echo a\necho b\n'), true);
+  assert.equal(pasteNeedsConfirm('echo a\r\necho b'), true);
+  assert.equal(pasteNeedsConfirm('echo a\n'), false);
+  assert.equal(pasteNeedsConfirm('echo a'), false);
 });
 
 test('编辑器只写回打开它的会话，监控只采用仍有效的最新结果', () => {

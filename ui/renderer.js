@@ -6407,7 +6407,7 @@ WARNING: This link could potentially be dangerous`)) {
           await webApi.deleteHost(h.id);
           await this.refresh();
         } catch (err) {
-          this.deps.toast(err instanceof Error ? err.message : "\u5220\u9664\u4E3B\u673A\u5931\u8D25");
+          this.deps.toast(err instanceof Error ? err.message : "\u5220\u9664\u4E3B\u673A\u5931\u8D25", "error");
         }
       });
       ops.append(connectBtn);
@@ -6496,7 +6496,7 @@ WARNING: This link could potentially be dangerous`)) {
         await webApi.saveGroup(name, groupId);
         await this.refresh();
       } catch (err) {
-        this.deps.toast(err instanceof Error ? err.message : "\u91CD\u547D\u540D\u5206\u7EC4\u5931\u8D25");
+        this.deps.toast(err instanceof Error ? err.message : "\u91CD\u547D\u540D\u5206\u7EC4\u5931\u8D25", "error");
       }
     }
     bindEvents() {
@@ -6510,7 +6510,7 @@ WARNING: This link could potentially be dangerous`)) {
           await webApi.saveGroup(name);
           await this.refresh();
         } catch (err) {
-          this.deps.toast(err instanceof Error ? err.message : "\u6DFB\u52A0\u5206\u7EC4\u5931\u8D25");
+          this.deps.toast(err instanceof Error ? err.message : "\u6DFB\u52A0\u5206\u7EC4\u5931\u8D25", "error");
         }
       });
       document.querySelectorAll('input[name="auth"]').forEach((r) => r.addEventListener("change", () => {
@@ -6630,6 +6630,14 @@ WARNING: This link could potentially be dangerous`)) {
   }
   function isCurrentGeneration(ticket, latest) {
     return ticket > 0 && ticket === latest;
+  }
+  function settlePaste(alreadySettled, choice) {
+    if (alreadySettled) return "ignore";
+    return choice;
+  }
+  function pasteNeedsConfirm(text) {
+    if (!text.includes("\n") && !text.includes("\r")) return false;
+    return text.split(/\r?\n/).filter((line) => line.trim().length > 0).length > 1;
   }
   function nextFindIndex(current, count, forward) {
     if (count <= 0) return -1;
@@ -7592,7 +7600,7 @@ WARNING: This link could potentially be dangerous`)) {
               await navigator.clipboard.writeText(row.command);
               this.deps.toast("\u5DF2\u590D\u5236\u547D\u4EE4\u5230\u526A\u8D34\u677F");
             } catch {
-              this.deps.toast("\u590D\u5236\u5931\u8D25");
+              this.deps.toast("\u590D\u5236\u5931\u8D25", "error");
             }
           });
           const cmd = document.createElement("div");
@@ -7669,7 +7677,7 @@ WARNING: This link could potentially be dangerous`)) {
             else await webApi.startTunnel(r.id);
             await this.renderTunnels();
           } catch (err) {
-            this.deps.toast(err instanceof Error ? err.message : "\u96A7\u9053\u64CD\u4F5C\u5931\u8D25");
+            this.deps.toast(err instanceof Error ? err.message : "\u96A7\u9053\u64CD\u4F5C\u5931\u8D25", "error");
           }
         });
         const del = document.createElement("button");
@@ -7685,7 +7693,7 @@ WARNING: This link could potentially be dangerous`)) {
             await webApi.deleteTunnel(r.id);
             await this.renderTunnels();
           } catch (err) {
-            this.deps.toast(err instanceof Error ? err.message : "\u5220\u9664\u96A7\u9053\u5931\u8D25");
+            this.deps.toast(err instanceof Error ? err.message : "\u5220\u9664\u96A7\u9053\u5931\u8D25", "error");
           }
         });
         ops.append(toggle, del);
@@ -7704,13 +7712,17 @@ WARNING: This link could potentially be dangerous`)) {
       document.getElementById("cancel-snippet")?.addEventListener("click", () => snipDlg.close());
       document.getElementById("snippet-form")?.addEventListener("submit", async (e) => {
         e.preventDefault();
-        await webApi.saveSnippet({
-          name: document.getElementById("snip-name").value,
-          category: document.getElementById("snip-cat").value,
-          command: document.getElementById("snip-cmd").value
-        });
-        snipDlg.close();
-        this.deps.reloadQuickOps?.();
+        try {
+          await webApi.saveSnippet({
+            name: document.getElementById("snip-name").value,
+            category: document.getElementById("snip-cat").value,
+            command: document.getElementById("snip-cmd").value
+          });
+          snipDlg.close();
+          this.deps.reloadQuickOps?.();
+        } catch (err) {
+          this.deps.toast(err instanceof Error ? err.message : "\u5FEB\u6377\u547D\u4EE4\u6CA1\u6709\u4FDD\u5B58", "error");
+        }
       });
       const tunDlg = document.getElementById("tunnel-dialog");
       const tunMode = document.getElementById("tun-mode");
@@ -7723,16 +7735,20 @@ WARNING: This link could potentially be dangerous`)) {
       document.getElementById("close-tunnels")?.addEventListener("click", () => tunDlg.close());
       document.getElementById("tunnel-form")?.addEventListener("submit", async (e) => {
         e.preventDefault();
-        await webApi.saveTunnel({
-          name: document.getElementById("tun-name").value,
-          hostId: document.getElementById("tun-host").value,
-          mode: tunMode.value,
-          localHost: "127.0.0.1",
-          localPort: Number(document.getElementById("tun-lport").value),
-          remoteHost: document.getElementById("tun-rhost").value,
-          remotePort: Number(document.getElementById("tun-rport").value)
-        });
-        await this.renderTunnels();
+        try {
+          await webApi.saveTunnel({
+            name: document.getElementById("tun-name").value,
+            hostId: document.getElementById("tun-host").value,
+            mode: tunMode.value,
+            localHost: "127.0.0.1",
+            localPort: Number(document.getElementById("tun-lport").value),
+            remoteHost: document.getElementById("tun-rhost").value,
+            remotePort: Number(document.getElementById("tun-rport").value)
+          });
+          await this.renderTunnels();
+        } catch (err) {
+          this.deps.toast(err instanceof Error ? err.message : "\u96A7\u9053\u89C4\u5219\u6CA1\u6709\u4FDD\u5B58", "error");
+        }
       });
     }
   };
@@ -8106,6 +8122,43 @@ ${op.command}`;
     menu.style.left = `${posX}px`;
     menu.style.top = `${posY}px`;
   }
+  function confirmMultilinePaste(sessionId, text) {
+    const tab = tabs.get(sessionId);
+    const dlg = document.getElementById("paste-confirm-dialog");
+    const form = document.getElementById("paste-confirm-form");
+    if (!tab || !dlg || !form) return;
+    const preview = document.getElementById("paste-confirm-preview");
+    const hint = document.getElementById("paste-confirm-hint");
+    const cancelBtn = document.getElementById("cancel-paste-btn");
+    const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0);
+    if (hint) hint.textContent = `\u68C0\u6D4B\u5230\u526A\u8D34\u677F\u5305\u542B ${lines.length} \u884C\u6587\u672C/\u547D\u4EE4\uFF0C\u76F4\u63A5\u7C98\u8D34\u5C06\u7ACB\u5373\u5411\u7EC8\u7AEF\u63D0\u4EA4\u6267\u884C\uFF1A`;
+    if (preview) preview.textContent = text;
+    let settled = false;
+    const finish = (choice) => {
+      const action = settlePaste(settled, choice);
+      if (action === "ignore") return;
+      settled = true;
+      form.removeEventListener("submit", onConfirm);
+      cancelBtn?.removeEventListener("click", onCancel);
+      dlg.removeEventListener("cancel", onEscape);
+      if (dlg.open) dlg.close();
+      if (action === "send") sendInput(text);
+      tab.term.focus();
+    };
+    const onConfirm = (event) => {
+      event.preventDefault();
+      finish("send");
+    };
+    const onCancel = () => finish("dismiss");
+    const onEscape = (event) => {
+      event.preventDefault();
+      finish("dismiss");
+    };
+    form.addEventListener("submit", onConfirm);
+    cancelBtn?.addEventListener("click", onCancel);
+    dlg.addEventListener("cancel", onEscape);
+    dlg.showModal();
+  }
   async function handleTerminalPaste(sessionId) {
     const tab = tabs.get(sessionId);
     if (!tab) return;
@@ -8113,43 +8166,16 @@ ${op.command}`;
     try {
       text = await navigator.clipboard.readText();
     } catch {
-      showToast("\u65E0\u6CD5\u8BFB\u53D6\u7CFB\u7EDF\u526A\u8D34\u677F\uFF0C\u8BF7\u4F7F\u7528\u5FEB\u6377\u952E Ctrl+V");
+      showToast("\u65E0\u6CD5\u8BFB\u53D6\u7CFB\u7EDF\u526A\u8D34\u677F\uFF0C\u8BF7\u4F7F\u7528\u5FEB\u6377\u952E Ctrl+V", "error");
       return;
     }
     if (!text) return;
-    const hasNewline = text.includes("\n") || text.includes("\r");
-    const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-    if (hasNewline && lines.length > 1) {
-      const dlg = document.getElementById("paste-confirm-dialog");
-      const preview = document.getElementById("paste-confirm-preview");
-      const hint = document.getElementById("paste-confirm-hint");
-      const form = document.getElementById("paste-confirm-form");
-      const cancelBtn = document.getElementById("cancel-paste-btn");
-      if (hint) hint.textContent = `\u68C0\u6D4B\u5230\u526A\u8D34\u677F\u5305\u542B ${lines.length} \u884C\u6587\u672C/\u547D\u4EE4\uFF0C\u76F4\u63A5\u7C98\u8D34\u5C06\u7ACB\u5373\u5411\u7EC8\u7AEF\u63D0\u4EA4\u6267\u884C\uFF1A`;
-      if (preview) preview.textContent = text;
-      const onConfirm = (e) => {
-        e.preventDefault();
-        cleanup();
-        dlg.close();
-        sendInput(text);
-        tab.term.focus();
-      };
-      const onCancel = () => {
-        cleanup();
-        dlg.close();
-        tab.term.focus();
-      };
-      const cleanup = () => {
-        form.removeEventListener("submit", onConfirm);
-        cancelBtn?.removeEventListener("click", onCancel);
-      };
-      form.addEventListener("submit", onConfirm);
-      cancelBtn?.addEventListener("click", onCancel);
-      dlg.showModal();
-    } else {
-      sendInput(text);
-      tab.term.focus();
+    if (pasteNeedsConfirm(text)) {
+      confirmMultilinePaste(sessionId, text);
+      return;
     }
+    sendInput(text);
+    tab.term.focus();
   }
   function createTermInstance(info) {
     if (tabs.has(info.sessionId)) {
@@ -8174,6 +8200,14 @@ ${op.command}`;
         }
       }
     });
+    slot.addEventListener("paste", (event) => {
+      const data = event.clipboardData;
+      const text = data?.getData("text/plain") || data?.getData("text") || "";
+      if (!pasteNeedsConfirm(text)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      confirmMultilinePaste(info.sessionId, text);
+    }, true);
     slot.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       if (activeId !== info.sessionId) {
@@ -8873,20 +8907,24 @@ ${op.command}`;
     document.getElementById("cancel-settings")?.addEventListener("click", () => setDlg.close());
     document.getElementById("settings-form")?.addEventListener("submit", async (e) => {
       e.preventDefault();
-      const s = await webApi.updateSettings({
-        theme: document.getElementById("set-theme").value,
-        fontSize: Number(document.getElementById("set-font").value),
-        monitorIntervalMs: Number(document.getElementById("set-interval").value),
-        showHiddenFiles: document.getElementById("set-hidden").checked
-      });
-      fontSize = s.fontSize;
-      document.documentElement.setAttribute("data-theme", s.theme);
-      syncThemeToggle();
-      applyTermTheme();
-      sftpCtrl.setShowHidden(s.showHiddenFiles);
-      for (const tab of tabs.values()) tab.term.options.fontSize = fontSize;
-      fitVisibleTabs();
-      setDlg.close();
+      try {
+        const s = await webApi.updateSettings({
+          theme: document.getElementById("set-theme").value,
+          fontSize: Number(document.getElementById("set-font").value),
+          monitorIntervalMs: Number(document.getElementById("set-interval").value),
+          showHiddenFiles: document.getElementById("set-hidden").checked
+        });
+        fontSize = s.fontSize;
+        document.documentElement.setAttribute("data-theme", s.theme);
+        syncThemeToggle();
+        applyTermTheme();
+        sftpCtrl.setShowHidden(s.showHiddenFiles);
+        for (const tab of tabs.values()) tab.term.options.fontSize = fontSize;
+        fitVisibleTabs();
+        setDlg.close();
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : "\u8BBE\u7F6E\u6CA1\u6709\u4FDD\u5B58", "error");
+      }
     });
     document.getElementById("ctx-copy")?.addEventListener("click", () => {
       document.getElementById("terminal-context-menu")?.classList.add("hidden");
@@ -9012,7 +9050,7 @@ ${op.command}`;
       await navigator.clipboard.writeText(text);
       showToast(ok);
     } catch {
-      showToast("\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u5728\u5BF9\u8BDD\u6846\u91CC\u624B\u52A8\u9009\u62E9");
+      showToast("\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u5728\u5BF9\u8BDD\u6846\u91CC\u624B\u52A8\u9009\u62E9", "error");
     }
   }
   async function writeCursorMcp() {

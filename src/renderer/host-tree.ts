@@ -13,7 +13,7 @@ export interface HostTreeDeps {
   onOpenAnother: (hostId: string) => void;
   onSelectHost?: (hostId: string) => void;
   onCancelConnect?: (hostId: string) => void;
-  toast: (msg: string) => void;
+  toast: (msg: string, kind?: 'info' | 'error') => void;
   promptText: (title: string, defaultVal?: string) => Promise<string | null>;
   confirm: (title: string, body: string) => Promise<boolean>;
   getActiveHostIds?: () => Set<string>;
@@ -177,7 +177,7 @@ export class HostTreeController {
         await webApi.deleteHost(h.id);
         await this.refresh();
       } catch (err) {
-        this.deps.toast(err instanceof Error ? err.message : '删除主机失败');
+        this.deps.toast(err instanceof Error ? err.message : '删除主机失败', 'error');
       }
     });
     ops.append(connectBtn);
@@ -272,7 +272,7 @@ export class HostTreeController {
       await webApi.saveGroup(name, groupId);
       await this.refresh();
     } catch (err) {
-      this.deps.toast(err instanceof Error ? err.message : '重命名分组失败');
+      this.deps.toast(err instanceof Error ? err.message : '重命名分组失败', 'error');
     }
   }
 
@@ -287,7 +287,7 @@ export class HostTreeController {
         await webApi.saveGroup(name);
         await this.refresh();
       } catch (err) {
-        this.deps.toast(err instanceof Error ? err.message : '添加分组失败');
+        this.deps.toast(err instanceof Error ? err.message : '添加分组失败', 'error');
       }
     });
     document.querySelectorAll<HTMLInputElement>('input[name="auth"]').forEach((r) => r.addEventListener('change', () => {
