@@ -5,6 +5,7 @@ import {
   broadcastRecipients,
   claimSingleFlight,
   editorWriteGuard,
+  clearScreenInput,
   historyAfterFailedRefresh,
   historyEmptyText,
   inputDelivery,
@@ -138,6 +139,13 @@ test('多行粘贴只执行第一次选择，取消后不能再提交', () => {
   assert.equal(pasteNeedsConfirm('echo a\r\necho b'), true);
   assert.equal(pasteNeedsConfirm('echo a\n'), false);
   assert.equal(pasteNeedsConfirm('echo a'), false);
+});
+
+test('清空屏幕送给 shell，而不是本地擦除', () => {
+  const input = clearScreenInput();
+  assert.equal(input, '\u000c');
+  assert.equal(input.includes('\n'), false);
+  assert.equal(input.includes('\u001b'), false);
 });
 
 test('历史搜索没有结果时，不说成还没有命令', () => {

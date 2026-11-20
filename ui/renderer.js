@@ -6639,6 +6639,9 @@ WARNING: This link could potentially be dangerous`)) {
   function historyAfterFailedRefresh(haveList) {
     return haveList ? "keep" : "show-error";
   }
+  function clearScreenInput() {
+    return "\f";
+  }
   var LINK_DOWN_NOTICE_GAP_MS = 4e3;
   function inputDelivery(haveRecipients, linkOpen) {
     if (!haveRecipients) return "no-terminal";
@@ -9003,10 +9006,7 @@ ${op.command}`;
     });
     document.getElementById("ctx-clear")?.addEventListener("click", () => {
       document.getElementById("terminal-context-menu")?.classList.add("hidden");
-      if (!activeId) return;
-      const tab = tabs.get(activeId);
-      if (!tab) return;
-      tab.term.write("\x1B[2J\x1B[3J\x1B[H");
+      sendInput(clearScreenInput());
     });
     document.getElementById("ctx-search")?.addEventListener("click", () => {
       document.getElementById("terminal-context-menu")?.classList.add("hidden");

@@ -10,6 +10,7 @@ import {
   acceptLiveMetrics,
   broadcastRecipients,
   claimSingleFlight,
+  clearScreenInput,
   inputDelivery,
   keystrokeRecipients,
   nextFindIndex,
@@ -1367,10 +1368,7 @@ function bindGlobalUi(): void {
 
   document.getElementById('ctx-clear')?.addEventListener('click', () => {
     document.getElementById('terminal-context-menu')?.classList.add('hidden');
-    if (!activeId) return;
-    const tab = tabs.get(activeId);
-    if (!tab) return;
-    tab.term.write('\x1b[2J\x1b[3J\x1b[H');
+    sendInput(clearScreenInput());
   });
 
   document.getElementById('ctx-search')?.addEventListener('click', () => {
