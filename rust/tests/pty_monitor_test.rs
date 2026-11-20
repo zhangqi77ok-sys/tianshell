@@ -1,7 +1,13 @@
 use std::io::Read;
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 use tianshell_core::monitor::parse_metrics_sample;
 use tianshell_core::pty::LocalShellSession;
+
+/// 提示符已经出现，并且这一小段时间没有新输出，才说明 shell 开始读键盘。
+/// 这不是启动前的固定等待：输出还在涨时计时会重新开始。
+const STARTUP_QUIET: Duration = Duration::from_millis(200);
 
 fn strip_ansi(input: &str) -> String {
     let bytes = input.as_bytes();
@@ -37,39 +43,127 @@ fn strip_ansi(input: &str) -> String {
     out
 }
 
-#[test]
-fn test_local_shell_echo_and_crlf() {
-    let (mut session, mut reader) = LocalShellSession::spawn(None).unwrap();
-    assert!(session.is_alive());
+/// 读线程单独阻塞在 PTY 上，测试线程才能一边看输出一边守住截止时间。
+struct CapturedPty {
+    text: Arc<Mutex<String>>,
+}
 
-    session.write(b"echo TIAN_RUST_OK\r\n").unwrap();
-
-    let start = Instant::now();
-    let mut out = Vec::new();
-    let mut buf = [0u8; 1024];
-
-    while start.elapsed() < Duration::from_secs(5) {
-        if let Ok(n) = reader.read(&mut buf) {
-            if n > 0 {
-                out.extend_from_slice(&buf[..n]);
-                let s = String::from_utf8_lossy(&out);
-                if s.contains("TIAN_RUST_OK") {
-                    break;
+impl CapturedPty {
+    fn start(mut reader: Box<dyn Read + Send>) -> Self {
+        let text = Arc::new(Mutex::new(String::new()));
+        let sink = Arc::clone(&text);
+        thread::spawn(move || {
+            let mut buf = [0u8; 1024];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let chunk = String::from_utf8_lossy(&buf[..n]);
+                        sink.lock().expect("pty capture").push_str(&chunk);
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
                 }
             }
-        }
-        std::thread::sleep(Duration::from_millis(50));
+        });
+        Self { text }
     }
 
-    let result_str = String::from_utf8_lossy(&out);
-    assert!(result_str.contains("TIAN_RUST_OK"), "Shell did not echo expected string: {}", result_str);
+    fn snapshot(&self) -> String {
+        self.text.lock().expect("pty capture").clone()
+    }
+
+    /// 等到提示符出现且输出停稳。截止时间到了就返回当时的内容，由调用方断言。
+    fn wait_until_ready(&self, budget: Duration) -> String {
+        let start = Instant::now();
+        let mut last_len = 0usize;
+        let mut last_change = Instant::now();
+        loop {
+            let text = self.snapshot();
+            if text.len() != last_len {
+                last_len = text.len();
+                last_change = Instant::now();
+            }
+            if shell_prompt_ready(&text) && last_change.elapsed() >= STARTUP_QUIET {
+                return text;
+            }
+            if start.elapsed() >= budget {
+                return text;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn wait_until(&self, budget: Duration, done: impl Fn(&str) -> bool) -> String {
+        let start = Instant::now();
+        loop {
+            let text = self.snapshot();
+            if done(&text) || start.elapsed() >= budget {
+                return text;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+fn shell_prompt_ready(text: &str) -> bool {
+    strip_ansi(text).split(|c| c == '\n' || c == '\r').any(prompt_line)
+}
+
+fn prompt_line(line: &str) -> bool {
+    let line = line.trim();
+    if line.is_empty() || line.len() > 120 {
+        return false;
+    }
+    if line.starts_with("PS ") && line.ends_with('>') {
+        return true;
+    }
+    match line.chars().last() {
+        Some('$' | '#' | '%' | '❯' | '›') => true,
+        Some('>') => line == ">" || line.ends_with(" >"),
+        _ => false,
+    }
+}
+
+#[test]
+fn powershell_startup_banner_is_a_prompt_and_command_text_is_not() {
+    let flake = "\u{1b}[?9001h\u{1b}[?1004h\u{1b}[?25l\u{1b}[2J\u{1b}[m\u{1b}[H\u{1b}]0;Administrator: C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\u{7}\u{1b}[?25hPS C:\\Users\\runneradmin>";
+    assert!(shell_prompt_ready(flake));
+    assert!(shell_prompt_ready("PS C:\\>"));
+    assert!(shell_prompt_ready("$ "));
+    assert!(shell_prompt_ready("user@host:~$ "));
+    assert!(shell_prompt_ready(">"));
+    assert!(!shell_prompt_ready(""));
+    assert!(!shell_prompt_ready("\u{1b}[2J\u{1b}[H"));
+    assert!(!shell_prompt_ready("TIAN_RUST_OK\r\n"));
+    assert!(!shell_prompt_ready("echo hello>\r\n"));
+}
+
+#[test]
+fn test_local_shell_echo_and_crlf() {
+    let (mut session, reader) = LocalShellSession::spawn(None).unwrap();
+    assert!(session.is_alive());
+    let captured = CapturedPty::start(reader);
+
+    let ready = captured.wait_until_ready(Duration::from_secs(8));
+    assert!(shell_prompt_ready(&ready), "shell never became ready: {ready}");
+
+    session.write(b"echo TIAN_RUST_OK\r\n").unwrap();
+    let echoed = captured.wait_until(Duration::from_secs(5), |text| text.contains("TIAN_RUST_OK"));
+    assert!(
+        echoed.contains("TIAN_RUST_OK"),
+        "Shell did not echo expected string: {echoed}"
+    );
 
     session.kill().unwrap();
 }
 
 #[test]
 fn local_shell_is_a_pty_and_accepts_resize() {
-    let (mut session, mut reader) = LocalShellSession::spawn(None).unwrap();
+    let (mut session, reader) = LocalShellSession::spawn(None).unwrap();
+    let captured = CapturedPty::start(reader);
+    let ready = captured.wait_until_ready(Duration::from_secs(8));
+    assert!(shell_prompt_ready(&ready), "shell never became ready: {ready}");
     session.resize(40, 12).unwrap();
     // The success token must not appear as a literal in the command. Windows
     // PowerShell reprints the line with color codes, and that echo used to
@@ -81,28 +175,15 @@ fn local_shell_is_a_pty_and_accepts_resize() {
     };
     session.write(probe).unwrap();
 
-    let start = Instant::now();
-    let mut out = Vec::new();
-    let mut buf = [0u8; 1024];
-    while start.elapsed() < Duration::from_secs(12) {
-        match reader.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                out.extend_from_slice(&buf[..n]);
-                let text = strip_ansi(&String::from_utf8_lossy(&out));
-                let ready = if cfg!(windows) {
-                    text.lines().any(|line| line.trim() == "PTYOK")
-                } else {
-                    text.lines().any(|line| line.trim() == "HAS_TTY") && text.contains("12 40")
-                };
-                if ready {
-                    break;
-                }
-            }
-            Err(_) => std::thread::sleep(Duration::from_millis(30)),
+    let out = captured.wait_until(Duration::from_secs(8), |raw| {
+        let text = strip_ansi(raw);
+        if cfg!(windows) {
+            text.lines().any(|line| line.trim() == "PTYOK")
+        } else {
+            text.lines().any(|line| line.trim() == "HAS_TTY") && text.contains("12 40")
         }
-    }
-    let text = strip_ansi(&String::from_utf8_lossy(&out));
+    });
+    let text = strip_ansi(&out);
     let lines: Vec<&str> = text.split(|c| c == '\n' || c == '\r').map(str::trim).filter(|line| !line.is_empty()).collect();
     if cfg!(windows) {
         assert!(lines.iter().any(|line| *line == "PTYOK"), "local shell is not a tty: {text}");
