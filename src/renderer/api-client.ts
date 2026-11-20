@@ -4,7 +4,6 @@ import type {
   ConnectInfo,
   HostDraft,
   HostGroup,
-  IpcResult,
   PublicHost,
   SftpEntry,
   TunnelRule,
@@ -34,9 +33,28 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
     headers.set('content-type', 'application/json');
   }
   const resp = await fetch(path, { ...init, headers });
-  const json = (await resp.json()) as IpcResult<T>;
-  if (!json.ok) throw new Error(json.error || `请求失败 (${resp.status})`);
-  return json.data;
+  return readApiResult<T>(resp.status, await resp.text());
+}
+
+/** 把工作台响应收成数据或一句能直接给人看的错误。体积上限的纯文本 413 也走这句。 */
+export function readApiResult<T>(status: number, raw: string): T {
+  const body = raw.trim();
+  if (body.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(body) as { ok?: unknown; error?: unknown; data?: T };
+      if (parsed && typeof parsed === 'object' && typeof parsed.ok === 'boolean') {
+        if (!parsed.ok) {
+          const message = typeof parsed.error === 'string' && parsed.error ? parsed.error : `请求失败 (${status})`;
+          throw new Error(message);
+        }
+        return parsed.data as T;
+      }
+    } catch (err) {
+      if (err instanceof Error && !(err instanceof SyntaxError)) throw err;
+    }
+  }
+  if (status === 413) throw new Error('上传内容超过 64MB');
+  throw new Error(body || `请求失败 (${status})`);
 }
 
 export interface HistoryEntry {

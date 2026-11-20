@@ -7,7 +7,8 @@ use std::thread::JoinHandle;
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, FromRequestParts, Path as IdPath, Query, State};
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
+use axum::middleware::{from_fn, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -245,8 +246,39 @@ fn router(state: AppState) -> Router {
         .route("/api/transfers/:id/cancel", post(cancel_transfer))
         .route("/api/mcp", get(mcp_info))
         .fallback(fallback)
-        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(sftp::MAX_UPLOAD_BYTES))
+        .layer(from_fn(friendly_upload_limit))
         .with_state(state)
+}
+
+fn is_sftp_upload(path: &str) -> bool {
+    let mut parts = path.split('/').filter(|part| !part.is_empty());
+    parts.next() == Some("api")
+        && parts.next() == Some("sessions")
+        && parts.next().is_some()
+        && parts.next() == Some("sftp")
+        && parts.next() == Some("upload")
+        && parts.next().is_none()
+}
+
+async fn friendly_upload_limit(request: Request<Body>, next: Next) -> Response {
+    let upload = is_sftp_upload(request.uri().path());
+    let declared = request
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok());
+    if upload && sftp::declared_length_too_big(declared) {
+        return json_err(StatusCode::PAYLOAD_TOO_LARGE, sftp::UPLOAD_TOO_BIG_MESSAGE);
+    }
+    rewrite_upload_limit(upload, next.run(request).await)
+}
+
+fn rewrite_upload_limit(upload: bool, response: Response) -> Response {
+    if upload && response.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        json_err(StatusCode::PAYLOAD_TOO_LARGE, sftp::UPLOAD_TOO_BIG_MESSAGE)
+    } else {
+        response
+    }
 }
 
 struct Authed;
@@ -816,7 +848,7 @@ async fn sftp_upload(
         return json_err(StatusCode::BAD_REQUEST, "缺少 path 参数");
     }
     if sftp::upload_too_big(body.len()) {
-        return json_err(StatusCode::BAD_REQUEST, "上传内容超过 64MB");
+        return json_err(StatusCode::PAYLOAD_TOO_LARGE, sftp::UPLOAD_TOO_BIG_MESSAGE);
     }
     let filename = base_name(&remote);
     let tid = Uuid::new_v4().to_string();
@@ -1198,4 +1230,32 @@ fn launch_browser(url: &str) {
     let _ = std::process::Command::new("open").arg(url).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upload_route_is_the_only_path_that_gets_the_size_message() {
+        assert!(is_sftp_upload("/api/sessions/abc/sftp/upload"));
+        assert!(!is_sftp_upload("/api/sessions/abc/sftp/upload/extra"));
+        assert!(!is_sftp_upload("/api/sessions/abc/sftp/list"));
+        assert!(!is_sftp_upload("/api/hosts"));
+    }
+
+    #[tokio::test]
+    async fn plain_body_limit_becomes_the_upload_message() {
+        let plain = (StatusCode::PAYLOAD_TOO_LARGE, "length limit exceeded").into_response();
+        let rewritten = rewrite_upload_limit(true, plain);
+        assert_eq!(rewritten.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let bytes = axum::body::to_bytes(rewritten.into_body(), 1024).await.unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains(sftp::UPLOAD_TOO_BIG_MESSAGE));
+        assert!(!text.contains("length limit exceeded"));
+
+        let ok = (StatusCode::OK, Json(json!({"ok": true}))).into_response();
+        let kept = rewrite_upload_limit(false, ok);
+        assert_eq!(kept.status(), StatusCode::OK);
+    }
 }

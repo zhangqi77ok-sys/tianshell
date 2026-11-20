@@ -483,6 +483,40 @@ fn mcp_call(port: u16, token: &str, session: &str, name: &str, arguments: &str) 
     tool_json(&response)
 }
 
+#[test]
+fn oversized_upload_is_refused_before_the_body_is_read() {
+    let dir = tempdir().unwrap();
+    let server = start_workbench(ServerOptions {
+        data_dir: Some(dir.path().to_path_buf()),
+        port: Some(0),
+        open_browser: false,
+    })
+    .expect("workbench");
+    let token = server.token.clone();
+    let (status, _, body) = exchange_length(
+        server.port,
+        "/api/sessions/missing/sftp/upload?path=/tmp/a.bin",
+        &token,
+        (tianshell_core::sftp::MAX_UPLOAD_BYTES as u64) + 1,
+        b"x",
+    );
+    assert_eq!(status, 413);
+    let parsed: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(parsed["ok"], false);
+    assert_eq!(parsed["error"], tianshell_core::sftp::UPLOAD_TOO_BIG_MESSAGE);
+    assert!(!body.contains("length limit exceeded"));
+
+    let (status, _, body) = http(
+        server.port,
+        "POST",
+        "/api/sessions/missing/sftp/upload?path=/tmp/a.bin",
+        Some(&token),
+        Some("hi"),
+    );
+    assert_eq!(status, 400);
+    assert!(body.contains("找不到这个会话"), "{body}");
+}
+
 fn http(port: u16, method: &str, path: &str, token: Option<&str>, body: Option<&str>) -> (u16, Vec<(String, String)>, String) {
     let mut extra = String::new();
     if let Some(token) = token {
@@ -504,6 +538,33 @@ fn http_with_bearer(
         extra.push_str(&format!("Mcp-Session-Id: {session}\r\n"));
     }
     exchange(port, method, path, &extra, body)
+}
+
+fn exchange_length(port: u16, path: &str, token: &str, declared: u64, payload: &[u8]) -> (u16, Vec<(String, String)>, String) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(3))).ok();
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nContent-Length: {declared}\r\nx-tianshell-token: {token}\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).unwrap();
+    stream.write_all(payload).unwrap();
+    let mut raw = Vec::new();
+    let mut buf = [0u8; 4096];
+    let started = Instant::now();
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => raw.extend_from_slice(&buf[..n]),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock || err.kind() == std::io::ErrorKind::TimedOut => {
+                if !raw.is_empty() || started.elapsed() > Duration::from_secs(4) {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    parse_response(&raw)
 }
 
 fn exchange(port: u16, method: &str, path: &str, extra_headers: &str, body: Option<&str>) -> (u16, Vec<(String, String)>, String) {
