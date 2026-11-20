@@ -6719,6 +6719,24 @@ WARNING: This link could potentially be dangerous`)) {
     }
     return { send, skipped, overwrite };
   }
+  function deletePrompt(kind, name) {
+    if (kind === "symlink") {
+      return {
+        title: `\u5220\u9664\u94FE\u63A5\u300C${name}\u300D\uFF1F`,
+        body: "\u53EA\u4F1A\u53BB\u6389\u8FD9\u4E2A\u7B26\u53F7\u94FE\u63A5\uFF0C\u4E0D\u4F1A\u5220\u9664\u5B83\u6307\u5411\u7684\u6587\u4EF6\u6216\u76EE\u5F55\u3002"
+      };
+    }
+    if (kind === "dir") {
+      return {
+        title: `\u5220\u9664\u76EE\u5F55\u300C${name}\u300D\uFF1F`,
+        body: "\u8FD9\u4E2A\u76EE\u5F55\u4F1A\u9012\u5F52\u5220\u9664\uFF0C\u91CC\u9762\u7684\u6587\u4EF6\u548C\u5B50\u76EE\u5F55\u90FD\u4F1A\u53BB\u6389\uFF0C\u800C\u4E14\u4E0D\u80FD\u6062\u590D\u3002"
+      };
+    }
+    return {
+      title: `\u5220\u9664\u300C${name}\u300D\uFF1F`,
+      body: "\u8FD9\u4E2A\u6587\u4EF6\u4F1A\u4ECE\u8FDC\u7AEF\u5220\u9664\uFF0C\u4E0D\u80FD\u6062\u590D\u3002"
+    };
+  }
   function parseOctalMode(raw) {
     const text = raw.trim();
     if (!/^[0-7]{3,4}$/.test(text)) return null;
@@ -6737,8 +6755,9 @@ WARNING: This link could potentially be dangerous`)) {
     }
     return `${v.toFixed(1)} ${units[u]}`;
   }
-  function getFileMeta(name, isDir) {
-    if (isDir) return { icon: "\u{1F4C1}", cls: "file-dir" };
+  function getFileMeta(name, kind) {
+    if (kind === "symlink") return { icon: "\u{1F517}", cls: "file-link" };
+    if (kind === "dir") return { icon: "\u{1F4C1}", cls: "file-dir" };
     const dot = name.lastIndexOf(".");
     const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
     switch (ext) {
@@ -6796,10 +6815,6 @@ WARNING: This link could potentially be dangerous`)) {
     }
   }
   var SftpController = class {
-    constructor(deps) {
-      this.deps = deps;
-      this.bindEvents();
-    }
     currentDir = "/";
     boundSession = null;
     showHidden = false;
@@ -6840,6 +6855,11 @@ WARNING: This link could potentially be dangerous`)) {
     closeEditorBtn = document.getElementById("close-editor-btn");
     editorOriginalContent = "";
     isEditorDirty = false;
+    deps;
+    constructor(deps) {
+      this.deps = deps;
+      this.bindEvents();
+    }
     setShowHidden(flag) {
       this.showHidden = flag;
       if (this.deps.getActiveSshId()) void this.load(this.currentDir);
@@ -6932,15 +6952,20 @@ WARNING: This link could potentially be dangerous`)) {
         this.goBtn?.classList.add("hidden");
       }
     }
-    async load(dirPath) {
+    /**
+     * `notify`：跳转失败时提示，并留下已经列出的目录。
+     * `defer`：这次失败不提示、不换列表，把结果交回调用方。
+     * 符号链接需要后者。`load` 自己接住列表错误后会正常返回，调用方的 catch 接不到。
+     */
+    async load(dirPath, failure = "notify") {
       const sid = this.deps.getActiveSshId();
-      if (!sid) return;
+      if (!sid) return "idle";
       const requested = dirPath || "/";
       const ticket = ++this.loadTicket;
       this.tableEl.classList.add("loading");
       try {
         const list = await webApi.sftpList(sid, requested);
-        if (!this.listingCurrent(sid, ticket)) return;
+        if (!this.listingCurrent(sid, ticket)) return "idle";
         this.currentDir = requested;
         this.pathInput.value = this.currentDir;
         this.renderBreadcrumbs(this.currentDir);
@@ -6950,19 +6975,22 @@ WARNING: This link could potentially be dangerous`)) {
         this.listedNames = list.map((entry) => entry.name);
         const visible = list.filter((e) => this.showHidden || !e.name.startsWith("."));
         const sig = `${sid}|${this.currentDir}|${visible.map((e) => `${e.path}:${e.size}:${e.mtimeMs}:${e.mode}`).join("|")}`;
-        if (sig === this.lastSig) return;
+        if (sig === this.lastSig) return "shown";
         this.lastSig = sig;
         this.renderEntries(visible);
+        return "shown";
       } catch (err) {
-        if (!this.listingCurrent(sid, ticket)) return;
+        if (!this.listingCurrent(sid, ticket)) return "idle";
+        if (failure === "defer") return "failed";
         const message = err instanceof Error ? err.message : "SFTP \u8BFB\u53D6\u5931\u8D25";
         if (failedLoadEffect(this.haveListing) === "keep") {
           this.deps.toast(message, "error");
           if (!this.pathInput.classList.contains("hidden")) this.pathInput.focus();
-          return;
+          return "failed";
         }
         this.listedNames = [];
         this.showListingMessage(message, true);
+        return "failed";
       } finally {
         if (this.listingCurrent(sid, ticket)) this.tableEl.classList.remove("loading");
       }
@@ -6991,7 +7019,7 @@ WARNING: This link could potentially be dangerous`)) {
         const nameTd = document.createElement("td");
         const nameBtn = document.createElement("span");
         const isDir = entry.kind === "dir";
-        const meta = getFileMeta(entry.name, isDir);
+        const meta = getFileMeta(entry.name, entry.kind);
         nameBtn.textContent = `${meta.icon} ${entry.name}`;
         nameBtn.style.cursor = "pointer";
         nameBtn.className = `sftp-item-name ${meta.cls}`;
@@ -7022,7 +7050,7 @@ WARNING: This link could potentially be dangerous`)) {
           } else if (entry.kind === "file") {
             void this.openEditor(entry.path);
           } else {
-            void this.load(entry.path).catch(() => void this.openEditor(entry.path));
+            void this.openSymlink(entry.path);
           }
         };
         nameBtn.addEventListener("click", (e) => {
@@ -7048,6 +7076,11 @@ WARNING: This link could potentially be dangerous`)) {
       });
       parent.appendChild(b);
     }
+    /** 先列目录。列开了就是指向目录的链接。列不开再按文件打开，当前列表留着。 */
+    async openSymlink(path) {
+      const outcome = await this.load(path, "defer");
+      if (outcome === "failed") await this.openEditor(path);
+    }
     async openEditor(remotePath) {
       const sid = this.deps.getActiveSshId();
       if (!sid) {
@@ -7061,7 +7094,7 @@ WARNING: This link could potentially be dangerous`)) {
         this.editorTruncated = res.truncated;
         this.setSaveEnabled(!res.truncated);
         const fileName = remotePath.split("/").pop() || "\u6587\u4EF6";
-        const meta = getFileMeta(fileName, false);
+        const meta = getFileMeta(fileName, "file");
         if (this.editorFileIcon) this.editorFileIcon.textContent = meta.icon;
         this.editorPathEl.textContent = res.truncated ? `${remotePath}\uFF08\u4EC5\u9884\u89C8\u524D 256KB\uFF09` : remotePath;
         this.editorPathEl.title = remotePath;
@@ -7229,11 +7262,8 @@ WARNING: This link could potentially be dangerous`)) {
     async deleteItem(entry) {
       const sid = this.deps.getActiveSshId();
       if (!sid) return;
-      const isDir = entry.kind === "dir";
-      const ok = await this.deps.confirm(
-        isDir ? `\u5220\u9664\u76EE\u5F55\u300C${entry.name}\u300D\uFF1F` : `\u5220\u9664\u300C${entry.name}\u300D\uFF1F`,
-        isDir ? "\u8FD9\u4E2A\u76EE\u5F55\u4F1A\u9012\u5F52\u5220\u9664\uFF0C\u91CC\u9762\u7684\u6587\u4EF6\u548C\u5B50\u76EE\u5F55\u90FD\u4F1A\u53BB\u6389\uFF0C\u800C\u4E14\u4E0D\u80FD\u6062\u590D\u3002" : "\u8FD9\u4E2A\u6587\u4EF6\u4F1A\u4ECE\u8FDC\u7AEF\u5220\u9664\uFF0C\u4E0D\u80FD\u6062\u590D\u3002"
-      );
+      const prompt = deletePrompt(entry.kind, entry.name);
+      const ok = await this.deps.confirm(prompt.title, prompt.body);
       if (!ok) return;
       try {
         await webApi.sftpDelete(sid, entry.path);

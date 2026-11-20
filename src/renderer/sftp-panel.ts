@@ -1,7 +1,7 @@
 import type { SftpEntry, TransferTask } from '../shared/types.js';
 import { webApi } from './api-client.js';
 import { editorWriteGuard } from './session-logic.js';
-import { editorSaveBlock, failedLoadEffect, keepEditorOpen, parseOctalMode, planUploads } from './sftp-logic.js';
+import { deletePrompt, editorSaveBlock, failedLoadEffect, keepEditorOpen, parseOctalMode, planUploads } from './sftp-logic.js';
 
 export interface SftpControllerDeps {
   getActiveSshId: () => string | null;
@@ -23,8 +23,9 @@ export function formatBytes(bytes: number): string {
   return `${v.toFixed(1)} ${units[u]}`;
 }
 
-function getFileMeta(name: string, isDir: boolean): { icon: string; cls: string } {
-  if (isDir) return { icon: '📁', cls: 'file-dir' };
+function getFileMeta(name: string, kind: 'dir' | 'file' | 'symlink'): { icon: string; cls: string } {
+  if (kind === 'symlink') return { icon: '🔗', cls: 'file-link' };
+  if (kind === 'dir') return { icon: '📁', cls: 'file-dir' };
   const dot = name.lastIndexOf('.');
   const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
   switch (ext) {
@@ -87,8 +88,10 @@ export class SftpController {
   private readonly closeEditorBtn = document.getElementById('close-editor-btn') as HTMLButtonElement | null;
   private editorOriginalContent = '';
   private isEditorDirty = false;
+  private readonly deps: SftpControllerDeps;
 
-  constructor(private readonly deps: SftpControllerDeps) {
+  constructor(deps: SftpControllerDeps) {
+    this.deps = deps;
     this.bindEvents();
   }
 
@@ -194,15 +197,20 @@ export class SftpController {
     }
   }
 
-  async load(dirPath: string): Promise<void> {
+  /**
+   * `notify`：跳转失败时提示，并留下已经列出的目录。
+   * `defer`：这次失败不提示、不换列表，把结果交回调用方。
+   * 符号链接需要后者。`load` 自己接住列表错误后会正常返回，调用方的 catch 接不到。
+   */
+  async load(dirPath: string, failure: 'notify' | 'defer' = 'notify'): Promise<'shown' | 'failed' | 'idle'> {
     const sid = this.deps.getActiveSshId();
-    if (!sid) return;
+    if (!sid) return 'idle';
     const requested = dirPath || '/';
     const ticket = ++this.loadTicket;
     this.tableEl.classList.add('loading');
     try {
       const list = await webApi.sftpList(sid, requested);
-      if (!this.listingCurrent(sid, ticket)) return;
+      if (!this.listingCurrent(sid, ticket)) return 'idle';
       this.currentDir = requested;
       this.pathInput.value = this.currentDir;
       this.renderBreadcrumbs(this.currentDir);
@@ -212,19 +220,22 @@ export class SftpController {
       this.listedNames = list.map((entry) => entry.name);
       const visible = list.filter((e) => this.showHidden || !e.name.startsWith('.'));
       const sig = `${sid}|${this.currentDir}|${visible.map((e) => `${e.path}:${e.size}:${e.mtimeMs}:${e.mode}`).join('|')}`;
-      if (sig === this.lastSig) return;
+      if (sig === this.lastSig) return 'shown';
       this.lastSig = sig;
       this.renderEntries(visible);
+      return 'shown';
     } catch (err) {
-      if (!this.listingCurrent(sid, ticket)) return;
+      if (!this.listingCurrent(sid, ticket)) return 'idle';
+      if (failure === 'defer') return 'failed';
       const message = err instanceof Error ? err.message : 'SFTP 读取失败';
       if (failedLoadEffect(this.haveListing) === 'keep') {
         this.deps.toast(message, 'error');
         if (!this.pathInput.classList.contains('hidden')) this.pathInput.focus();
-        return;
+        return 'failed';
       }
       this.listedNames = [];
       this.showListingMessage(message, true);
+      return 'failed';
     } finally {
       if (this.listingCurrent(sid, ticket)) this.tableEl.classList.remove('loading');
     }
@@ -256,7 +267,7 @@ export class SftpController {
       const nameTd = document.createElement('td');
       const nameBtn = document.createElement('span');
       const isDir = entry.kind === 'dir';
-      const meta = getFileMeta(entry.name, isDir);
+      const meta = getFileMeta(entry.name, entry.kind);
       nameBtn.textContent = `${meta.icon} ${entry.name}`;
       nameBtn.style.cursor = 'pointer';
       nameBtn.className = `sftp-item-name ${meta.cls}`;
@@ -290,7 +301,7 @@ export class SftpController {
         } else if (entry.kind === 'file') {
           void this.openEditor(entry.path);
         } else {
-          void this.load(entry.path).catch(() => void this.openEditor(entry.path));
+          void this.openSymlink(entry.path);
         }
       };
 
@@ -319,6 +330,12 @@ export class SftpController {
     parent.appendChild(b);
   }
 
+  /** 先列目录。列开了就是指向目录的链接。列不开再按文件打开，当前列表留着。 */
+  private async openSymlink(path: string): Promise<void> {
+    const outcome = await this.load(path, 'defer');
+    if (outcome === 'failed') await this.openEditor(path);
+  }
+
   private async openEditor(remotePath: string): Promise<void> {
     const sid = this.deps.getActiveSshId();
     if (!sid) {
@@ -332,7 +349,7 @@ export class SftpController {
       this.editorTruncated = res.truncated;
       this.setSaveEnabled(!res.truncated);
       const fileName = remotePath.split('/').pop() || '文件';
-      const meta = getFileMeta(fileName, false);
+      const meta = getFileMeta(fileName, 'file');
       if (this.editorFileIcon) this.editorFileIcon.textContent = meta.icon;
       this.editorPathEl.textContent = res.truncated ? `${remotePath}（仅预览前 256KB）` : remotePath;
       this.editorPathEl.title = remotePath;
@@ -513,11 +530,8 @@ export class SftpController {
   private async deleteItem(entry: SftpEntry): Promise<void> {
     const sid = this.deps.getActiveSshId();
     if (!sid) return;
-    const isDir = entry.kind === 'dir';
-    const ok = await this.deps.confirm(
-      isDir ? `删除目录「${entry.name}」？` : `删除「${entry.name}」？`,
-      isDir ? '这个目录会递归删除，里面的文件和子目录都会去掉，而且不能恢复。' : '这个文件会从远端删除，不能恢复。',
-    );
+    const prompt = deletePrompt(entry.kind, entry.name);
+    const ok = await this.deps.confirm(prompt.title, prompt.body);
     if (!ok) return;
     try {
       await webApi.sftpDelete(sid, entry.path);
