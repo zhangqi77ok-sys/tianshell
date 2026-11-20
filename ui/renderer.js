@@ -6737,6 +6737,13 @@ WARNING: This link could potentially be dangerous`)) {
       body: "\u8FD9\u4E2A\u6587\u4EF6\u4F1A\u4ECE\u8FDC\u7AEF\u5220\u9664\uFF0C\u4E0D\u80FD\u6062\u590D\u3002"
     };
   }
+  function transferRunningText(transferred, total) {
+    if (total > 0) {
+      const pct = Math.min(100, Math.round(transferred / total * 100));
+      return `${pct}%`;
+    }
+    return `\u5DF2\u4F20\u8F93 ${transferred} \u5B57\u8282`;
+  }
   function chmodPrompt(kind) {
     if (kind === "symlink") {
       return "\u8FD9\u4F1A\u4FEE\u6539\u94FE\u63A5\u6307\u5411\u7684\u6587\u4EF6\uFF0C\u4E0D\u662F\u94FE\u63A5\u672C\u8EAB\u3002\u8F93\u5165\u5B83\u7684\u516B\u8FDB\u5236\u6743\u9650";
@@ -7332,8 +7339,8 @@ WARNING: This link could potentially be dangerous`)) {
       for (const t of list) {
         const pill = document.createElement("span");
         pill.className = "tx-pill mono";
-        const pct = t.total > 0 ? Math.min(100, Math.round(t.transferred / t.total * 100)) : 100;
-        pill.textContent = `${t.direction === "upload" ? "\u2191" : "\u2193"} ${t.filename} \xB7 ${t.status === "done" ? "\u5B8C\u6210" : t.status === "running" ? `${pct}%` : t.status}`;
+        const stateText = t.status === "done" ? "\u5B8C\u6210" : t.status === "running" ? transferRunningText(t.transferred, t.total) : t.status;
+        pill.textContent = `${t.direction === "upload" ? "\u2191" : "\u2193"} ${t.filename} \xB7 ${stateText}`;
         if (t.status === "running") {
           const cancel = document.createElement("button");
           cancel.type = "button";

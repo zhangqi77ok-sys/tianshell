@@ -672,29 +672,43 @@ async fn stream_file_download(state: AppState, id: String, remote: String) -> Re
             if let Some(message) = crate::download_grant::file_download_rejected(DownloadKind::File, crate::sftp::read_node(stat.perm)) {
                 return Err(message.to_string());
             }
+            let declared = stat.size;
             let mut file = sftp.open(Path::new(&remote_job)).map_err(|err| err.to_string())?;
             if let Some(sender) = lock(&slot_job).take() {
-                let _ = sender.send(Ok(()));
+                let _ = sender.send(Ok(declared));
             }
+            let total = declared.unwrap_or(0);
             let mut buf = [0u8; 32_768];
             let mut sent = 0u64;
             loop {
                 if cancel.load(Ordering::Relaxed) {
-                    hub_job.broadcast(json!({"type": "transfer:progress", "task": transfer_task(&tid_job, &session_job, "download", &fname_job, &remote_job, sent, sent, "cancelled", None)}));
+                    hub_job.broadcast(json!({"type": "transfer:progress", "task": transfer_task(&tid_job, &session_job, "download", &fname_job, &remote_job, sent, total, "cancelled", None)}));
                     return Ok(());
                 }
-                let n = file.read(&mut buf).map_err(|err| err.to_string())?;
+                let Some(cap) = download_read_cap(sent, declared, buf.len()) else {
+                    break;
+                };
+                let n = file.read(&mut buf[..cap]).map_err(|err| err.to_string())?;
                 if n == 0 {
                     break;
                 }
                 sent += n as u64;
                 if chunk_tx.blocking_send(Ok(Bytes::copy_from_slice(&buf[..n]))).is_err() {
+                    hub_job.broadcast(json!({"type": "transfer:progress", "task": transfer_task(&tid_job, &session_job, "download", &fname_job, &remote_job, sent, total, "cancelled", None)}));
                     return Ok(());
                 }
-                hub_job.broadcast(json!({"type": "transfer:progress", "task": transfer_task(&tid_job, &session_job, "download", &fname_job, &remote_job, sent, 0, "running", None)}));
+                hub_job.broadcast(json!({"type": "transfer:progress", "task": transfer_task(&tid_job, &session_job, "download", &fname_job, &remote_job, sent, total, "running", None)}));
             }
-            hub_job.broadcast(json!({"type": "transfer:progress", "task": transfer_task(&tid_job, &session_job, "download", &fname_job, &remote_job, sent, sent.max(1), "done", None)}));
-            Ok(())
+            match download_outcome(sent, declared) {
+                Ok(done_total) => {
+                    hub_job.broadcast(json!({"type": "transfer:progress", "task": transfer_task(&tid_job, &session_job, "download", &fname_job, &remote_job, sent, done_total, "done", None)}));
+                    Ok(())
+                }
+                Err(message) => {
+                    hub_job.broadcast(json!({"type": "transfer:progress", "task": transfer_task(&tid_job, &session_job, "download", &fname_job, &remote_job, sent, total, "error", Some(message))}));
+                    Ok(())
+                }
+            }
         });
         if let Err(err) = outcome {
             if let Some(sender) = lock(&slot).take() {
@@ -705,12 +719,16 @@ async fn stream_file_download(state: AppState, id: String, remote: String) -> Re
         lock(&state_for_task.transfers).remove(&tid_progress);
     });
     match ready_rx.await {
-        Ok(Ok(())) => {
+        Ok(Ok(declared)) => {
             let body = Body::from_stream(ReceiverStream::new(chunk_rx));
-            Response::builder()
+            let mut builder = Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "application/octet-stream")
-                .header("content-disposition", format!("attachment; filename*=UTF-8''{}", encode_filename(&filename)))
+                .header("content-disposition", format!("attachment; filename*=UTF-8''{}", encode_filename(&filename)));
+            if let Some(size) = declared {
+                builder = builder.header("content-length", size.to_string());
+            }
+            builder
                 .body(body)
                 .unwrap_or_else(|_| json_err(StatusCode::INTERNAL_SERVER_ERROR, "无法开始下载"))
         }
@@ -795,6 +813,10 @@ async fn stream_archive_download(state: AppState, id: String, remote: String) ->
                         sent += n as u64;
                         if chunk_tx.blocking_send(Ok(Bytes::copy_from_slice(&buf[..n]))).is_err() {
                             session.set_blocking(true);
+                            hub_job.broadcast(json!({
+                                "type": "transfer:progress",
+                                "task": transfer_task(&tid_job, &session_job, "download", &fname_job, &remote_job, sent, 0, "cancelled", None)
+                            }));
                             return Ok(());
                         }
                         hub_job.broadcast(json!({
@@ -1024,6 +1046,29 @@ fn json_ok(data: Value) -> Response {
 
 fn json_err(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(json!({"ok": false, "error": message.into()}))).into_response()
+}
+
+/// 已知长度时，读够就停，正文不会超过已经宣布的 Content-Length。
+/// 没有长度时按缓冲区读。界面把 total 0 当成未知，不再显示 100%。
+fn download_read_cap(sent: u64, declared: Option<u64>, chunk: usize) -> Option<usize> {
+    let Some(declared) = declared else {
+        return Some(chunk);
+    };
+    if sent >= declared {
+        return None;
+    }
+    Some(chunk.min((declared - sent) as usize))
+}
+
+/// 收齐宣布的长度才算完成。文件在开始之后变短时，不能把少收的正文标成完成。
+fn download_outcome(sent: u64, declared: Option<u64>) -> Result<u64, String> {
+    match declared {
+        Some(expected) if sent == expected => Ok(expected),
+        Some(expected) => Err(format!(
+            "远端文件在下载过程中变短，收到 {sent} 字节，开始时是 {expected} 字节"
+        )),
+        None => Ok(sent.max(1)),
+    }
 }
 
 fn transfer_task(
@@ -1284,6 +1329,20 @@ fn launch_browser(url: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn download_stops_at_the_declared_size() {
+        assert_eq!(download_read_cap(0, None, 32), Some(32));
+        assert_eq!(download_read_cap(0, Some(10), 32), Some(10));
+        assert_eq!(download_read_cap(8, Some(10), 32), Some(2));
+        assert_eq!(download_read_cap(10, Some(10), 32), None);
+        assert_eq!(download_read_cap(0, Some(0), 32), None);
+        assert_eq!(download_outcome(10, Some(10)).ok(), Some(10));
+        assert_eq!(download_outcome(0, Some(0)).ok(), Some(0));
+        assert!(download_outcome(4, Some(10)).is_err());
+        assert_eq!(download_outcome(50, None).ok(), Some(50));
+        assert_eq!(download_outcome(0, None).ok(), Some(1));
+    }
 
     #[test]
     fn upload_route_is_the_only_path_that_gets_the_size_message() {
