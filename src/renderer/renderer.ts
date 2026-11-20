@@ -163,13 +163,25 @@ function promptText(title: string, defaultVal = ''): Promise<string | null> {
   (document.getElementById('prompt-title') as HTMLElement).textContent = title;
   input.value = defaultVal;
   return new Promise((resolve) => {
-    const done = (val: string | null) => {
-      dlg.close();
+    let settled = false;
+    const finish = (val: string | null) => {
+      if (settled) return;
+      settled = true;
+      dlg.removeEventListener('cancel', onCancel);
       form.onsubmit = null;
+      dlg.close();
       resolve(val);
     };
-    form.onsubmit = (e) => { e.preventDefault(); done(input.value.trim()); };
-    (document.getElementById('cancel-prompt') as HTMLElement).onclick = () => done(null);
+    const onCancel = (event: Event) => {
+      event.preventDefault();
+      finish(null);
+    };
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      finish(input.value.trim());
+    };
+    (document.getElementById('cancel-prompt') as HTMLElement).onclick = () => finish(null);
+    dlg.addEventListener('cancel', onCancel);
     dlg.showModal();
   });
 }

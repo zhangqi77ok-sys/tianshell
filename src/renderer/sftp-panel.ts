@@ -3,7 +3,7 @@ import { webApi } from './api-client.js';
 
 export interface SftpControllerDeps {
   getActiveSshId: () => string | null;
-  toast: (msg: string) => void;
+  toast: (msg: string, kind?: 'info' | 'error') => void;
   promptText: (title: string, defaultVal?: string) => Promise<string | null>;
   confirm: (title: string, body: string, okLabel?: string) => Promise<boolean>;
   onDirChange?: (dir: string) => void;
@@ -48,6 +48,7 @@ export class SftpController {
   private boundSession: string | null = null;
   private showHidden = false;
   private lastSig = '';
+  private loadTicket = 0;
   private readonly transfers = new Map<string, TransferTask>();
   private editingPath: string | null = null;
 
@@ -185,10 +186,11 @@ export class SftpController {
     const sid = this.deps.getActiveSshId();
     if (!sid) return;
     const requested = dirPath || '/';
+    const ticket = ++this.loadTicket;
     this.tableEl.classList.add('loading');
     try {
       const list = await webApi.sftpList(sid, requested);
-      if (this.deps.getActiveSshId() !== sid) return;
+      if (!this.listingCurrent(sid, ticket)) return;
       this.currentDir = requested;
       this.pathInput.value = this.currentDir;
       this.renderBreadcrumbs(this.currentDir);
@@ -200,12 +202,17 @@ export class SftpController {
       this.lastSig = sig;
       this.renderEntries(visible);
     } catch (err) {
-      if (this.deps.getActiveSshId() !== sid) return;
+      if (!this.listingCurrent(sid, ticket)) return;
       const message = err instanceof Error ? err.message : 'SFTP 读取失败';
       this.showListingMessage(message, true);
     } finally {
-      this.tableEl.classList.remove('loading');
+      if (this.listingCurrent(sid, ticket)) this.tableEl.classList.remove('loading');
     }
+  }
+
+  /** 后发出的请求，以及仍是这个会话的请求，才允许改列表。 */
+  private listingCurrent(sessionId: string, ticket: number): boolean {
+    return this.deps.getActiveSshId() === sessionId && ticket === this.loadTicket;
   }
 
   onTransferProgress(task: TransferTask): void {
@@ -311,7 +318,7 @@ export class SftpController {
       this.editorDlg.showModal();
       requestAnimationFrame(() => this.editorContent.focus());
     } catch (err) {
-      this.deps.toast(err instanceof Error ? err.message : '读取文件失败');
+      this.deps.toast(err instanceof Error ? err.message : '读取文件失败', 'error');
     }
   }
 
@@ -357,7 +364,7 @@ export class SftpController {
       void this.load(this.currentDir);
       return true;
     } catch (err) {
-      this.deps.toast(err instanceof Error ? `保存失败: ${err.message}` : '保存失败');
+      this.deps.toast(err instanceof Error ? `保存失败: ${err.message}` : '保存失败', 'error');
       return false;
     }
   }
@@ -388,7 +395,7 @@ export class SftpController {
       const ticket = await webApi.sftpDownloadGrant(sid, remotePath, kind);
       const href = ticket.href;
       if (!href.startsWith('/api/downloads/') || href.includes('token=')) {
-        this.deps.toast('下载地址无效');
+        this.deps.toast('下载地址无效', 'error');
         return false;
       }
       const a = document.createElement('a');
@@ -401,7 +408,7 @@ export class SftpController {
       a.remove();
       return true;
     } catch (err) {
-      this.deps.toast(err instanceof Error ? err.message : '下载没有开始');
+      this.deps.toast(err instanceof Error ? err.message : '下载没有开始', 'error');
       return false;
     }
   }
@@ -411,9 +418,18 @@ export class SftpController {
     if (!sid) return;
     const nextName = await this.deps.promptText(`重命名 ${entry.name}`, entry.name);
     if (!nextName || nextName === entry.name) return;
-    const parent = this.currentDir === '/' ? '' : this.currentDir;
-    await webApi.sftpRename(sid, entry.path, `${parent}/${nextName}`);
-    await this.load(this.currentDir);
+    if (nextName.includes('/') || nextName.includes('\\')) {
+      this.deps.toast('名字里不能带斜杠', 'error');
+      return;
+    }
+    const slash = entry.path.lastIndexOf('/');
+    const parent = slash <= 0 ? '' : entry.path.slice(0, slash);
+    try {
+      await webApi.sftpRename(sid, entry.path, `${parent}/${nextName}`);
+      await this.load(parent || '/');
+    } catch (err) {
+      this.deps.toast(err instanceof Error ? err.message : '重命名失败', 'error');
+    }
   }
 
   private async chmodItem(entry: SftpEntry): Promise<void> {
@@ -422,9 +438,13 @@ export class SftpController {
     const raw = await this.deps.promptText('输入八进制权限 (例如 755 或 644)', entry.mode.toString(8));
     if (!raw) return;
     const mode = Number.parseInt(raw.trim(), 8);
-    if (Number.isNaN(mode)) return this.deps.toast('权限格式无效');
-    await webApi.sftpChmod(sid, entry.path, mode);
-    await this.load(this.currentDir);
+    if (Number.isNaN(mode)) return this.deps.toast('权限格式无效', 'error');
+    try {
+      await webApi.sftpChmod(sid, entry.path, mode);
+      await this.load(this.currentDir);
+    } catch (err) {
+      this.deps.toast(err instanceof Error ? err.message : '修改权限失败', 'error');
+    }
   }
 
   private async deleteItem(entry: SftpEntry): Promise<void> {
@@ -440,7 +460,7 @@ export class SftpController {
       await webApi.sftpDelete(sid, entry.path);
       await this.load(this.currentDir);
     } catch (err) {
-      this.deps.toast(err instanceof Error ? err.message : '删除失败');
+      this.deps.toast(err instanceof Error ? err.message : '删除失败', 'error');
     }
   }
 
@@ -448,10 +468,23 @@ export class SftpController {
     const sid = this.deps.getActiveSshId();
     if (!sid || !files?.length) return;
     const base = this.currentDir === '/' ? '' : this.currentDir;
-    for (const file of Array.from(files)) {
-      await webApi.sftpUploadFile(sid, `${base}/${file.name}`, file);
+    const batch = Array.from(files);
+    let failed = 0;
+    let firstError = '';
+    for (const file of batch) {
+      try {
+        await webApi.sftpUploadFile(sid, `${base}/${file.name}`, file);
+      } catch (err) {
+        failed += 1;
+        if (!firstError) firstError = err instanceof Error ? err.message : '上传失败';
+      }
     }
-    this.deps.toast(`已上传 ${files.length} 个文件`);
+    const uploaded = batch.length - failed;
+    if (failed === 0) {
+      this.deps.toast(`已上传 ${uploaded} 个文件`);
+      return;
+    }
+    this.deps.toast(uploaded > 0 ? `${firstError}（${uploaded} 个已上传，${failed} 个失败）` : firstError, 'error');
   }
 
   private renderTransfers(): void {
@@ -498,10 +531,18 @@ export class SftpController {
     document.getElementById('sftp-refresh')?.addEventListener('click', () => void this.load(this.currentDir));
     document.getElementById('sftp-mkdir')?.addEventListener('click', async () => {
       const sid = this.deps.getActiveSshId();
+      const dir = this.currentDir;
       const name = await this.deps.promptText('新建远程目录名');
-      if (sid && name) {
-        await webApi.sftpMkdir(sid, `${this.currentDir === '/' ? '' : this.currentDir}/${name}`);
-        await this.load(this.currentDir);
+      if (!sid || !name) return;
+      if (name.includes('/') || name.includes('\\')) {
+        this.deps.toast('目录名里不能带斜杠', 'error');
+        return;
+      }
+      try {
+        await webApi.sftpMkdir(sid, `${dir === '/' ? '' : dir}/${name}`);
+        await this.load(dir);
+      } catch (err) {
+        this.deps.toast(err instanceof Error ? err.message : '新建目录失败', 'error');
       }
     });
     this.archiveCurrentBtn?.addEventListener('click', () => this.triggerArchiveDownload(this.currentDir));
