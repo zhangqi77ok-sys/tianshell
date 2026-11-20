@@ -387,7 +387,7 @@ fn posix_rename_outcome(sess: &Session, source: &str, dest: &str) -> Result<Posi
         } else {
             ssh2::Error::from_session_error_raw(session, rc)
         };
-        let attempt = if fx == ssh2::libssh2_sys::LIBSSH2_FX_OP_UNSUPPORTED as u64 {
+        let attempt = if fx as u64 == u64::from(ssh2::libssh2_sys::LIBSSH2_FX_OP_UNSUPPORTED as u32) {
             PosixAttempt::Unsupported
         } else {
             PosixAttempt::Failed
