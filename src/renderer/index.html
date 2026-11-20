@@ -196,11 +196,43 @@
       </form>
     </dialog>
 
-    <dialog id="editor-dialog" class="wide-dialog">
-      <form id="editor-form">
-        <header class="dialog-head"><h2 id="editor-title">在线编辑</h2><p id="editor-path" class="mono"></p></header>
-        <textarea id="editor-content" class="code-editor" spellcheck="false"></textarea>
-        <div class="dialog-actions"><button type="button" id="cancel-editor">关闭</button><button type="submit" class="primary">保存写回远端</button></div>
+    <dialog id="editor-dialog" class="editor-dialog">
+      <form id="editor-form" class="editor-modal-wrap">
+        <header class="editor-modal-head">
+          <div class="editor-modal-title-group">
+            <span id="editor-file-icon" class="editor-file-icon">📄</span>
+            <div class="editor-meta-text">
+              <div class="editor-title-row">
+                <h2 id="editor-title">在线编辑</h2>
+                <span id="editor-dirty-badge" class="editor-dirty-badge clean">✓ 已保存</span>
+              </div>
+              <p id="editor-path" class="editor-path mono" title=""></p>
+            </div>
+          </div>
+          <div class="editor-head-actions">
+            <button type="button" id="editor-reload-btn" class="btn-editor-action" title="重新从远端载入">🔄 重新载入</button>
+            <button type="button" id="editor-maximize-btn" class="btn-editor-action" title="全屏 / 还原">⛶ 最大化</button>
+            <button type="button" id="cancel-editor" class="btn-editor-action btn-close" title="关闭 (Esc)">×</button>
+          </div>
+        </header>
+
+        <div class="editor-body-wrap">
+          <div id="editor-gutter" class="editor-gutter">1</div>
+          <textarea id="editor-content" class="code-editor-textarea" spellcheck="false" wrap="off"></textarea>
+        </div>
+
+        <footer class="editor-modal-foot">
+          <div class="editor-status-bar">
+            <span id="editor-cursor-pos" class="status-item">行 1, 列 1</span>
+            <span id="editor-line-count" class="status-item">共 1 行</span>
+            <span id="editor-char-count" class="status-item">0 字符</span>
+            <span class="status-item">UTF-8</span>
+          </div>
+          <div class="editor-foot-actions">
+            <button type="button" id="close-editor-btn">关闭</button>
+            <button type="submit" id="save-editor-btn" class="primary">保存写回 (Ctrl+S)</button>
+          </div>
+        </footer>
       </form>
     </dialog>
 

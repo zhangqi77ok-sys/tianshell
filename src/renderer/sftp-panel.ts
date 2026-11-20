@@ -64,6 +64,17 @@ export class SftpController {
   private readonly editorDlg = document.getElementById('editor-dialog') as HTMLDialogElement;
   private readonly editorContent = document.getElementById('editor-content') as HTMLTextAreaElement;
   private readonly editorPathEl = document.getElementById('editor-path') as HTMLParagraphElement;
+  private readonly editorGutter = document.getElementById('editor-gutter') as HTMLDivElement | null;
+  private readonly editorDirtyBadge = document.getElementById('editor-dirty-badge') as HTMLSpanElement | null;
+  private readonly editorFileIcon = document.getElementById('editor-file-icon') as HTMLSpanElement | null;
+  private readonly editorCursorPos = document.getElementById('editor-cursor-pos') as HTMLSpanElement | null;
+  private readonly editorLineCount = document.getElementById('editor-line-count') as HTMLSpanElement | null;
+  private readonly editorCharCount = document.getElementById('editor-char-count') as HTMLSpanElement | null;
+  private readonly editorMaximizeBtn = document.getElementById('editor-maximize-btn') as HTMLButtonElement | null;
+  private readonly editorReloadBtn = document.getElementById('editor-reload-btn') as HTMLButtonElement | null;
+  private readonly closeEditorBtn = document.getElementById('close-editor-btn') as HTMLButtonElement | null;
+  private editorOriginalContent = '';
+  private isEditorDirty = false;
 
   constructor(private readonly deps: SftpControllerDeps) {
     this.bindEvents();
@@ -256,12 +267,77 @@ export class SftpController {
     try {
       const res = await webApi.sftpReadText(sid, remotePath);
       this.editingPath = remotePath;
+      const fileName = remotePath.split('/').pop() || '文件';
+      const meta = getFileMeta(fileName, false);
+      if (this.editorFileIcon) this.editorFileIcon.textContent = meta.icon;
       this.editorPathEl.textContent = res.truncated ? `${remotePath}（仅预览前 256KB）` : remotePath;
+      this.editorPathEl.title = remotePath;
       this.editorContent.value = res.content;
+      this.editorOriginalContent = res.content;
+      this.checkEditorDirty();
+      this.updateEditorGutter();
+      this.updateEditorCursorInfo();
       this.editorDlg.showModal();
+      requestAnimationFrame(() => this.editorContent.focus());
     } catch (err) {
       this.deps.toast(err instanceof Error ? err.message : '读取文件失败');
     }
+  }
+
+  private updateEditorGutter(): void {
+    if (!this.editorGutter) return;
+    const lines = this.editorContent.value.split('\n');
+    const count = lines.length;
+    let nums = '';
+    for (let i = 1; i <= count; i++) {
+      nums += (i === 1 ? '' : '\n') + i;
+    }
+    this.editorGutter.textContent = nums;
+    if (this.editorLineCount) this.editorLineCount.textContent = `共 ${count} 行`;
+    if (this.editorCharCount) this.editorCharCount.textContent = `${this.editorContent.value.length} 字符`;
+  }
+
+  private updateEditorCursorInfo(): void {
+    if (!this.editorCursorPos) return;
+    const pos = this.editorContent.selectionStart ?? 0;
+    const textBefore = this.editorContent.value.substring(0, pos);
+    const lines = textBefore.split('\n');
+    const lineNum = lines.length;
+    const colNum = lines[lines.length - 1].length + 1;
+    this.editorCursorPos.textContent = `行 ${lineNum}, 列 ${colNum}`;
+  }
+
+  private checkEditorDirty(): void {
+    if (!this.editorDirtyBadge) return;
+    const dirty = this.editorContent.value !== this.editorOriginalContent;
+    this.isEditorDirty = dirty;
+    this.editorDirtyBadge.className = `editor-dirty-badge ${dirty ? 'dirty' : 'clean'}`;
+    this.editorDirtyBadge.textContent = dirty ? '● 未保存' : '✓ 已保存';
+  }
+
+  private async saveEditorContent(): Promise<boolean> {
+    const sid = this.deps.getActiveSshId();
+    if (!sid || !this.editingPath) return false;
+    try {
+      await webApi.sftpWriteText(sid, this.editingPath, this.editorContent.value);
+      this.editorOriginalContent = this.editorContent.value;
+      this.checkEditorDirty();
+      this.deps.toast(`已写回远端文件: ${this.editingPath.split('/').pop()}`);
+      void this.load(this.currentDir, true);
+      return true;
+    } catch (err) {
+      this.deps.toast(err instanceof Error ? `保存失败: ${err.message}` : '保存失败');
+      return false;
+    }
+  }
+
+  private handleCloseEditor(): void {
+    if (this.isEditorDirty) {
+      if (!window.confirm('当前文件存在未保存的修改，确定放弃修改并关闭吗？')) {
+        return;
+      }
+    }
+    this.editorDlg.close();
   }
 
   private triggerDownload(remotePath: string): void {
@@ -414,15 +490,76 @@ export class SftpController {
       this.dragOverlay?.classList.add('hidden');
       void this.uploadFiles(e.dataTransfer?.files ?? null);
     });
-    document.getElementById('cancel-editor')?.addEventListener('click', () => this.editorDlg.close());
+    this.editorContent.addEventListener('input', () => {
+      this.updateEditorGutter();
+      this.checkEditorDirty();
+      this.updateEditorCursorInfo();
+    });
+    this.editorContent.addEventListener('scroll', () => {
+      if (this.editorGutter) this.editorGutter.scrollTop = this.editorContent.scrollTop;
+    });
+    this.editorContent.addEventListener('click', () => this.updateEditorCursorInfo());
+    this.editorContent.addEventListener('keyup', () => this.updateEditorCursorInfo());
+    this.editorContent.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        void this.saveEditorContent();
+      } else if (e.key === 'Tab') {
+        e.preventDefault();
+        const start = this.editorContent.selectionStart;
+        const end = this.editorContent.selectionEnd;
+        const val = this.editorContent.value;
+        if (start === end) {
+          this.editorContent.value = val.substring(0, start) + '  ' + val.substring(end);
+          this.editorContent.selectionStart = this.editorContent.selectionEnd = start + 2;
+        } else {
+          const before = val.substring(0, start);
+          const after = val.substring(end);
+          const lineStart = before.lastIndexOf('\n') + 1;
+          const fullBlock = val.substring(lineStart, end);
+          const lines = fullBlock.split('\n');
+          if (e.shiftKey) {
+            const outdented = lines.map((l) => (l.startsWith('  ') ? l.slice(2) : l.startsWith(' ') ? l.slice(1) : l)).join('\n');
+            this.editorContent.value = val.substring(0, lineStart) + outdented + after;
+            this.editorContent.selectionStart = start;
+            this.editorContent.selectionEnd = lineStart + outdented.length;
+          } else {
+            const indented = lines.map((l) => '  ' + l).join('\n');
+            this.editorContent.value = val.substring(0, lineStart) + indented + after;
+            this.editorContent.selectionStart = start + 2;
+            this.editorContent.selectionEnd = lineStart + indented.length;
+          }
+        }
+        this.updateEditorGutter();
+        this.checkEditorDirty();
+        this.updateEditorCursorInfo();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        this.handleCloseEditor();
+      }
+    });
+
+    this.editorMaximizeBtn?.addEventListener('click', () => {
+      const isMax = this.editorDlg.classList.toggle('maximized');
+      if (this.editorMaximizeBtn) {
+        this.editorMaximizeBtn.textContent = isMax ? '❐ 还原' : '⛶ 最大化';
+      }
+    });
+
+    this.editorReloadBtn?.addEventListener('click', () => {
+      if (!this.editingPath) return;
+      if (this.isEditorDirty && !window.confirm('重新载入将覆盖未保存的修改，确定继续吗？')) {
+        return;
+      }
+      void this.openEditor(this.editingPath);
+    });
+
+    document.getElementById('cancel-editor')?.addEventListener('click', () => this.handleCloseEditor());
+    this.closeEditorBtn?.addEventListener('click', () => this.handleCloseEditor());
     document.getElementById('editor-form')?.addEventListener('submit', async (e) => {
       e.preventDefault();
-      const sid = this.deps.getActiveSshId();
-      if (!sid || !this.editingPath) return;
-      await webApi.sftpWriteText(sid, this.editingPath, this.editorContent.value);
-      this.editorDlg.close();
-      this.deps.toast('已写回远端文件');
-      await this.load(this.currentDir);
+      const ok = await this.saveEditorContent();
+      if (ok) this.editorDlg.close();
     });
   }
 }
