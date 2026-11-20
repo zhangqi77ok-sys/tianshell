@@ -519,6 +519,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[cfg(unix)]
     #[test]
     fn staged_replace_keeps_original_until_rename() {
         let root = std::env::temp_dir().join(format!("ts-stage-{}", std::process::id()));
@@ -593,6 +594,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[cfg(unix)]
     fn local_node(path: &str) -> Result<NodeKind, SftpError> {
         match std::fs::symlink_metadata(path) {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(NodeKind::Missing),
