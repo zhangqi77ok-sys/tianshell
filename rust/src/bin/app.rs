@@ -5,6 +5,11 @@ use tianshell_core::VERSION;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "--help" || arg == "-h" || arg == "help") {
+        print!("{}", help_text());
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        return Ok(());
+    }
     let serve_only = args.iter().any(|arg| arg == "serve" || arg == "--serve" || arg == "--no-window");
     let no_open = args.iter().any(|arg| arg == "--no-open");
     let mut port = None;
@@ -43,6 +48,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         wait_for_ctrl_c();
     }
     Ok(())
+}
+
+fn help_text() -> String {
+    format!(
+        "\
+TianShell {version}
+
+用法:
+  tianshell                  打开桌面工作台（默认带原生窗口）
+  tianshell serve            只在浏览器中打开，不创建原生窗口
+  tianshell --no-window      同 serve
+  tianshell --no-open        不自动打开浏览器
+  tianshell --port <端口>    指定监听端口，默认 53921
+  tianshell --help           显示这份说明并退出，不启动工作台
+
+工作台只监听 127.0.0.1。MCP 随工作台一起启动。
+说明见 docs/mcp.md。令牌不会写在启动日志里。
+",
+        version = VERSION
+    )
 }
 
 fn banner(running: &tianshell_core::http_server::RunningServer) -> String {

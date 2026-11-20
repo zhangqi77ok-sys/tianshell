@@ -29,6 +29,10 @@ path = "rust/tests/pty_monitor_test.rs"
 name = "workbench_mcp_test"
 path = "rust/tests/workbench_mcp_test.rs"
 
+[[test]]
+name = "cli_help"
+path = "rust/tests/cli_help.rs"
+
 [features]
 default = ["desktop"]
 desktop = ["dep:wry", "dep:tao"]

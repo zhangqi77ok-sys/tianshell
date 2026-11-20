@@ -2,7 +2,7 @@
 
 一个跨平台的 SSH/SFTP 协同工作台，内置标准 **MCP (Model Context Protocol)** 服务。既可以在浏览器里管理多台服务器，也可以让支持 MCP 的助手（TianCode / Cursor / Claude Desktop）连上同一套已保存的主机。
 
-从这一版起，**启动工作台不再需要 Node.js**。`cargo run --bin tianshell -- serve` 由 Rust 进程提供页面、HTTP API、终端 WebSocket，并在同一个端口上自动启动 MCP。原来的 `npm start` 还在，它是上一版的 Node 工作台，用来对照和跑原有测试，不是现在的启动方式。界面仍然是仓库里的那套网页，由 Rust 进程送出去，没有把前端重写成另一套。
+从这一版起，**启动工作台不再需要 Node.js**。`cargo run --bin tianshell` 默认打开原生窗口；`cargo run --bin tianshell -- serve` 只在浏览器里打开。Rust 进程提供页面、HTTP API、终端 WebSocket，并在同一个端口上自动启动 MCP。界面源码在 `src/renderer`，`npm run build` 生成 `ui/` 后由这个进程送出去。
 
 接入 MCP 的完整说明在 [docs/mcp.md](docs/mcp.md)。
 
@@ -19,7 +19,7 @@
 - **多标签终端 & 本机 Shell & 广播输入**：
   - 同一个 SSH 标签在界面上仍是一个会话。交互终端独占一条 SSH 连接；SFTP 和监控走同一条不另开标签的第二条连接，所以采样、列目录和大文件传输不会挡住键盘和回显。关掉标签时两条连接一起拆掉。端口转发仍然单独占一条连接，因为它要一直握着转发通道。
   - 同时开启多台 SSH 终端与本机 Shell（Windows PowerShell / POSIX `$SHELL`）标签页，互不关闭。本机终端走系统 PTY（Windows 上是 ConPTY），窗口尺寸会跟着变。
-  - 支持终端内 `Ctrl+F` 搜索、拖拽调整上下分屏比例、勾选「广播输入」将命令/快捷片段同步下发到所有已打开终端。
+  - 终端、文件和监控共用一条会话标签，可以不离开当前视图换会话。`Ctrl+F` 在终端里查找。广播默认关闭；打开后按键进入当前终端，以及标签上另外勾选且仍连接的会话。本机终端和已断开的标签默认不勾选。
 - **完整 SFTP 文件管理与在线文本编辑**：
   - 支持目录浏览、面包屑导航、显示隐藏文件、新建目录、重命名、权限修改 (`chmod`)、递归删除。
   - 支持文件**拖拽上传**、流式下载、底部实时传输队列进度与取消；双击文本/配置文件可弹出等宽编辑器直接修改并写回远端。
@@ -32,17 +32,19 @@
 
 ## 环境与运行
 
-启动工作台需要 Rust（stable）。不需要 Node.js，也不需要先执行 `npm install`。
+启动工作台需要 Rust（stable）。已经提交的 `ui/` 可以直接跑，改界面时才需要 Node.js。
+
+```bash
+cargo run --bin tianshell
+```
+
+进程绑定 `127.0.0.1`，默认端口 `53921`，并打开原生窗口。只要浏览器、不创建窗口：
 
 ```bash
 cargo run --bin tianshell -- serve
 ```
 
-进程绑定 `127.0.0.1`，默认端口 `53921`，并打开浏览器。只要看地址、不打开浏览器：
-
-```bash
-cargo run --bin tianshell -- serve --no-open
-```
+加上 `--no-open` 则只打印地址，不打开浏览器。`tianshell --help` 只打印说明。
 
 MCP 随这个进程一起听在 `http://127.0.0.1:53921/mcp`。令牌、端口和给其他客户端的配置见 [docs/mcp.md](docs/mcp.md)。
 
@@ -65,7 +67,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1
 
 脚本用默认工具链执行 `cargo build --release --locked`，打出 `dist\windows\TianShell-windows.zip`。GitHub Actions 的 `windows-package` 任务在 `windows-latest` 上做同一件事，并把 zip 留在构建产物里。
 
-解压后双击 `tianshell.exe` 就会启动工作台并打开浏览器。窗口里的控制台要留着，关掉它进程就停了。想进开始菜单：
+解压后双击 `tianshell.exe` 会打开工作台窗口。控制台要留着，关掉它进程就停了。想进开始菜单：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
@@ -86,13 +88,15 @@ ar = "C:\\path\\to\\w64devkit\\bin\\ar.exe"
 
 ### 原生窗口
 
-默认构建不包含桌面窗口。需要系统 WebView 时再打开 `desktop` 特性（Windows 用 WebView2，Linux 还要有 WebKitGTK）：
+默认构建包含桌面窗口（`desktop` 特性。Windows 用 WebView2，Linux 还要有 WebKitGTK）：
 
 ```bash
-cargo run --features desktop --bin tianshell
+cargo run --bin tianshell
 ```
 
-窗口打开的就是上面同一个 Rust 服务，不会再去启动 Node。
+只要浏览器、不要原生窗口时用 `serve`、`--serve` 或 `--no-window`。`--no-open` 不自动打开浏览器，`--port` 改端口。`tianshell --help` 只打印说明并退出，不会把工作台拉起来。
+
+窗口打开的就是上面同一个 Rust 服务。
 
 ### 改界面
 
@@ -104,11 +108,7 @@ npm run build
 cargo build --bin tianshell
 ```
 
-`npm run build` 会把 `index.html`、`renderer.js`、`renderer.css` 复制到 `ui/`。运行中的服务如果在仓库目录里启动，会优先读磁盘上的 `ui/`。
-
-### 原来的 Node 工作台
-
-`npm start` 仍然会编译并启动 `dist/server.js`。那是 0.2 的 Node 实现，保留下来给原有测试和对照。不要和 Rust 进程同时写同一个 `TIANSHELL_HOME`。
+`npm run build` 会把 `index.html`、`renderer.js`、`renderer.css` 写到 `ui/`。运行中的服务如果在仓库目录里启动，会优先读磁盘上的 `ui/`。
 
 ### 只跑 stdio MCP
 
@@ -122,11 +122,12 @@ cargo run --bin tianshell-mcp
 
 ```bash
 cargo test
-npm run typecheck
 npm test
+npm run typecheck
+npm run build
 ```
 
-`cargo test` 覆盖 Rust 工作台的鉴权、主机/片段/设置接口、本机终端会话，以及工作台起来时 MCP 已经可调用。`npm test` 仍覆盖原来的 Node 实现，包括本机 SSH/SFTP。
+`cargo test` 覆盖鉴权、主机库、本机终端、工作台 MCP，以及 `tianshell --help` 不会启动服务。`npm test` 覆盖前端里广播目标和查找翻页这类纯逻辑。改界面后要先 `npm run build`，再编译 Rust，新页面才会进到二进制里。
 
 ## MCP 服务接入
 
@@ -150,15 +151,12 @@ npm test
 ## 目录结构
 
 ```text
-src/core      分组主机库、DPAPI 适配器 (TS1D)、AES-GCM、片段/隧道/设置
-src/ssh       Node 版 SSH、ProxyJump、SFTP、监控、L/R/SOCKS5、本机终端
-src/mcp       Node 版 MCP（stdio）
-src/web       Node 版 HTTP / WebSocket 工作台
 src/renderer  工作台网页（xterm.js、SFTP、监控、隧道、多标签）
-ui            已构建的网页，由 Rust 进程提供；npm run build 会更新它
-rust          Rust 工作台、自动启动的 MCP、主机库与加密
+src/shared    前后端共用的类型
+ui            npm run build 生成的页面；Rust 进程优先读这里
+rust          工作台、自动启动的 MCP、主机库与加密
 docs/mcp.md   给其他 MCP 客户端看的接入说明
-test          Node 版单元测试和本机 SSH/SFTP 集成测试
+scripts       前端构建，以及 Windows 打包脚本
 ```
 
 ## 私钥格式
@@ -177,7 +175,7 @@ test          Node 版单元测试和本机 SSH/SFTP 集成测试
 
 - 大文件 SFTP 传输和监控采样共用第二条连接。传输没结束时，下一次采样和目录刷新会等着，终端输入和回显不会停。监控每次只跑一遍探针，CPU 和网卡速率用相邻两次的差值；第一拍还没有差值，CPU 显示 0、速率显示 0。探针超过 5 秒会放弃这一拍，避免卡住的 `df` / `ps` 一直占着这条 SFTP 连接。只允许一条并发会话的主机会拒绝这次登录。端口转发仍然是另一条连接。
 - 上传先收下整个请求体（上限 64MB）再写入远端；下载是分块送出的。
-- 本地转发、SOCKS5 和远程转发的代码在 Rust 里。这次的 Rust 测试没有启动 SSH 服务，所以没有做真实的远端隧道或 SFTP 往返。那些真实连接仍由 Node 测试覆盖。
+- 本地转发、SOCKS5 和远程转发的代码在 Rust 里。Rust 测试没有启动 SSH 服务，所以没有做真实的远端隧道或 SFTP 往返。
 - MCP 的文件工具仍各自另开一条 SSH，不进入交互终端，也不占用标签上那条 SFTP/监控连接。工作台里的目录刷新和传输走标签的第二条连接。
 - 打进交互终端的命令，标准输出和标准错误混在同一份屏幕里。退出码来自一段收尾：远端和 POSIX 本机用 `$?`，Windows 本机 PowerShell 用 `$LASTEXITCODE`。`fish` / `csh` 读不懂这段收尾，这时 `exitCode` 为空，屏幕文本仍然返回。
 - 交互历史记的是 TianShell 送进终端的那一行。Windows ConPTY 里，只发生在控制台内部的行编辑（例如方向键翻历史）不会被还原成命令。

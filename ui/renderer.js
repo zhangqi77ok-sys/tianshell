@@ -6167,7 +6167,7 @@ WARNING: This link could potentially be dangerous`)) {
     stopTunnel: (id) => apiRequest("/api/tunnels/stop", { method: "POST", body: JSON.stringify({ id }) }),
     getSettings: () => apiRequest("/api/settings"),
     updateSettings: (patch) => apiRequest("/api/settings", { method: "PUT", body: JSON.stringify(patch) }),
-    openSession: (payload) => apiRequest("/api/sessions", { method: "POST", body: JSON.stringify(payload) }),
+    openSession: (payload, signal) => apiRequest("/api/sessions", { method: "POST", body: JSON.stringify(payload), signal }),
     closeSession: (sessionId) => apiRequest(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" }),
     sftpList: (sid, dirPath) => apiRequest(`/api/sessions/${encodeURIComponent(sid)}/sftp/list?path=${encodeURIComponent(dirPath)}`),
     sftpReadText: (sid, filePath) => apiRequest(`/api/sessions/${encodeURIComponent(sid)}/sftp/text?path=${encodeURIComponent(filePath)}`),
@@ -6282,7 +6282,12 @@ WARNING: This link could potentially be dangerous`)) {
       const item = document.createElement("div");
       item.className = "host-item";
       item.id = `host-${h.id}`;
+      const ui = this.deps.getHostUi?.(h.id);
       const isOnline = Boolean(this.deps.getActiveHostIds?.().has(h.id));
+      if (ui?.selected) item.classList.add("selected");
+      if (ui?.connecting) item.classList.add("connecting");
+      if (ui?.error) item.classList.add("failed");
+      item.setAttribute("aria-selected", ui?.selected ? "true" : "false");
       const left = document.createElement("div");
       const alias = document.createElement("div");
       alias.className = "host-alias";
@@ -6298,22 +6303,41 @@ WARNING: This link could potentially be dangerous`)) {
       meta.className = "host-meta mono";
       meta.textContent = `${h.username}@${h.host}:${h.port}`;
       left.append(alias, meta);
+      if (ui?.error) {
+        const err = document.createElement("div");
+        err.className = "host-error";
+        err.textContent = ui.error;
+        left.append(err);
+      }
       const ops = document.createElement("div");
       ops.className = "host-actions";
       const connectBtn = document.createElement("button");
       connectBtn.type = "button";
       connectBtn.className = "host-connect-btn";
-      connectBtn.textContent = "\u8FDE\u63A5";
-      connectBtn.title = "\u8FDE\u63A5\u6B64\u8FDC\u7A0B\u4E3B\u673A";
-      connectBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        this.deps.onOpenHost(h.id);
-      });
+      if (ui?.cancelling) {
+        connectBtn.textContent = "\u53D6\u6D88\u4E2D";
+        connectBtn.disabled = true;
+      } else if (ui?.connecting) {
+        connectBtn.textContent = "\u53D6\u6D88";
+        connectBtn.title = "\u53D6\u6D88\u8FD9\u6B21\u8FDE\u63A5";
+        connectBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.deps.onCancelConnect?.(h.id);
+        });
+      } else {
+        connectBtn.textContent = "\u8FDE\u63A5";
+        connectBtn.title = "\u8FDE\u63A5\u6B64\u8FDC\u7A0B\u4E3B\u673A";
+        connectBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.deps.onOpenHost(h.id);
+        });
+      }
       const editBtn = document.createElement("button");
       editBtn.type = "button";
       editBtn.className = "host-btn-icon";
       editBtn.textContent = "\u270F\uFE0F";
       editBtn.title = "\u7F16\u8F91\u4E3B\u673A\u914D\u7F6E";
+      editBtn.setAttribute("aria-label", "\u7F16\u8F91\u4E3B\u673A");
       editBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         this.openModal(h);
@@ -6323,13 +6347,24 @@ WARNING: This link could potentially be dangerous`)) {
       delBtn.className = "host-btn-icon";
       delBtn.textContent = "\u{1F5D1}\uFE0F";
       delBtn.title = "\u5220\u9664\u4E3B\u673A";
+      delBtn.setAttribute("aria-label", `\u5220\u9664\u4E3B\u673A ${h.alias}`);
       delBtn.addEventListener("click", async (e) => {
         e.stopPropagation();
-        await webApi.deleteHost(h.id);
-        await this.refresh();
+        const ok = await this.deps.confirm(
+          `\u5220\u9664\u4E3B\u673A\u300C${h.alias}\u300D\uFF1F`,
+          "\u8FD9\u53F0\u4E3B\u673A\u7684\u914D\u7F6E\u4F1A\u4ECE\u672C\u673A\u79FB\u9664\uFF0C\u5DF2\u4FDD\u5B58\u7684\u5BC6\u7801\u6216\u79C1\u94A5\u4E5F\u4F1A\u4E00\u8D77\u5220\u6389\u3002"
+        );
+        if (!ok) return;
+        try {
+          await webApi.deleteHost(h.id);
+          await this.refresh();
+        } catch (err) {
+          this.deps.toast(err instanceof Error ? err.message : "\u5220\u9664\u4E3B\u673A\u5931\u8D25");
+        }
       });
       ops.append(connectBtn, editBtn, delBtn);
       item.append(left, ops);
+      item.addEventListener("click", () => this.deps.onSelectHost?.(h.id));
       item.addEventListener("dblclick", () => this.deps.onOpenHost(h.id));
       return item;
     }
@@ -6351,11 +6386,29 @@ WARNING: This link could potentially be dangerous`)) {
       document.getElementById("field-jump").value = host?.jumpHostId ?? "";
       document.getElementById("field-tags").value = (host?.tags ?? []).join(", ");
       document.getElementById("field-notes").value = host?.notes ?? "";
-      document.getElementById("field-password").value = "";
-      document.getElementById("field-key").value = "";
+      const password = document.getElementById("field-password");
+      const key = document.getElementById("field-key");
+      const phrase = document.getElementById("field-passphrase");
+      password.value = "";
+      key.value = "";
+      phrase.value = "";
+      const pick = document.getElementById("pick-key-file");
+      if (pick) pick.value = "";
+      document.getElementById("field-clear-fp").checked = false;
+      password.placeholder = host?.authType === "password" ? "\u7559\u7A7A\u5219\u7EE7\u7EED\u4F7F\u7528\u5DF2\u4FDD\u5B58\u7684\u5BC6\u7801" : "\u767B\u5F55\u5BC6\u7801";
+      key.placeholder = host?.authType === "privateKey" ? "\u7559\u7A7A\u5219\u7EE7\u7EED\u4F7F\u7528\u5DF2\u4FDD\u5B58\u7684\u79C1\u94A5" : "\u7C98\u8D34 OpenSSH ed25519\u3001PKCS#8 \u6216 PEM \u79C1\u94A5\u3002\u52A0\u5BC6\u79C1\u94A5\u8BF7\u586B\u5199\u4E0B\u9762\u7684\u53E3\u4EE4";
+      phrase.placeholder = host?.hasPassphrase ? "\u7559\u7A7A\u5219\u7EE7\u7EED\u4F7F\u7528\u5DF2\u4FDD\u5B58\u7684\u53E3\u4EE4" : "\u79C1\u94A5\u53E3\u4EE4\uFF0C\u6CA1\u6709\u5C31\u7559\u7A7A";
+      this.setAuth(host?.authType ?? "password");
       document.getElementById("form-error").textContent = "";
       document.getElementById("clear-fp-row")?.classList.toggle("hidden", !host?.fingerprint);
       dlg.showModal();
+    }
+    setAuth(auth) {
+      document.querySelectorAll('input[name="auth"]').forEach((radio) => {
+        radio.checked = radio.value === auth;
+      });
+      document.getElementById("password-field")?.classList.toggle("hidden", auth === "privateKey");
+      document.getElementById("key-field")?.classList.toggle("hidden", auth !== "privateKey");
     }
     fillSelect(id, defaultLabel, opts) {
       const sel = document.getElementById(id);
@@ -6495,6 +6548,7 @@ WARNING: This link could potentially be dangerous`)) {
       this.bindEvents();
     }
     currentDir = "/";
+    boundSession = null;
     showHidden = false;
     lastSig = "";
     transfers = /* @__PURE__ */ new Map();
@@ -6530,23 +6584,38 @@ WARNING: This link could potentially be dangerous`)) {
       this.showHidden = flag;
       if (this.deps.getActiveSshId()) void this.load(this.currentDir);
     }
+    currentPath() {
+      return this.currentDir;
+    }
     syncSession() {
-      this.lastSig = "";
-      const active = Boolean(this.deps.getActiveSshId());
+      const sid = this.deps.getActiveSshId();
+      const switched = sid !== this.boundSession;
+      this.boundSession = sid;
+      const active = Boolean(sid);
       for (const id of ["sftp-up", "sftp-path", "sftp-edit-path", "sftp-go", "sftp-mkdir", "sftp-upload", "sftp-archive-current", "sftp-refresh"]) {
         const el = document.getElementById(id);
         if (el) el.disabled = !active;
       }
-      if (active) {
-        void this.load(this.currentDir, true);
-      } else {
-        this.lastSig = "";
-        this.tableEl.classList.add("hidden");
-        this.emptyEl.classList.remove("hidden");
-        this.emptyEl.textContent = "\u7A7A\u95F2\u3002\u8FDE\u4E0A SSH \u4F1A\u8BDD\u540E\uFF0C\u8FD9\u91CC\u663E\u793A\u8BE5\u4F1A\u8BDD\u7684\u5F53\u524D\u76EE\u5F55\u3002";
-        this.bodyEl.textContent = "";
+      if (!sid) {
+        this.currentDir = "/";
+        this.showListingMessage("\u7A7A\u95F2\u3002\u8FDE\u4E0A SSH \u4F1A\u8BDD\u540E\uFF0C\u8FD9\u91CC\u663E\u793A\u8BE5\u4F1A\u8BDD\u7684\u5F53\u524D\u76EE\u5F55\u3002", true);
         if (this.breadcrumbsEl) this.breadcrumbsEl.textContent = "";
+        this.deps.onDirChange?.("/");
+        return;
       }
+      if (switched) {
+        this.currentDir = "/";
+        this.showListingMessage("\u6B63\u5728\u8BFB\u53D6 / \u2026", true);
+        this.deps.onDirChange?.("/");
+      }
+      void this.load(this.currentDir);
+    }
+    showListingMessage(message, clearSig) {
+      if (clearSig) this.lastSig = "";
+      this.bodyEl.textContent = "";
+      this.tableEl.classList.add("hidden");
+      this.emptyEl.classList.remove("hidden");
+      this.emptyEl.textContent = message;
     }
     renderBreadcrumbs(dirPath) {
       if (!this.breadcrumbsEl) return;
@@ -6599,23 +6668,28 @@ WARNING: This link could potentially be dangerous`)) {
         this.goBtn?.classList.add("hidden");
       }
     }
-    async load(dirPath, quiet = false) {
+    async load(dirPath) {
       const sid = this.deps.getActiveSshId();
       if (!sid) return;
+      const requested = dirPath || "/";
       this.tableEl.classList.add("loading");
       try {
-        const list = await webApi.sftpList(sid, dirPath);
-        this.currentDir = dirPath || "/";
+        const list = await webApi.sftpList(sid, requested);
+        if (this.deps.getActiveSshId() !== sid) return;
+        this.currentDir = requested;
         this.pathInput.value = this.currentDir;
         this.renderBreadcrumbs(this.currentDir);
         this.showPathInput(false);
+        this.deps.onDirChange?.(this.currentDir);
         const visible = list.filter((e) => this.showHidden || !e.name.startsWith("."));
-        const sig = `${this.currentDir}|${visible.map((e) => `${e.path}:${e.size}:${e.mtimeMs}:${e.mode}`).join("|")}`;
+        const sig = `${sid}|${this.currentDir}|${visible.map((e) => `${e.path}:${e.size}:${e.mtimeMs}:${e.mode}`).join("|")}`;
         if (sig === this.lastSig) return;
         this.lastSig = sig;
         this.renderEntries(visible);
       } catch (err) {
-        if (!quiet) this.deps.toast(err instanceof Error ? err.message : "SFTP \u8BFB\u53D6\u5931\u8D25");
+        if (this.deps.getActiveSshId() !== sid) return;
+        const message = err instanceof Error ? err.message : "SFTP \u8BFB\u53D6\u5931\u8D25";
+        this.showListingMessage(message, true);
       } finally {
         this.tableEl.classList.remove("loading");
       }
@@ -6627,6 +6701,12 @@ WARNING: This link could potentially be dangerous`)) {
     }
     renderEntries(entries) {
       this.bodyEl.textContent = "";
+      if (!entries.length) {
+        this.tableEl.classList.add("hidden");
+        this.emptyEl.classList.remove("hidden");
+        this.emptyEl.textContent = "\u8FD9\u4E2A\u76EE\u5F55\u662F\u7A7A\u7684\u3002";
+        return;
+      }
       this.tableEl.classList.remove("hidden");
       this.emptyEl.classList.add("hidden");
       for (const entry of entries) {
@@ -6749,18 +6829,17 @@ WARNING: This link could potentially be dangerous`)) {
         this.editorOriginalContent = this.editorContent.value;
         this.checkEditorDirty();
         this.deps.toast(`\u5DF2\u5199\u56DE\u8FDC\u7AEF\u6587\u4EF6: ${this.editingPath.split("/").pop()}`);
-        void this.load(this.currentDir, true);
+        void this.load(this.currentDir);
         return true;
       } catch (err) {
         this.deps.toast(err instanceof Error ? `\u4FDD\u5B58\u5931\u8D25: ${err.message}` : "\u4FDD\u5B58\u5931\u8D25");
         return false;
       }
     }
-    handleCloseEditor() {
+    async handleCloseEditor() {
       if (this.isEditorDirty) {
-        if (!window.confirm("\u5F53\u524D\u6587\u4EF6\u5B58\u5728\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u786E\u5B9A\u653E\u5F03\u4FEE\u6539\u5E76\u5173\u95ED\u5417\uFF1F")) {
-          return;
-        }
+        const ok = await this.deps.confirm("\u653E\u5F03\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF1F", "\u5173\u95ED\u540E\uFF0C\u8FD9\u6B21\u7F16\u8F91\u4E0D\u4F1A\u5199\u56DE\u8FDC\u7AEF\u3002", "\u653E\u5F03\u4FEE\u6539");
+        if (!ok) return;
       }
       this.editorDlg.close();
     }
@@ -6808,8 +6887,18 @@ WARNING: This link could potentially be dangerous`)) {
     async deleteItem(entry) {
       const sid = this.deps.getActiveSshId();
       if (!sid) return;
-      await webApi.sftpDelete(sid, entry.path);
-      await this.load(this.currentDir);
+      const isDir = entry.kind === "dir";
+      const ok = await this.deps.confirm(
+        isDir ? `\u5220\u9664\u76EE\u5F55\u300C${entry.name}\u300D\uFF1F` : `\u5220\u9664\u300C${entry.name}\u300D\uFF1F`,
+        isDir ? "\u8FD9\u4E2A\u76EE\u5F55\u4F1A\u9012\u5F52\u5220\u9664\uFF0C\u91CC\u9762\u7684\u6587\u4EF6\u548C\u5B50\u76EE\u5F55\u90FD\u4F1A\u53BB\u6389\uFF0C\u800C\u4E14\u4E0D\u80FD\u6062\u590D\u3002" : "\u8FD9\u4E2A\u6587\u4EF6\u4F1A\u4ECE\u8FDC\u7AEF\u5220\u9664\uFF0C\u4E0D\u80FD\u6062\u590D\u3002"
+      );
+      if (!ok) return;
+      try {
+        await webApi.sftpDelete(sid, entry.path);
+        await this.load(this.currentDir);
+      } catch (err) {
+        this.deps.toast(err instanceof Error ? err.message : "\u5220\u9664\u5931\u8D25");
+      }
     }
     async uploadFiles(files) {
       const sid = this.deps.getActiveSshId();
@@ -6952,7 +7041,7 @@ WARNING: This link could potentially be dangerous`)) {
           this.updateEditorCursorInfo();
         } else if (e.key === "Escape") {
           e.preventDefault();
-          this.handleCloseEditor();
+          void this.handleCloseEditor();
         }
       });
       this.editorMaximizeBtn?.addEventListener("click", () => {
@@ -6963,13 +7052,17 @@ WARNING: This link could potentially be dangerous`)) {
       });
       this.editorReloadBtn?.addEventListener("click", () => {
         if (!this.editingPath) return;
-        if (this.isEditorDirty && !window.confirm("\u91CD\u65B0\u8F7D\u5165\u5C06\u8986\u76D6\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u786E\u5B9A\u7EE7\u7EED\u5417\uFF1F")) {
-          return;
-        }
-        void this.openEditor(this.editingPath);
+        const path = this.editingPath;
+        void (async () => {
+          if (this.isEditorDirty) {
+            const ok = await this.deps.confirm("\u91CD\u65B0\u8F7D\u5165\u8FD9\u4E2A\u6587\u4EF6\uFF1F", "\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\u4F1A\u88AB\u8FDC\u7AEF\u5185\u5BB9\u8986\u76D6\u3002", "\u91CD\u65B0\u8F7D\u5165");
+            if (!ok) return;
+          }
+          await this.openEditor(path);
+        })();
       });
-      document.getElementById("cancel-editor")?.addEventListener("click", () => this.handleCloseEditor());
-      this.closeEditorBtn?.addEventListener("click", () => this.handleCloseEditor());
+      document.getElementById("cancel-editor")?.addEventListener("click", () => void this.handleCloseEditor());
+      this.closeEditorBtn?.addEventListener("click", () => void this.handleCloseEditor());
       document.getElementById("editor-form")?.addEventListener("submit", async (e) => {
         e.preventDefault();
         const ok = await this.saveEditorContent();
@@ -6999,7 +7092,6 @@ WARNING: This link could potentially be dangerous`)) {
     hostEl = document.getElementById("mon-host");
     disksEl = document.getElementById("mon-disks");
     procsEl = document.getElementById("mon-procs");
-    snippetsEl = document.getElementById("snippet-list");
     historyEl = document.getElementById("history-list");
     historyQuery = "";
     tunnelDialogOpen = false;
@@ -7065,7 +7157,28 @@ WARNING: This link could potentially be dangerous`)) {
         this.disksEl.appendChild(row);
       }
       this.procsEl.textContent = "";
-      for (const p of metrics.processes.slice(0, 5)) {
+      const head = document.createElement("div");
+      head.className = "proc-line proc-head";
+      const headName = document.createElement("span");
+      headName.className = "metric-name";
+      headName.textContent = "\u8FDB\u7A0B";
+      const headCpu = document.createElement("span");
+      headCpu.className = "metric-num";
+      headCpu.textContent = "CPU";
+      const headMem = document.createElement("span");
+      headMem.className = "metric-num";
+      headMem.textContent = "\u5185\u5B58";
+      head.append(headName, headCpu, headMem);
+      this.procsEl.appendChild(head);
+      const processes = metrics.processes.slice(0, 8);
+      if (!processes.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty-muted";
+        empty.textContent = "\u8FD9\u4E00\u62CD\u6CA1\u6709\u8FDB\u7A0B\u6570\u636E\u3002";
+        this.procsEl.appendChild(empty);
+        return;
+      }
+      for (const p of processes) {
         const row = document.createElement("div");
         row.className = "proc-line";
         const name = document.createElement("span");
@@ -7100,10 +7213,11 @@ WARNING: This link could potentially be dangerous`)) {
           return;
         }
         for (const row of rows) {
-          const card = document.createElement("button");
-          card.type = "button";
+          const card = document.createElement("div");
           card.className = "history-item";
-          card.title = `\u53D1\u9001\u5230\u7EC8\u7AEF: ${row.command}`;
+          card.tabIndex = 0;
+          card.title = "\u586B\u5165\u5F53\u524D\u7EC8\u7AEF\uFF0C\u4E0D\u4F1A\u76F4\u63A5\u6267\u884C";
+          card.setAttribute("role", "button");
           const meta = document.createElement("div");
           meta.className = "history-meta";
           const metaLeft = document.createElement("div");
@@ -7139,10 +7253,14 @@ WARNING: This link could potentially be dangerous`)) {
           cmd.className = "history-cmd";
           cmd.textContent = row.command;
           card.append(meta, cmd, copyBtn);
-          card.addEventListener("click", () => {
+          const fill = () => {
             card.classList.add("card-activated");
             setTimeout(() => card.classList.remove("card-activated"), 250);
-            this.deps.onSendCommand(`${row.command}\r`);
+            this.deps.onFillCommand(row.command);
+          };
+          card.addEventListener("click", fill);
+          card.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" && event.target === card) fill();
           });
           this.historyEl.appendChild(card);
         }
@@ -7153,35 +7271,6 @@ WARNING: This link could potentially be dangerous`)) {
         empty.textContent = "\u547D\u4EE4\u5386\u53F2\u7531\u5F53\u524D\u5DE5\u4F5C\u53F0\u4FDD\u5B58\u3002";
         this.historyEl.appendChild(empty);
       }
-    }
-    async refreshSnippets() {
-      const list = await webApi.listSnippets();
-      this.snippetsEl.textContent = "";
-      for (const item of list) this.renderSnippetCard(item);
-    }
-    renderSnippetCard(item) {
-      const card = document.createElement("div");
-      card.className = "snippet-card";
-      const left = document.createElement("div");
-      const title = document.createElement("div");
-      title.textContent = `${item.name} [${item.category}]`;
-      const cmd = document.createElement("div");
-      cmd.className = "mono host-meta";
-      cmd.textContent = item.command;
-      left.append(title, cmd);
-      const del = document.createElement("button");
-      del.type = "button";
-      del.textContent = "\u5220";
-      del.style.padding = "2px 6px";
-      del.addEventListener("click", async (e) => {
-        e.stopPropagation();
-        await webApi.deleteSnippet(item.id);
-        await this.refreshSnippets();
-      });
-      card.append(left, del);
-      card.addEventListener("click", () => this.deps.onSendCommand(`${item.command}
-`));
-      this.snippetsEl.appendChild(card);
     }
     refreshTunnelsIfOpen() {
       if (this.tunnelDialogOpen) void this.renderTunnels();
@@ -7240,8 +7329,17 @@ WARNING: This link could potentially be dangerous`)) {
         del.type = "button";
         del.textContent = "\u5220\u9664";
         del.addEventListener("click", async () => {
-          await webApi.deleteTunnel(r.id);
-          await this.renderTunnels();
+          const ok = await this.deps.confirm(
+            `\u5220\u9664\u96A7\u9053\u300C${r.name}\u300D\uFF1F`,
+            r.active ? "\u8FD9\u6761\u8F6C\u53D1\u8FD8\u5728\u8FD0\u884C\uFF0C\u5220\u9664\u540E\u4F1A\u505C\u6389\u3002" : "\u8FD9\u6761\u8F6C\u53D1\u89C4\u5219\u4F1A\u4ECE\u672C\u673A\u79FB\u9664\u3002"
+          );
+          if (!ok) return;
+          try {
+            await webApi.deleteTunnel(r.id);
+            await this.renderTunnels();
+          } catch (err) {
+            this.deps.toast(err instanceof Error ? err.message : "\u5220\u9664\u96A7\u9053\u5931\u8D25");
+          }
         });
         ops.append(toggle, del);
         row.append(info, ops);
@@ -7265,7 +7363,7 @@ WARNING: This link could potentially be dangerous`)) {
           command: document.getElementById("snip-cmd").value
         });
         snipDlg.close();
-        await this.refreshSnippets();
+        this.deps.reloadQuickOps?.();
       });
       const tunDlg = document.getElementById("tunnel-dialog");
       const tunMode = document.getElementById("tun-mode");
@@ -7305,6 +7403,30 @@ WARNING: This link could potentially be dangerous`)) {
     }
   }
 
+  // src/renderer/session-logic.ts
+  function seedBroadcastChecks(tabs2) {
+    return tabs2.filter((tab) => !tab.closed && tab.kind === "ssh").map((tab) => tab.id);
+  }
+  function broadcastRecipients(activeId2, tabs2, checked, enabled) {
+    const open = new Set(tabs2.filter((tab) => !tab.closed).map((tab) => tab.id));
+    const ids = [];
+    if (activeId2 && open.has(activeId2)) ids.push(activeId2);
+    if (!enabled) return ids;
+    const seen = new Set(ids);
+    for (const id of checked) {
+      if (!open.has(id) || seen.has(id)) continue;
+      seen.add(id);
+      ids.push(id);
+    }
+    return ids;
+  }
+  function nextFindIndex(current, count, forward) {
+    if (count <= 0) return -1;
+    if (current < 0) return forward ? 0 : count - 1;
+    const step = forward ? 1 : -1;
+    return (current + step + count) % count;
+  }
+
   // src/renderer/renderer.ts
   var TERM_FONT = 'Consolas, "Cascadia Mono", "Courier New", monospace';
   var TERM_THEME = {
@@ -7330,6 +7452,43 @@ WARNING: This link could potentially be dangerous`)) {
     brightCyan: "#61d6d6",
     brightWhite: "#f2f2f2"
   };
+  var TERM_THEME_LIGHT = {
+    background: "#f6f3ec",
+    foreground: "#1c1915",
+    cursor: "#1c1915",
+    cursorAccent: "#f6f3ec",
+    selectionBackground: "#c9daf8",
+    black: "#1c1915",
+    red: "#c2410c",
+    green: "#3f6212",
+    yellow: "#a16207",
+    blue: "#1d4ed8",
+    magenta: "#7e22ce",
+    cyan: "#0f766e",
+    white: "#44403c",
+    brightBlack: "#78716c",
+    brightRed: "#dc2626",
+    brightGreen: "#15803d",
+    brightYellow: "#ca8a04",
+    brightBlue: "#2563eb",
+    brightMagenta: "#a21caf",
+    brightCyan: "#0e7490",
+    brightWhite: "#1c1915"
+  };
+  function termTheme() {
+    return document.documentElement.getAttribute("data-theme") === "light" ? TERM_THEME_LIGHT : TERM_THEME;
+  }
+  function applyTermTheme() {
+    const theme = termTheme();
+    for (const tab of tabs.values()) tab.term.options.theme = theme;
+  }
+  function syncThemeToggle() {
+    const btn = document.getElementById("theme-toggle");
+    if (!btn) return;
+    const light = document.documentElement.getAttribute("data-theme") === "light";
+    btn.textContent = light ? "\u4EAE\u8272" : "\u6697\u8272";
+    btn.title = light ? "\u5F53\u524D\u662F\u4EAE\u8272\uFF0C\u70B9\u51FB\u6539\u6210\u6697\u8272" : "\u5F53\u524D\u662F\u6697\u8272\uFF0C\u70B9\u51FB\u6539\u6210\u4EAE\u8272";
+  }
   var currentView = "terminal";
   var currentSplitMode = "single";
   var secondaryId = null;
@@ -7337,11 +7496,50 @@ WARNING: This link could potentially be dangerous`)) {
   var fontSize = 14;
   var tabs = /* @__PURE__ */ new Map();
   var pendingConnections = /* @__PURE__ */ new Map();
+  var cancelledHostIds = /* @__PURE__ */ new Set();
+  var hostErrors = /* @__PURE__ */ new Map();
+  var broadcastChecked = /* @__PURE__ */ new Set();
+  var selectedHostId = null;
   var toastEl = document.getElementById("toast");
-  function showToast(msg) {
+  var toastTimer = 0;
+  function markSelectedHost(hostId) {
+    selectedHostId = hostId;
+    document.querySelectorAll(".host-item").forEach((el) => {
+      const selected = hostId !== null && el.id === `host-${hostId}`;
+      el.classList.toggle("selected", selected);
+      el.setAttribute("aria-selected", selected ? "true" : "false");
+    });
+  }
+  function showToast(msg, kind = "info") {
+    window.clearTimeout(toastTimer);
     toastEl.textContent = msg;
+    toastEl.classList.toggle("error", kind === "error");
     toastEl.classList.add("show");
-    setTimeout(() => toastEl.classList.remove("show"), 2600);
+    toastTimer = window.setTimeout(() => toastEl.classList.remove("show"), kind === "error" ? 4600 : 2200);
+  }
+  function confirmAction(title, body, okLabel = "\u5220\u9664") {
+    const dlg = document.getElementById("confirm-dialog");
+    const form = document.getElementById("confirm-form");
+    const ok = document.getElementById("confirm-ok");
+    document.getElementById("confirm-title").textContent = title;
+    document.getElementById("confirm-body").textContent = body;
+    ok.textContent = okLabel;
+    return new Promise((resolve) => {
+      const onCancel = () => finish(false);
+      const finish = (value) => {
+        dlg.removeEventListener("cancel", onCancel);
+        dlg.close();
+        form.onsubmit = null;
+        resolve(value);
+      };
+      form.onsubmit = (event) => {
+        event.preventDefault();
+        finish(true);
+      };
+      document.getElementById("cancel-confirm").onclick = () => finish(false);
+      dlg.addEventListener("cancel", onCancel);
+      dlg.showModal();
+    });
   }
   function promptText(title, defaultVal = "") {
     const dlg = document.getElementById("prompt-dialog");
@@ -7369,18 +7567,36 @@ WARNING: This link could potentially be dangerous`)) {
       return tab && !tab.closed && tab.info.kind === "ssh" ? tab.info.sessionId : null;
     },
     toast: showToast,
-    promptText
+    promptText,
+    confirm: confirmAction,
+    onDirChange: () => updateSessionContext()
   });
   var treeCtrl = new HostTreeController({
-    onOpenHost: (hostId) => void openSshTab(hostId),
+    onOpenHost: (hostId) => void openSshTab(hostId, true),
+    onSelectHost: (hostId) => markSelectedHost(hostId),
+    onCancelConnect: (hostId) => cancelConnect(hostId),
     toast: showToast,
     promptText,
-    getActiveHostIds: () => new Set(Array.from(tabs.values()).map((t) => t.info.hostId).filter(Boolean))
+    confirm: confirmAction,
+    getActiveHostIds: () => new Set(Array.from(tabs.values()).filter((t) => !t.closed).map((t) => t.info.hostId).filter(Boolean)),
+    getHostUi: (hostId) => {
+      const pending = pendingConnections.get(hostId);
+      return {
+        connecting: Boolean(pending) && !pending?.cancelled,
+        cancelling: Boolean(pending?.cancelled),
+        error: hostErrors.get(hostId) ?? null,
+        selected: selectedHostId === hostId
+      };
+    }
   });
   var monCtrl = new MonitorAndToolsController({
-    onSendCommand: (cmd) => sendInput(cmd),
+    onFillCommand: (cmd) => fillCommand(cmd),
     getHosts: () => treeCtrl.hosts,
-    toast: showToast
+    toast: showToast,
+    confirm: confirmAction,
+    reloadQuickOps: () => {
+      void renderQuickOpsBar();
+    }
   });
   function handleWsEvent(msg) {
     const type = String(msg.type || "");
@@ -7391,6 +7607,15 @@ WARNING: This link could potentially be dangerous`)) {
       markClosed(msg.sessionId);
     } else if (type === "session:opened" && msg.session && typeof msg.session === "object") {
       const info = msg.session;
+      if (info.hostId && cancelledHostIds.has(info.hostId)) {
+        cancelledHostIds.delete(info.hostId);
+        pendingConnections.delete(info.hostId);
+        void webApi.closeSession(info.sessionId);
+        renderTabs();
+        treeCtrl.render();
+        if (tabs.size === 0) showIdleEmpty();
+        return;
+      }
       if (info.sessionId) createTermInstance(info);
     } else if (type === "metrics:update" && typeof msg.sessionId === "string") {
       const tab = tabs.get(msg.sessionId);
@@ -7427,7 +7652,8 @@ WARNING: This link could potentially be dangerous`)) {
         name: s.name,
         category: s.category || "\u81EA\u5B9A\u4E49",
         command: s.command,
-        isBuiltin: false
+        isBuiltin: false,
+        id: s.id
       });
     }
     for (const op of items) {
@@ -7442,14 +7668,35 @@ ${op.command}`;
       nameSpan.className = "chip-name";
       nameSpan.textContent = op.name;
       chip.append(iconSpan, nameSpan);
+      if (op.id) {
+        const del = document.createElement("button");
+        del.type = "button";
+        del.className = "chip-del";
+        del.textContent = "\xD7";
+        del.title = `\u5220\u9664\u300C${op.name}\u300D`;
+        del.setAttribute("aria-label", `\u5220\u9664\u5FEB\u6377\u547D\u4EE4 ${op.name}`);
+        del.addEventListener("click", (event) => {
+          event.stopPropagation();
+          void (async () => {
+            const ok = await confirmAction(`\u5220\u9664\u5FEB\u6377\u547D\u4EE4\u300C${op.name}\u300D\uFF1F`, "\u8FD9\u6761\u547D\u4EE4\u4F1A\u4ECE\u672C\u673A\u7684\u5FEB\u6377\u547D\u4EE4\u91CC\u79FB\u9664\u3002");
+            if (!ok || !op.id) return;
+            try {
+              await webApi.deleteSnippet(op.id);
+              await renderQuickOpsBar();
+            } catch (err) {
+              showToast(err instanceof Error ? err.message : "\u5220\u9664\u5FEB\u6377\u547D\u4EE4\u5931\u8D25", "error");
+            }
+          })();
+        });
+        chip.append(del);
+      }
       chip.addEventListener("click", () => {
         if (!activeId) {
-          showToast("\u8BF7\u5148\u6253\u5F00\u6216\u9009\u4E2D\u4E00\u4E2A\u7EC8\u7AEF\u4F1A\u8BDD");
+          showToast("\u8BF7\u5148\u6253\u5F00\u6216\u9009\u4E2D\u4E00\u4E2A\u7EC8\u7AEF\u4F1A\u8BDD", "error");
           return;
         }
         sendInput(`${op.command}
 `);
-        showToast(`\u5DF2\u53D1\u9001: ${op.name}`);
         document.getElementById("nav-ops-menu")?.classList.add("hidden");
         switchView("terminal");
       });
@@ -7458,7 +7705,6 @@ ${op.command}`;
   }
   async function refreshLive(kind) {
     if (kind === "snippets" || kind === "disk") {
-      await monCtrl.refreshSnippets();
       void renderQuickOpsBar();
     }
     if (kind === "history" || kind === "disk") await monCtrl.refreshHistory();
@@ -7469,10 +7715,38 @@ ${op.command}`;
   var ws = connectWs(handleWsEvent, () => {
     void refreshLive("disk");
   });
+  function tabModels() {
+    return Array.from(tabs.entries()).map(([id, tab]) => ({
+      id,
+      kind: tab.info.kind === "local" ? "local" : "ssh",
+      closed: tab.closed
+    }));
+  }
+  function dispatchInput(ids, data) {
+    if (!ids.length || ws.readyState !== WebSocket.OPEN) return;
+    if (ids.length === 1) {
+      ws.send(JSON.stringify({ type: "term:input", sessionId: ids[0], data }));
+      return;
+    }
+    ws.send(JSON.stringify({ type: "term:broadcast", sessionIds: ids, data }));
+  }
   function sendInput(data) {
-    if (!activeId || ws.readyState !== WebSocket.OPEN) return;
-    const broadcast = document.getElementById("broadcast-toggle").checked;
-    ws.send(JSON.stringify(broadcast ? { type: "term:broadcast", sessionIds: Array.from(tabs.keys()), data } : { type: "term:input", sessionId: activeId, data }));
+    const enabled = document.getElementById("broadcast-toggle").checked;
+    dispatchInput(broadcastRecipients(activeId, tabModels(), Array.from(broadcastChecked), enabled), data);
+  }
+  function sendToActive(data) {
+    dispatchInput(broadcastRecipients(activeId, tabModels(), [], false), data);
+  }
+  function fillCommand(cmd) {
+    const text = cmd.replace(/[\r\n]+$/, "");
+    if (!text) return;
+    switchView("terminal");
+    document.getElementById("nav-ops-menu")?.classList.add("hidden");
+    if (!activeId || tabs.get(activeId)?.closed) {
+      showToast("\u5148\u6253\u5F00\u4E00\u4E2A\u4ECD\u8FDE\u63A5\u7684\u7EC8\u7AEF\uFF0C\u518D\u628A\u547D\u4EE4\u586B\u8FDB\u53BB", "error");
+      return;
+    }
+    sendToActive(text);
   }
   function showTerminalContextMenu(x, y, sessionId) {
     const menu = document.getElementById("terminal-context-menu");
@@ -7554,9 +7828,7 @@ ${op.command}`;
       if (t && t.term.hasSelection()) {
         const sel = t.term.getSelection();
         if (sel && sel.trim().length > 0) {
-          void navigator.clipboard.writeText(sel).then(() => {
-            showToast(`\u5DF2\u81EA\u52A8\u590D\u5236 ${sel.length} \u5B57\u7B26`);
-          }).catch(() => {
+          void navigator.clipboard.writeText(sel).catch(() => {
           });
         }
       }
@@ -7582,7 +7854,7 @@ ${op.command}`;
       // 本地管道终端开启换行归位；远端 SSH PTY 自己发 CR，不能再转换以免打乱网格
       convertEol: info.kind === "local",
       scrollback: 8e3,
-      theme: TERM_THEME
+      theme: termTheme()
     });
     const fit = new import_addon_fit.FitAddon();
     term.loadAddon(fit);
@@ -7635,27 +7907,47 @@ ${op.command}`;
       ipEl.textContent = "";
       return;
     }
+    const who = tab.info.kind === "local" ? "\u672C\u673A\u7EC8\u7AEF" : `${tab.info.username}@${tab.info.host}`;
     if (tab.closed) {
       dot.className = "status-dot closed";
       aliasEl.textContent = tab.info.kind === "local" ? "\u672C\u673A\u7EC8\u7AEF" : tab.info.alias;
-      ipEl.textContent = tab.info.kind === "local" ? "(Local - \u5DF2\u65AD\u5F00)" : `(${tab.info.host} - \u5DF2\u65AD\u5F00)`;
+      ipEl.textContent = `${who} \u5DF2\u65AD\u5F00`;
     } else {
       dot.className = "status-dot connected";
       aliasEl.textContent = tab.info.kind === "local" ? "\u672C\u673A\u7EC8\u7AEF" : tab.info.alias;
-      ipEl.textContent = tab.info.kind === "local" ? "(Local)" : `(${tab.info.host})`;
+      ipEl.textContent = who;
     }
+  }
+  function updateSessionContext() {
+    const el = document.getElementById("session-context");
+    const tab = activeId ? tabs.get(activeId) : void 0;
+    updateNavHostBadge(tab);
+    if (!el) return;
+    if (!tab) {
+      el.textContent = "\u6CA1\u6709\u9009\u4E2D\u7684\u4F1A\u8BDD";
+      return;
+    }
+    const who = tab.info.kind === "local" ? "\u672C\u673A\u7EC8\u7AEF" : `${tab.info.username}@${tab.info.host}`;
+    let text = tab.closed ? `${who} \xB7 \u5DF2\u65AD\u5F00` : who;
+    if (currentView === "sftp" && tab.info.kind === "ssh" && !tab.closed) {
+      text += ` \xB7 ${sftpCtrl.currentPath()}`;
+    }
+    el.textContent = text;
+  }
+  function setViewTab(id, selected) {
+    const btn = document.getElementById(id);
+    btn?.classList.toggle("active", selected);
+    btn?.setAttribute("aria-selected", selected ? "true" : "false");
   }
   function switchView(view) {
     currentView = view;
-    const btnTerm = document.getElementById("nav-btn-terminal");
-    const btnSftp = document.getElementById("nav-btn-sftp");
-    const btnMon = document.getElementById("nav-btn-monitor");
+    document.querySelector(".app")?.setAttribute("data-view", view);
     const viewTerm = document.getElementById("view-terminal");
     const viewSftp = document.getElementById("view-sftp");
     const viewMon = document.getElementById("view-monitor");
-    btnTerm?.classList.toggle("active", view === "terminal");
-    btnSftp?.classList.toggle("active", view === "sftp");
-    btnMon?.classList.toggle("active", view === "monitor");
+    setViewTab("nav-btn-terminal", view === "terminal");
+    setViewTab("nav-btn-sftp", view === "sftp");
+    setViewTab("nav-btn-monitor", view === "monitor");
     viewTerm?.classList.toggle("active", view === "terminal");
     viewSftp?.classList.toggle("active", view === "sftp");
     viewMon?.classList.toggle("active", view === "monitor");
@@ -7676,6 +7968,7 @@ ${op.command}`;
       const tab = activeId ? tabs.get(activeId) : void 0;
       showMetricsFor(tab);
     }
+    updateSessionContext();
   }
   function showMetricsFor(tab) {
     if (!tab || tab.closed || tab.info.kind !== "ssh") {
@@ -7688,11 +7981,12 @@ ${op.command}`;
     const tab = tabs.get(sessionId);
     if (!tab || tab.closed) return;
     tab.closed = true;
+    broadcastChecked.delete(sessionId);
     tab.term.writeln("\r\n\x1B[33m[\u4F1A\u8BDD\u5DF2\u65AD\u5F00]\x1B[0m");
     if (activeId === sessionId) {
       showMetricsFor(tab);
       sftpCtrl.syncSession();
-      updateNavHostBadge(tab);
+      updateSessionContext();
     }
     renderTabs();
   }
@@ -7751,7 +8045,7 @@ ${op.command}`;
       if (isVisible) {
         fitTab(tab);
         if (isPrimary) {
-          tab.term.focus();
+          if (currentView === "terminal") tab.term.focus();
           showMetricsFor(tab);
         }
       }
@@ -7765,13 +8059,15 @@ ${op.command}`;
       secondaryId = null;
       currentSplitMode = "single";
       updateSplitControls();
-      document.getElementById("term-empty")?.classList.remove("hidden");
+      showIdleEmpty();
       monCtrl.renderMetrics(null, "idle");
-      updateNavHostBadge(void 0);
       renderTabs();
       sftpCtrl.syncSession();
+      updateSessionContext();
       return;
     }
+    const chosen = tabs.get(sessionId);
+    if (chosen?.info.hostId) markSelectedHost(chosen.info.hostId);
     document.getElementById("term-empty")?.classList.add("hidden");
     if (currentSplitMode !== "single") {
       if (sessionId === secondaryId) {
@@ -7804,7 +8100,10 @@ ${op.command}`;
       renderTabs();
       sftpCtrl.syncSession();
     }
-    updateNavHostBadge(tabs.get(sessionId));
+    updateSessionContext();
+  }
+  function broadcastOn() {
+    return document.getElementById("broadcast-toggle")?.checked ?? false;
   }
   function renderTabs() {
     const bar = document.getElementById("tabs");
@@ -7814,6 +8113,24 @@ ${op.command}`;
       const isSecondary = currentSplitMode !== "single" && id === secondaryId;
       const chip = document.createElement("div");
       chip.className = `tab-chip${isPrimary ? " active" : ""}${tab.closed ? " closed" : ""}`;
+      chip.setAttribute("role", "tab");
+      chip.setAttribute("aria-selected", isPrimary ? "true" : "false");
+      if (broadcastOn() && !tab.closed) {
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.className = "tab-bcast";
+        const isCurrent = id === activeId;
+        const local = tab.info.kind === "local";
+        box.title = isCurrent ? "\u5F53\u524D\u7EC8\u7AEF\u603B\u4F1A\u6536\u5230" : local ? "\u52FE\u9009\u540E\uFF0C\u5E7F\u64AD\u624D\u4F1A\u8FDB\u5165\u8FD9\u4E2A\u672C\u673A\u7EC8\u7AEF" : "\u52FE\u9009\u540E\uFF0C\u5E7F\u64AD\u4F1A\u8FDB\u5165\u8FD9\u4E2A\u4F1A\u8BDD";
+        box.checked = isCurrent || broadcastChecked.has(id);
+        box.disabled = isCurrent;
+        box.addEventListener("click", (event) => event.stopPropagation());
+        box.addEventListener("change", () => {
+          if (box.checked) broadcastChecked.add(id);
+          else broadcastChecked.delete(id);
+        });
+        chip.appendChild(box);
+      }
       const dot = document.createElement("span");
       dot.className = "tab-dot";
       const label = document.createElement("span");
@@ -7832,9 +8149,22 @@ ${op.command}`;
           chip.appendChild(badge);
         }
       }
+      if (tab.closed && tab.info.kind === "ssh" && tab.info.hostId) {
+        const reconnect = document.createElement("button");
+        reconnect.type = "button";
+        reconnect.className = "tab-reconnect";
+        reconnect.textContent = "\u91CD\u8FDE";
+        const hostId = tab.info.hostId;
+        reconnect.addEventListener("click", (event) => {
+          event.stopPropagation();
+          void openSshTab(hostId, currentView === "terminal");
+        });
+        chip.appendChild(reconnect);
+      }
       const closeBtn = document.createElement("button");
       closeBtn.type = "button";
       closeBtn.textContent = "\xD7";
+      closeBtn.setAttribute("aria-label", "\u5173\u95ED\u4F1A\u8BDD");
       closeBtn.style.padding = "0 4px";
       closeBtn.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -7844,104 +8174,225 @@ ${op.command}`;
       chip.addEventListener("click", () => selectTab(id));
       bar.appendChild(chip);
     }
-    for (const [, p] of pendingConnections) {
+    for (const [hostId, pending] of pendingConnections) {
       const chip = document.createElement("div");
       chip.className = "tab-chip connecting active";
       const dot = document.createElement("span");
       dot.className = "tab-dot spin";
       const label = document.createElement("span");
-      label.textContent = `${p.alias} (\u8FDE\u63A5\u4E2D...)`;
+      label.textContent = `${pending.alias}\uFF08${pending.detail}\uFF09`;
       chip.append(dot, label);
+      if (!pending.cancelled) {
+        const cancel = document.createElement("button");
+        cancel.type = "button";
+        cancel.className = "tab-reconnect";
+        cancel.textContent = "\u53D6\u6D88";
+        cancel.addEventListener("click", (event) => {
+          event.stopPropagation();
+          cancelConnect(hostId);
+        });
+        chip.appendChild(cancel);
+      }
       bar.appendChild(chip);
     }
   }
-  async function closeTab(sessionId) {
+  async function disposeTab(sessionId, selectFallback) {
     const tab = tabs.get(sessionId);
     if (!tab) return;
-    await webApi.closeSession(sessionId);
+    try {
+      await webApi.closeSession(sessionId);
+    } catch {
+    }
     tab.term.dispose();
     tab.slot.remove();
     tabs.delete(sessionId);
-    treeCtrl.render();
-    if (secondaryId === sessionId) {
-      secondaryId = null;
-    }
+    broadcastChecked.delete(sessionId);
+    if (secondaryId === sessionId) secondaryId = null;
     if (tabs.size < 2 && currentSplitMode !== "single") {
       currentSplitMode = "single";
       updateSplitControls();
       document.getElementById("terminal-stage")?.classList.remove("split-h", "split-v");
     }
+    treeCtrl.render();
     if (activeId === sessionId) {
-      selectTab(Array.from(tabs.keys()).pop() ?? null);
-    } else {
+      if (selectFallback) selectTab(Array.from(tabs.keys()).pop() ?? null);
+      else {
+        activeId = null;
+        renderTabs();
+        updateSessionContext();
+        if (tabs.size === 0) showIdleEmpty();
+      }
+    } else if (selectFallback) {
       updateSplitLayout();
+    } else {
+      renderTabs();
     }
   }
-  async function openSshTab(hostId) {
-    const existingTab = Array.from(tabs.values()).find((t) => t.info.hostId === hostId && !t.closed);
-    if (existingTab) {
-      selectTab(existingTab.info.sessionId);
-      switchView("terminal");
-      showToast(`\u5DF2\u5207\u6362\u81F3: ${existingTab.info.alias}`);
+  async function closeTab(sessionId) {
+    await disposeTab(sessionId, true);
+  }
+  function jumpPhrase(hostId) {
+    const host = treeCtrl.hosts.find((item) => item.id === hostId);
+    if (!host?.jumpHostId) return "";
+    const jump = treeCtrl.hosts.find((item) => item.id === host.jumpHostId);
+    return jump ? `\u7ECF\u8DF3\u677F\u673A ${jump.alias}` : "\u7ECF\u8DF3\u677F\u673A";
+  }
+  function showIdleEmpty() {
+    const el = document.getElementById("term-empty");
+    if (!el) return;
+    el.classList.remove("hidden");
+    el.replaceChildren();
+    const title = document.createElement("p");
+    title.className = "empty-kicker";
+    title.textContent = "\u6CA1\u6709\u6253\u5F00\u7684\u7EC8\u7AEF";
+    const sub = document.createElement("p");
+    sub.textContent = "\u53CC\u51FB\u5DE6\u4FA7\u4E3B\u673A\uFF0C\u6216\u4F7F\u7528\u4E0A\u65B9\u300C\u672C\u673A\u7EC8\u7AEF\u300D\u3002";
+    el.append(title, sub);
+  }
+  function showConnectEmpty(title, sub, isError = false) {
+    if (tabs.size > 0) return;
+    const el = document.getElementById("term-empty");
+    if (!el) return;
+    el.classList.remove("hidden");
+    el.replaceChildren();
+    const heading = document.createElement("p");
+    heading.className = "empty-kicker";
+    heading.textContent = title;
+    const detail = document.createElement("p");
+    if (isError) detail.className = "empty-error";
+    detail.textContent = sub;
+    el.append(heading, detail);
+  }
+  function cancelConnect(hostId) {
+    const pending = pendingConnections.get(hostId);
+    if (!pending || pending.cancelled) return;
+    pending.cancelled = true;
+    pending.detail = "\u6B63\u5728\u53D6\u6D88";
+    cancelledHostIds.add(hostId);
+    pending.abort.abort();
+    renderTabs();
+    treeCtrl.render();
+  }
+  async function openSshTab(hostId, showTerminal) {
+    const live = Array.from(tabs.values()).find((tab) => tab.info.hostId === hostId && !tab.closed);
+    if (live) {
+      selectTab(live.info.sessionId);
       return;
     }
     if (pendingConnections.has(hostId)) return;
-    const host = treeCtrl.hosts.find((h) => h.id === hostId);
-    const alias = host ? host.alias : "\u8FDC\u7A0B\u4E3B\u673A";
-    pendingConnections.set(hostId, { alias, host: host?.host, port: host?.port });
-    const hostEl = document.getElementById(`host-${hostId}`);
-    hostEl?.classList.add("connecting");
-    const termEmpty = document.getElementById("term-empty");
-    if (termEmpty && tabs.size === 0) {
-      termEmpty.classList.remove("hidden");
-      termEmpty.innerHTML = `
-      <div class="connecting-box">
-        <div class="connecting-spinner"></div>
-        <div class="connecting-title">\u6B63\u5728\u8FDE\u63A5 ${alias}...</div>
-        <div class="connecting-sub">${host ? `${host.username}@${host.host}:${host.port}` : ""} \xB7 \u6B63\u5728\u534F\u5546\u5BC6\u94A5\u5E76\u5206\u914D\u7EC8\u7AEF</div>
-      </div>
-    `;
-    }
+    const stale = Array.from(tabs.entries()).find(([, tab]) => tab.info.hostId === hostId && tab.closed);
+    if (stale) await disposeTab(stale[0], true);
+    cancelledHostIds.delete(hostId);
+    const host = treeCtrl.hosts.find((item) => item.id === hostId);
+    const alias = host?.alias ?? "\u8FDC\u7A0B\u4E3B\u673A";
+    const via = jumpPhrase(hostId);
+    const detail = via ? `\u6B63\u5728\u8FDE\u63A5\uFF0C${via}` : "\u6B63\u5728\u8FDE\u63A5";
+    const abort = new AbortController();
+    pendingConnections.set(hostId, { alias, detail, abort, cancelled: false });
+    hostErrors.delete(hostId);
+    selectedHostId = hostId;
+    if (showTerminal) switchView("terminal");
+    const target = host ? `${host.username}@${host.host}:${host.port}` : alias;
+    showConnectEmpty(`\u6B63\u5728\u8FDE\u63A5 ${alias}`, via ? `${target} \xB7 ${via}` : target);
     renderTabs();
+    treeCtrl.render();
     try {
       const grid = measureGrid();
-      const info = await webApi.openSession({ kind: "ssh", hostId, cols: grid.cols, rows: grid.rows });
+      const info = await webApi.openSession({ kind: "ssh", hostId, cols: grid.cols, rows: grid.rows }, abort.signal);
       if (!info.hostId) info.hostId = hostId;
-      pendingConnections.delete(hostId);
-      hostEl?.classList.remove("connecting");
-      if (termEmpty) {
-        termEmpty.innerHTML = "<div>\u6CA1\u6709\u6253\u5F00\u7684\u7EC8\u7AEF</div><small>\u53CC\u51FB\u5DE6\u4FA7\u4E3B\u673A\uFF0C\u6216\u4F7F\u7528\u300C\u672C\u673A\u7EC8\u7AEF\u300D\u3002</small>";
-      }
-      createTermInstance(info);
-      const tab = activeId ? tabs.get(activeId) : void 0;
-      if (tab) requestAnimationFrame(() => fitTab(tab));
-    } catch (err) {
-      pendingConnections.delete(hostId);
-      hostEl?.classList.remove("connecting");
-      if (termEmpty) {
-        termEmpty.innerHTML = "<div>\u6CA1\u6709\u6253\u5F00\u7684\u7EC8\u7AEF</div><small>\u53CC\u51FB\u5DE6\u4FA7\u4E3B\u673A\uFF0C\u6216\u4F7F\u7528\u300C\u672C\u673A\u7EC8\u7AEF\u300D\u3002</small>";
-      }
-      renderTabs();
-      showToast(err instanceof Error ? err.message : "\u8FDE\u63A5\u5931\u8D25");
-    }
-  }
-  function findInActiveTerm(needle, forward = false) {
-    if (!activeId || !needle) return;
-    const tab = tabs.get(activeId);
-    if (!tab) return;
-    const buf = tab.term.buffer.active;
-    const start = forward ? 0 : buf.length - 1;
-    const end = forward ? buf.length : -1;
-    const step = forward ? 1 : -1;
-    for (let row = start; row !== end; row += step) {
-      const col = (buf.getLine(row)?.translateToString() ?? "").toLowerCase().indexOf(needle.toLowerCase());
-      if (col !== -1) {
-        tab.term.scrollToLine(Math.max(0, row - 3));
-        tab.term.select(col, row, needle.length);
+      const pending = pendingConnections.get(hostId);
+      if (pending?.cancelled || cancelledHostIds.has(hostId) || abort.signal.aborted) {
+        pendingConnections.delete(hostId);
+        cancelledHostIds.delete(hostId);
+        await webApi.closeSession(info.sessionId).catch(() => void 0);
+        renderTabs();
+        treeCtrl.render();
+        if (tabs.size === 0) showIdleEmpty();
         return;
       }
+      pendingConnections.delete(hostId);
+      hostErrors.delete(hostId);
+      createTermInstance(info);
+      const tab = tabs.get(info.sessionId);
+      if (tab) requestAnimationFrame(() => fitTab(tab));
+    } catch (err) {
+      const pending = pendingConnections.get(hostId);
+      pendingConnections.delete(hostId);
+      if (abort.signal.aborted || pending?.cancelled) {
+        renderTabs();
+        treeCtrl.render();
+        if (tabs.size === 0) showIdleEmpty();
+        return;
+      }
+      const raw = err instanceof Error ? err.message : "\u8FDE\u63A5\u5931\u8D25";
+      const message = via && !raw.includes("\u8DF3\u677F") ? `${via} \u8FDE\u63A5\u5931\u8D25\uFF1A${raw}` : raw;
+      hostErrors.set(hostId, message);
+      showConnectEmpty(`\u8FDE\u63A5 ${alias} \u5931\u8D25`, message, true);
+      showToast(message, "error");
+      renderTabs();
+      treeCtrl.render();
     }
-    showToast(`\u672A\u627E\u5230 "${needle}"`);
+  }
+  var findNeedle = "";
+  var findSessionId = null;
+  var findCursor = -1;
+  var findHits = [];
+  function setFindCount(text, title = "") {
+    const el = document.getElementById("search-count");
+    if (!el) return;
+    el.textContent = text;
+    el.title = title;
+  }
+  function collectHits(tab, needle) {
+    const hits = [];
+    const buf = tab.term.buffer.active;
+    const lowered = needle.toLowerCase();
+    for (let row = 0; row < buf.length; row += 1) {
+      const line = (buf.getLine(row)?.translateToString() ?? "").toLowerCase();
+      let from = 0;
+      while (from < line.length) {
+        const col = line.indexOf(lowered, from);
+        if (col === -1) break;
+        hits.push({ row, col });
+        from = col + Math.max(1, lowered.length);
+      }
+    }
+    return hits;
+  }
+  function findInActiveTerm(needle, forward = true) {
+    const trimmed = needle.trim();
+    if (!activeId || !trimmed) {
+      setFindCount("");
+      return;
+    }
+    const tab = tabs.get(activeId);
+    if (!tab) return;
+    if (trimmed !== findNeedle || activeId !== findSessionId) {
+      findNeedle = trimmed;
+      findSessionId = activeId;
+      findHits = collectHits(tab, trimmed);
+      findCursor = -1;
+    }
+    if (!findHits.length) {
+      setFindCount("0/0", "\u6CA1\u6709\u5339\u914D");
+      return;
+    }
+    const previous = findCursor;
+    findCursor = nextFindIndex(findCursor, findHits.length, forward);
+    const hit = findHits[findCursor];
+    if (!hit) return;
+    tab.term.scrollToLine(Math.max(0, hit.row - 3));
+    tab.term.select(hit.col, hit.row, trimmed.length);
+    const wrapped = previous >= 0 && (forward && findCursor < previous || !forward && findCursor > previous);
+    setFindCount(`${findCursor + 1}/${findHits.length}`, wrapped ? "\u5DF2\u4ECE\u53E6\u4E00\u5934\u7EE7\u7EED" : "");
+  }
+  function openFind() {
+    switchView("terminal");
+    const bar = document.getElementById("search-bar");
+    bar?.classList.remove("hidden");
+    const input = document.getElementById("search-input");
+    input?.focus();
+    input?.select();
   }
   function bindGlobalUi() {
     document.getElementById("nav-btn-terminal")?.addEventListener("click", () => switchView("terminal"));
@@ -7951,11 +8402,24 @@ ${op.command}`;
     const navOpsMenu = document.getElementById("nav-ops-menu");
     navOpsToggle?.addEventListener("click", (e) => {
       e.stopPropagation();
-      navOpsMenu?.classList.toggle("hidden");
+      const open = navOpsMenu?.classList.toggle("hidden") === false;
+      navOpsToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    const moreBtn = document.getElementById("nav-more");
+    const moreWrap = moreBtn?.parentElement;
+    moreBtn?.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const open = moreWrap?.classList.toggle("open") ?? false;
+      moreBtn.setAttribute("aria-expanded", open ? "true" : "false");
     });
     window.addEventListener("click", (e) => {
       if (navOpsMenu && !navOpsMenu.classList.contains("hidden") && !navOpsMenu.contains(e.target) && e.target !== navOpsToggle) {
         navOpsMenu.classList.add("hidden");
+        navOpsToggle?.setAttribute("aria-expanded", "false");
+      }
+      if (moreWrap?.classList.contains("open") && !moreWrap.contains(e.target)) {
+        moreWrap.classList.remove("open");
+        moreBtn?.setAttribute("aria-expanded", "false");
       }
     });
     window.addEventListener("keydown", (e) => {
@@ -7970,6 +8434,7 @@ ${op.command}`;
       const isCollapsed = sidebar.classList.toggle("collapsed");
       sideToggleBtn.textContent = isCollapsed ? "\u25B6" : "\u25C0";
       sideToggleBtn.title = isCollapsed ? "\u5C55\u5F00\u5DE6\u4FA7\u680F" : "\u6536\u8D77\u5DE6\u4FA7\u680F";
+      sideToggleBtn.setAttribute("aria-label", sideToggleBtn.title);
       requestAnimationFrame(() => fitVisibleTabs());
     });
     document.getElementById("nav-host-badge")?.addEventListener("click", () => {
@@ -7979,50 +8444,40 @@ ${op.command}`;
       const grid = measureGrid();
       createTermInstance(await webApi.openSession({ kind: "local", cols: grid.cols, rows: grid.rows }));
     };
-    document.getElementById("open-local")?.addEventListener("click", handleOpenLocal);
-    document.getElementById("new-tab-local")?.addEventListener("click", handleOpenLocal);
+    document.getElementById("new-tab-local")?.addEventListener("click", () => void handleOpenLocal());
     document.getElementById("split-single")?.addEventListener("click", () => setSplitMode("single"));
     document.getElementById("split-horizontal")?.addEventListener("click", () => setSplitMode("horizontal"));
     document.getElementById("split-vertical")?.addEventListener("click", () => setSplitMode("vertical"));
-    document.getElementById("quick-ops-add")?.addEventListener("click", () => {
-      document.getElementById("snippet-dialog")?.showModal();
+    document.getElementById("broadcast-toggle")?.addEventListener("change", () => {
+      broadcastChecked.clear();
+      if (broadcastOn()) {
+        for (const id of seedBroadcastChecks(tabModels())) broadcastChecked.add(id);
+      }
+      renderTabs();
     });
     document.getElementById("open-tunnels")?.addEventListener("click", () => void monCtrl.openTunnelModal());
     document.getElementById("theme-toggle")?.addEventListener("click", async () => {
       const next = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
       document.documentElement.setAttribute("data-theme", next);
+      syncThemeToggle();
+      applyTermTheme();
       await webApi.updateSettings({ theme: next });
+      moreWrap?.classList.remove("open");
     });
-    document.getElementById("search-toggle")?.addEventListener("click", () => document.getElementById("search-bar")?.classList.toggle("hidden"));
+    document.getElementById("search-toggle")?.addEventListener("click", () => openFind());
     document.getElementById("search-close")?.addEventListener("click", () => document.getElementById("search-bar")?.classList.add("hidden"));
     document.getElementById("search-prev")?.addEventListener("click", () => findInActiveTerm(document.getElementById("search-input").value, false));
     document.getElementById("search-next")?.addEventListener("click", () => findInActiveTerm(document.getElementById("search-input").value, true));
-    const handle = document.getElementById("split-handle");
-    const termPane = document.getElementById("terminal-pane");
-    const sftpPane = document.getElementById("sftp-pane");
-    const wrap = document.getElementById("split-wrap");
-    handle?.addEventListener("mousedown", (down) => {
-      if (!termPane || !sftpPane || !wrap) return;
-      down.preventDefault();
-      const startY = down.clientY;
-      const startH = termPane.getBoundingClientRect().height;
-      const onMove = (mv) => {
-        const nextH = Math.max(160, Math.min(wrap.getBoundingClientRect().height - 140, startH + (mv.clientY - startY)));
-        termPane.style.flex = `0 0 ${nextH}px`;
-        sftpPane.style.flex = "1 1 auto";
-        sftpPane.style.maxHeight = "none";
-        fitVisibleTabs();
-      };
-      const onUp = () => {
-        window.removeEventListener("mousemove", onMove);
-        window.removeEventListener("mouseup", onUp);
-      };
-      window.addEventListener("mousemove", onMove);
-      window.addEventListener("mouseup", onUp);
+    document.getElementById("search-input")?.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      findInActiveTerm(event.target.value, !event.shiftKey);
     });
     const setDlg = document.getElementById("settings-dialog");
-    document.getElementById("open-settings")?.addEventListener("click", () => setDlg.showModal());
-    document.getElementById("open-settings-top")?.addEventListener("click", () => setDlg.showModal());
+    document.getElementById("open-settings")?.addEventListener("click", () => {
+      setDlg.showModal();
+      moreWrap?.classList.remove("open");
+    });
     document.getElementById("cancel-settings")?.addEventListener("click", () => setDlg.close());
     document.getElementById("settings-form")?.addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -8034,6 +8489,8 @@ ${op.command}`;
       });
       fontSize = s.fontSize;
       document.documentElement.setAttribute("data-theme", s.theme);
+      syncThemeToggle();
+      applyTermTheme();
       sftpCtrl.setShowHidden(s.showHiddenFiles);
       for (const tab of tabs.values()) {
         tab.term.options.fontSize = fontSize;
@@ -8072,23 +8529,16 @@ ${op.command}`;
       if (!activeId) return;
       const tab = tabs.get(activeId);
       if (!tab) return;
-      tab.term.clear();
-      sendInput("clear\n");
+      tab.term.write("\x1B[2J\x1B[3J\x1B[H");
     });
     document.getElementById("ctx-search")?.addEventListener("click", () => {
       document.getElementById("terminal-context-menu")?.classList.add("hidden");
-      document.getElementById("search-bar")?.classList.remove("hidden");
-      document.getElementById("search-input")?.focus();
+      openFind();
     });
     document.getElementById("ctx-select-all")?.addEventListener("click", () => {
       document.getElementById("terminal-context-menu")?.classList.add("hidden");
       if (!activeId) return;
-      const tab = tabs.get(activeId);
-      if (tab) {
-        tab.term.selectAll();
-        const sel = tab.term.getSelection();
-        if (sel) void copyText(sel, `\u5DF2\u5168\u9009\u5E76\u590D\u5236 ${sel.length} \u5B57\u7B26`);
-      }
+      tabs.get(activeId)?.term.selectAll();
     });
     window.addEventListener("click", (e) => {
       const menu = document.getElementById("terminal-context-menu");
@@ -8103,11 +8553,12 @@ ${op.command}`;
     });
   }
   window.addEventListener("keydown", (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f" && activeId) {
-      e.preventDefault();
-      document.getElementById("search-bar")?.classList.remove("hidden");
-      document.getElementById("search-input").focus();
-    }
+    if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== "f") return;
+    const el = document.activeElement;
+    if (!el || el.closest("dialog")) return;
+    if (!el.closest("#search-bar, #terminal-stage, .xterm")) return;
+    e.preventDefault();
+    openFind();
   });
   window.addEventListener("resize", () => {
     if (isTerminalViewActive()) fitVisibleTabs();
@@ -8126,6 +8577,8 @@ ${op.command}`;
     const s = await webApi.getSettings();
     fontSize = s.fontSize;
     document.documentElement.setAttribute("data-theme", s.theme);
+    syncThemeToggle();
+    applyTermTheme();
     sftpCtrl.setShowHidden(s.showHiddenFiles);
     const theme = document.getElementById("set-theme");
     const font = document.getElementById("set-font");
@@ -8184,12 +8637,23 @@ ${op.command}`;
   async function boot() {
     bindGlobalUi();
     switchView("terminal");
-    updateNavHostBadge(void 0);
+    syncThemeToggle();
+    updateSessionContext();
     document.getElementById("open-mcp")?.addEventListener("click", () => void showMcpDialog().catch((err) => {
       showToast(err instanceof Error ? err.message : "\u8BFB\u4E0D\u5230 MCP \u5730\u5740");
     }));
     document.getElementById("close-mcp")?.addEventListener("click", () => {
       document.getElementById("mcp-dialog").close();
+    });
+    document.getElementById("mcp-token-toggle")?.addEventListener("click", () => {
+      const input = document.getElementById("mcp-token");
+      const hidden = input.type === "password";
+      input.type = hidden ? "text" : "password";
+      const btn = document.getElementById("mcp-token-toggle");
+      if (btn) btn.textContent = hidden ? "\u9690\u85CF" : "\u663E\u793A";
+    });
+    document.getElementById("mcp-token-copy")?.addEventListener("click", () => {
+      void copyText(document.getElementById("mcp-token").value, "\u5DF2\u590D\u5236\u4EE4\u724C");
     });
     document.getElementById("copy-cursor")?.addEventListener("click", () => {
       void copyText(document.getElementById("mcp-cursor").value, "\u5DF2\u590D\u5236 Cursor \u914D\u7F6E");

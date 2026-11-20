@@ -11,7 +11,7 @@
     <link rel="stylesheet" href="./renderer.css" />
   </head>
   <body>
-    <div class="app">
+    <div class="app" data-view="terminal">
       <!-- 顶部全局导航栏 (Global Top Bar) -->
       <header class="global-nav">
         <div class="nav-left">
@@ -32,35 +32,46 @@
 
         <!-- 核心三合一分段导航切换器 -->
         <div class="nav-center">
-          <div class="segmented-control" role="tablist">
-            <button id="nav-btn-terminal" class="seg-item active" type="button" role="tab" data-view="terminal">💻 终端 (Terminal)</button>
-            <button id="nav-btn-sftp" class="seg-item" type="button" role="tab" data-view="sftp">📁 文件管理 (SFTP)</button>
-            <button id="nav-btn-monitor" class="seg-item" type="button" role="tab" data-view="monitor">📊 性能监控 (Monitor)</button>
+          <div class="segmented-control" role="tablist" aria-label="工作区">
+            <button id="nav-btn-terminal" class="seg-item active" type="button" role="tab" aria-selected="true" aria-controls="view-terminal" data-view="terminal" title="Terminal">终端</button>
+            <button id="nav-btn-sftp" class="seg-item" type="button" role="tab" aria-selected="false" aria-controls="view-sftp" data-view="sftp" title="SFTP">文件</button>
+            <button id="nav-btn-monitor" class="seg-item" type="button" role="tab" aria-selected="false" aria-controls="view-monitor" data-view="monitor" title="Monitor">监控</button>
           </div>
         </div>
 
         <div class="nav-right">
-          <!-- 悬浮运维动作下拉菜单 -->
           <div class="ops-dropdown-wrap">
-            <button id="nav-ops-toggle" class="btn-tool" type="button" title="常用运维快捷指令">⚡ 运维动作 ▾</button>
-            <div id="nav-ops-menu" class="ops-menu hidden">
+            <button id="nav-ops-toggle" class="btn-tool" type="button" title="常用运维快捷指令和命令历史" aria-haspopup="menu" aria-expanded="false">运维</button>
+            <div id="nav-ops-menu" class="ops-menu hidden" role="menu">
+              <div class="ops-section-label">快捷动作</div>
               <div id="quick-ops-list" class="quick-ops-list"></div>
               <div class="ops-menu-footer">
-                <button id="quick-ops-add" class="btn-ghost-sm" type="button" title="新增自定义快捷命令">+ 自定义</button>
+                <button id="add-snippet" class="btn-ghost-sm" type="button" title="新增自定义快捷命令">+ 自定义</button>
+              </div>
+              <div class="ops-section-label">命令历史</div>
+              <input id="history-filter" type="search" placeholder="搜索历史命令" autocomplete="off" aria-label="搜索历史命令" />
+              <div id="history-list" class="history-list"></div>
+              <div class="ops-menu-footer">
+                <button id="history-refresh" class="btn-ghost-sm" type="button">刷新</button>
               </div>
             </div>
           </div>
-          <div class="split-controls" id="split-controls">
-            <button id="split-single" class="btn-split active" type="button" title="单屏展示">⬚ 单屏</button>
-            <button id="split-horizontal" class="btn-split" type="button" title="左右双终端同屏分屏">◫ 左右</button>
-            <button id="split-vertical" class="btn-split" type="button" title="上下双终端同屏分屏">⬒ 上下</button>
+          <div class="split-controls term-only" id="split-controls">
+            <button id="split-single" class="btn-split active" type="button" title="单屏展示">单屏</button>
+            <button id="split-horizontal" class="btn-split" type="button" title="左右双终端同屏分屏">左右</button>
+            <button id="split-vertical" class="btn-split" type="button" title="上下双终端同屏分屏">上下</button>
           </div>
-          <label class="toggle-chip" title="同步向所有已打开终端发送快捷键与命令">
+          <label class="toggle-chip term-only" title="默认关闭。打开后，按键进入当前终端，以及标签上另外勾选且仍连接的会话。本机终端和已断开的标签默认不勾选。">
             <input id="broadcast-toggle" type="checkbox" /> 广播
           </label>
-          <button id="search-toggle" class="btn-tool" type="button" title="搜索终端内容 (Ctrl+F)">🔍 查找</button>
-          <button id="theme-toggle" class="btn-tool" type="button" title="切换暗/亮主题">🌓 主题</button>
-          <button id="open-settings-top" class="btn-tool" type="button" title="系统设置">⚙ 设置</button>
+          <button id="search-toggle" class="btn-tool term-only" type="button" title="在终端中查找 (Ctrl+F)">查找</button>
+          <div class="nav-more-wrap">
+            <button id="nav-more" class="btn-tool" type="button" aria-haspopup="menu" aria-expanded="false">更多</button>
+            <div id="nav-more-menu" class="nav-more-menu" role="menu">
+              <button id="theme-toggle" class="btn-tool" type="button" title="当前是暗色，点击改成亮色">暗色</button>
+              <button id="open-settings" class="btn-tool" type="button" title="外观与监控设置">设置</button>
+            </div>
+          </div>
         </div>
       </header>
 
@@ -69,7 +80,7 @@
         <aside class="sidebar" id="sidebar">
           <div class="sidebar-header">
             <span>主机与连接</span>
-            <button id="sidebar-toggle-btn" class="btn-toggle-side" type="button" title="收起/展开左侧栏">◀</button>
+            <button id="sidebar-toggle-btn" class="btn-toggle-side" type="button" title="收起/展开左侧栏" aria-label="收起左侧栏">◀</button>
           </div>
           <div class="side-tools">
             <input id="filter" type="search" placeholder="搜索主机或标签..." autocomplete="off" />
@@ -77,7 +88,6 @@
           </div>
           <div class="side-subtools">
             <button id="add-group" type="button">+ 分组</button>
-            <button id="open-local" type="button">+ 本机终端</button>
             <button id="open-tunnels" type="button">隧道</button>
           </div>
           <div id="host-tree" class="host-tree"></div>
@@ -87,39 +97,41 @@
           </div>
           <div class="side-footer">
             <span id="data-dir" class="data-dir"></span>
-            <button id="open-settings" type="button" title="外观与监控设置">⚙ 设置</button>
           </div>
         </aside>
 
         <main class="center" id="main-center">
-          <!-- 视图 1：💻 终端视图 (100% 满屏高度) -->
-          <section id="view-terminal" class="workspace-view active">
-            <header class="tabbar">
-              <div id="tabs" class="tabs"></div>
-              <button id="new-tab-local" class="btn-tool-sm" type="button" title="打开本机新终端">+ 本机终端</button>
-            </header>
+          <header class="tabbar" id="session-bar">
+            <div id="tabs" class="tabs" role="tablist" aria-label="已打开的会话"></div>
+            <div id="session-context" class="session-context">没有选中的会话</div>
+            <button id="new-tab-local" class="btn-tool-sm" type="button" title="打开本机终端">+ 本机终端</button>
+          </header>
+          <div class="view-stack">
+          <!-- 视图 1：终端 -->
+          <section id="view-terminal" class="workspace-view active" role="tabpanel" aria-labelledby="nav-btn-terminal">
             <div class="search-bar hidden" id="search-bar">
-              <input id="search-input" type="search" placeholder="在当前终端查找…" />
-              <button id="search-prev" type="button">上一个</button>
-              <button id="search-next" type="button">下一个</button>
-              <button id="search-close" type="button">✕</button>
+              <input id="search-input" type="search" placeholder="在当前终端查找…" aria-label="查找内容" />
+              <span id="search-count" class="search-count" aria-live="polite"></span>
+              <button id="search-prev" type="button" title="上一个 (Shift+Enter)">上一个</button>
+              <button id="search-next" type="button" title="下一个 (Enter)">下一个</button>
+              <button id="search-close" type="button" aria-label="关闭查找">✕</button>
             </div>
             <div id="terminal-stage" class="terminal-stage"></div>
             <div id="term-empty" class="empty-state">
               <p class="empty-kicker">没有打开的终端</p>
-              <p>双击左侧主机，或使用「本机终端」。</p>
+              <p>双击左侧主机，或使用上方「本机终端」。</p>
             </div>
           </section>
 
           <!-- 视图 2：📁 SFTP 文件管理视图 (100% 满屏大文件树与表格) -->
-          <section id="view-sftp" class="workspace-view">
+          <section id="view-sftp" class="workspace-view" role="tabpanel" aria-labelledby="nav-btn-sftp">
             <div class="sftp-pane" id="sftp-pane">
               <div class="sftp-bar">
                 <div class="sftp-nav">
                   <button id="sftp-up" type="button" title="返回上一级目录" disabled>↑ 上级</button>
                   <div id="sftp-breadcrumbs" class="sftp-breadcrumbs" title="点击目录层级直达，双击编辑路径"></div>
                   <input id="sftp-path" type="text" value="/" spellcheck="false" class="hidden" disabled />
-                  <button id="sftp-edit-path" type="button" class="btn-ghost" title="手动输入路径" disabled>✏️</button>
+                  <button id="sftp-edit-path" type="button" class="btn-ghost" title="手动输入路径" aria-label="手动输入路径" disabled>✏️</button>
                   <button id="sftp-go" type="button" class="hidden" disabled>跳转</button>
                 </div>
                 <div class="sftp-ops">
@@ -154,7 +166,7 @@
           </section>
 
           <!-- 视图 3：📊 性能监控大盘视图 (100% 满屏 Bento 仪表盘) -->
-          <section id="view-monitor" class="workspace-view">
+          <section id="view-monitor" class="workspace-view" role="tabpanel" aria-labelledby="nav-btn-monitor">
             <div class="monitor-dashboard" id="monitor-dashboard">
               <div class="bento-header">
                 <div class="bento-title-row">
@@ -210,31 +222,15 @@
                 </div>
                 <div class="bento-sub-card">
                   <div class="section-head">
-                    <span>⚡ 内存占用 Top 10 进程</span>
+                    <span>CPU 占用较高的进程</span>
                   </div>
                   <div id="mon-procs" class="sub-list"></div>
                 </div>
               </div>
 
-              <div class="bento-ops-grid">
-                <div class="bento-sub-card">
-                  <div class="section-head">
-                    <span>📜 常用命令</span>
-                    <button id="add-snippet" type="button">+ 新增</button>
-                  </div>
-                  <div id="snippet-list" class="snippet-list"></div>
-                </div>
-                <div class="bento-sub-card">
-                  <div class="section-head">
-                    <span>🕒 执行历史</span>
-                    <button id="history-refresh" type="button">刷新</button>
-                  </div>
-                  <input id="history-filter" type="search" placeholder="搜索历史命令..." autocomplete="off" />
-                  <div id="history-list" class="history-list"></div>
-                </div>
-              </div>
             </div>
           </section>
+          </div>
         </main>
       </div>
     </div>
@@ -243,7 +239,7 @@
 
     <dialog id="host-dialog">
       <form id="host-form">
-        <header class="dialog-head"><h2 id="dialog-title">添加主机</h2><p>凭据由 Windows DPAPI 加密保管在本机。</p></header>
+        <header class="dialog-head"><h2 id="dialog-title">添加主机</h2><p id="host-credential-note">凭据用 AES-256-GCM 加密保存在本机。Windows 上钥匙由系统 DPAPI 保护；macOS 和 Linux 上钥匙文件仅当前用户可读。</p></header>
         <div class="grid">
           <label>别名<input id="field-alias" required maxlength="64" /></label>
           <label>分组<select id="field-group"><option value="">默认未分组</option></select></label>
@@ -341,7 +337,13 @@
         <p>工作台已经在本机提供 MCP。保持这个进程开着，把下面的配置贴进客户端。令牌只在这台电脑的界面里显示。</p>
       </header>
       <label>Streamable HTTP<input id="mcp-url" class="mono" readonly /></label>
-      <label>本机令牌<input id="mcp-token" class="mono" readonly /></label>
+      <label>本机令牌
+        <span class="token-row">
+          <input id="mcp-token" class="mono" type="password" readonly autocomplete="off" spellcheck="false" />
+          <button type="button" id="mcp-token-toggle">显示</button>
+          <button type="button" id="mcp-token-copy">复制</button>
+        </span>
+      </label>
       <p class="panel-note">编码工具应先看已打开的标签，再往这个终端里打字。文件读写另开一条 SSH，避免堵住正在输入的会话。命令历史记在本机数据目录里。</p>
       <label>Cursor（<span class="mono">~/.cursor/mcp.json</span> 或项目 <span class="mono">.cursor/mcp.json</span>）<textarea id="mcp-cursor" class="mono mcp-config" readonly></textarea></label>
       <label>Claude Code（<span class="mono">.mcp.json</span>，必须带 type）<textarea id="mcp-claude" class="mono mcp-config" readonly></textarea></label>
@@ -371,39 +373,50 @@
       </form>
     </dialog>
 
-    <div id="terminal-context-menu" class="terminal-context-menu hidden">
-      <div class="menu-item" id="ctx-copy">
-        <span class="menu-icon">📋</span>
+    <div id="terminal-context-menu" class="terminal-context-menu hidden" role="menu">
+      <button type="button" class="menu-item" id="ctx-copy">
+        <span class="menu-icon" aria-hidden="true">📋</span>
         <span class="menu-label">复制选中内容</span>
         <span class="menu-shortcut">划选即复制</span>
-      </div>
-      <div class="menu-item" id="ctx-paste">
-        <span class="menu-icon">📥</span>
+      </button>
+      <button type="button" class="menu-item" id="ctx-paste">
+        <span class="menu-icon" aria-hidden="true">📥</span>
         <span class="menu-label">粘贴</span>
         <span class="menu-shortcut">Ctrl+V</span>
-      </div>
+      </button>
       <div class="menu-divider"></div>
-      <div class="menu-item" id="ctx-copy-all">
-        <span class="menu-icon">📄</span>
+      <button type="button" class="menu-item" id="ctx-copy-all">
+        <span class="menu-icon" aria-hidden="true">📄</span>
         <span class="menu-label">复制当前屏内容</span>
-      </div>
-      <div class="menu-item" id="ctx-clear">
-        <span class="menu-icon">🧹</span>
+      </button>
+      <button type="button" class="menu-item" id="ctx-clear">
+        <span class="menu-icon" aria-hidden="true">🧹</span>
         <span class="menu-label">清空屏幕</span>
-        <span class="menu-shortcut">Clear</span>
-      </div>
+        <span class="menu-shortcut">本地</span>
+      </button>
       <div class="menu-divider"></div>
-      <div class="menu-item" id="ctx-search">
-        <span class="menu-icon">🔍</span>
+      <button type="button" class="menu-item" id="ctx-search">
+        <span class="menu-icon" aria-hidden="true">🔍</span>
         <span class="menu-label">在终端中查找…</span>
         <span class="menu-shortcut">Ctrl+F</span>
-      </div>
-      <div class="menu-item" id="ctx-select-all">
-        <span class="menu-icon">⬚</span>
+      </button>
+      <button type="button" class="menu-item" id="ctx-select-all">
+        <span class="menu-icon" aria-hidden="true">⬚</span>
         <span class="menu-label">全选终端文本</span>
         <span class="menu-shortcut">Ctrl+A</span>
-      </div>
+      </button>
     </div>
+
+    <dialog id="confirm-dialog">
+      <form id="confirm-form">
+        <h3 id="confirm-title"></h3>
+        <p id="confirm-body"></p>
+        <div class="dialog-actions">
+          <button type="button" id="cancel-confirm">取消</button>
+          <button type="submit" id="confirm-ok" class="danger">删除</button>
+        </div>
+      </form>
+    </dialog>
 
     <dialog id="paste-confirm-dialog" class="paste-confirm-dialog">
       <form id="paste-confirm-form">
