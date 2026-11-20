@@ -178,6 +178,11 @@ export function historyAfterFailedRefresh(haveList: boolean): 'keep' | 'show-err
   return haveList ? 'keep' : 'show-error';
 }
 
+/** 清屏交给正在读键盘的 shell（和 Ctrl+L 一样），不在本地单独擦掉画面。 */
+export function clearScreenInput(): string {
+  return '\u000c';
+}
+
 export type InputDelivery = 'send' | 'no-terminal' | 'link-down';
 
 /** 同一段断线里，输入失败只提示一次，避免每个按键都弹一条。 */
