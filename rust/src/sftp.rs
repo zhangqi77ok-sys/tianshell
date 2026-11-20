@@ -264,9 +264,169 @@ pub fn read_chunks(sess: &Session, file_path: &str, mut on_chunk: impl FnMut(&[u
     Ok(())
 }
 
+/// `sftp.create` 带截断标志。文件一打开，原来的内容就没了，取消或中途失败也找不回来。
+/// 先写到同目录的临时文件，全部写完再改名换上。失败时删掉临时文件。
 pub fn write_bytes(sess: &Session, file_path: &str, bytes: &[u8], mut on_progress: impl FnMut(u64, u64) -> bool) -> Result<(), SftpError> {
     let sftp = sess.sftp()?;
-    let mut file = sftp.create(Path::new(file_path))?;
+    let target = follow_write_target(file_path, |path| classify_node(&sftp, path))?;
+    let temp = staged_upload_path(&target.path, &uuid::Uuid::new_v4().simple().to_string())?;
+    if let Err(err) = write_exclusive(&sftp, &temp, bytes, &mut on_progress) {
+        let _ = sftp.unlink(Path::new(&temp));
+        return Err(err);
+    }
+    if let Some(mode) = target.mode {
+        match sftp.lstat(Path::new(&temp)) {
+            Ok(mut stat) => {
+                stat.perm = Some(mode);
+                if let Err(err) = sftp.setstat(Path::new(&temp), stat) {
+                    let _ = sftp.unlink(Path::new(&temp));
+                    return Err(err.into());
+                }
+            }
+            Err(err) => {
+                let _ = sftp.unlink(Path::new(&temp));
+                return Err(err.into());
+            }
+        }
+    }
+    if let Err(err) = sftp.rename(Path::new(&temp), Path::new(&target.path), None) {
+        let _ = sftp.unlink(Path::new(&temp));
+        return Err(err.into());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NodeKind {
+    Missing,
+    Symlink(String),
+    Directory,
+    File { mode: Option<u32> },
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WriteTarget {
+    path: String,
+    mode: Option<u32>,
+}
+
+fn is_missing(err: &ssh2::Error) -> bool {
+    // libssh2: LIBSSH2_FX_NO_SUCH_FILE = 2，LIBSSH2_FX_NO_SUCH_PATH = 10。
+    matches!(err.code(), ssh2::ErrorCode::SFTP(2) | ssh2::ErrorCode::SFTP(10))
+}
+
+fn classify_node(sftp: &ssh2::Sftp, path: &str) -> Result<NodeKind, SftpError> {
+    match sftp.lstat(Path::new(path)) {
+        Err(err) if is_missing(&err) => Ok(NodeKind::Missing),
+        Err(err) => Err(err.into()),
+        Ok(stat) => {
+            if stat.file_type().is_symlink() {
+                let link = sftp.readlink(Path::new(path))?;
+                let text = link.to_str().ok_or_else(|| SftpError::Rejected("符号链接目标不是文本，没有写入".into()))?;
+                Ok(NodeKind::Symlink(text.to_string()))
+            } else if stat.is_dir() {
+                Ok(NodeKind::Directory)
+            } else if stat.file_type().is_file() {
+                Ok(NodeKind::File { mode: stat.perm.map(|perm| perm & 0o777) })
+            } else {
+                Ok(NodeKind::Other)
+            }
+        }
+    }
+}
+
+fn follow_write_target(start: &str, mut inspect: impl FnMut(&str) -> Result<NodeKind, SftpError>) -> Result<WriteTarget, SftpError> {
+    let mut current = start.to_string();
+    for _ in 0..8 {
+        match inspect(&current)? {
+            NodeKind::Missing => return Ok(WriteTarget { path: current, mode: None }),
+            NodeKind::Directory => return Err(SftpError::Rejected("这是目录，不能当作文件写入".into())),
+            NodeKind::Other => return Err(SftpError::Rejected("这个路径不是普通文件，没有写入".into())),
+            NodeKind::File { mode } => return Ok(WriteTarget { path: current, mode }),
+            NodeKind::Symlink(link) => current = join_link_target(&current, &link),
+        }
+    }
+    Err(SftpError::Rejected("符号链接套得太深，没有写入".into()))
+}
+
+fn join_link_target(current: &str, link: &str) -> String {
+    if link.starts_with('/') {
+        return normalize_posix(link);
+    }
+    let parent = parent_posix(current);
+    normalize_posix(&format!("{parent}/{link}"))
+}
+
+fn parent_posix(path: &str) -> String {
+    match path.rfind('/') {
+        Some(0) | None => "/".to_string(),
+        Some(index) => path[..index].to_string(),
+    }
+}
+
+fn normalize_posix(path: &str) -> String {
+    let absolute = path.starts_with('/');
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            if absolute {
+                parts.pop();
+            } else {
+                parts.push("..");
+            }
+            continue;
+        }
+        parts.push(part);
+    }
+    if absolute {
+        format!("/{}", parts.join("/"))
+    } else if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
+    }
+}
+
+fn staged_upload_path(dest: &str, nonce: &str) -> Result<String, SftpError> {
+    if nonce.is_empty() || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(SftpError::Rejected("临时文件名无效".into()));
+    }
+    let (parent, name) = split_file_name(dest)?;
+    let staged = format!(".{name}.tianshell-uploading-{nonce}");
+    if parent == "/" {
+        Ok(format!("/{staged}"))
+    } else {
+        Ok(format!("{parent}/{staged}"))
+    }
+}
+
+fn split_file_name(path: &str) -> Result<(&str, &str), SftpError> {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err(SftpError::Rejected("不能写入这个路径".into()));
+    }
+    let (parent, name) = match trimmed.rfind('/') {
+        Some(0) => ("/", &trimmed[1..]),
+        Some(index) => (&trimmed[..index], &trimmed[index + 1..]),
+        None => ("/", trimmed),
+    };
+    if name.is_empty() || name == "." || name == ".." {
+        return Err(SftpError::Rejected("不能写入这个路径".into()));
+    }
+    Ok((parent, name))
+}
+
+fn write_exclusive(sftp: &ssh2::Sftp, path: &str, bytes: &[u8], on_progress: &mut impl FnMut(u64, u64) -> bool) -> Result<(), SftpError> {
+    let mut file = sftp.open_mode(
+        Path::new(path),
+        ssh2::OpenFlags::WRITE | ssh2::OpenFlags::EXCLUSIVE,
+        0o644,
+        ssh2::OpenType::File,
+    )?;
     let total = bytes.len() as u64;
     let mut sent = 0u64;
     for chunk in bytes.chunks(32_768) {
@@ -312,6 +472,151 @@ mod tests {
         assert!(keep.join("data.txt").is_file());
         assert_eq!(std::fs::read(keep.join("data.txt")).unwrap(), b"keep-me");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn staged_upload_keeps_a_sibling_temp_name() {
+        let staged = staged_upload_path("/var/app.log", "abc123").unwrap();
+        assert_eq!(staged, "/var/.app.log.tianshell-uploading-abc123");
+        assert!(staged_upload_path("/var/app.log", "ab/cd").is_err());
+        assert!(staged_upload_path("/", "abc").is_err());
+        assert!(staged_upload_path("/var/..", "abc").is_err());
+    }
+
+    #[test]
+    fn write_target_follows_a_file_symlink_and_rejects_a_directory() {
+        assert_eq!(join_link_target("/qa/sub/link", "../real/data.txt"), "/qa/real/data.txt");
+        assert_eq!(join_link_target("/qa/link", "/abs/data.txt"), "/abs/data.txt");
+        let file = follow_write_target("/qa/sub/link", |path| {
+            if path == "/qa/sub/link" {
+                Ok(NodeKind::Symlink("../real/data.txt".into()))
+            } else if path == "/qa/real/data.txt" {
+                Ok(NodeKind::File { mode: Some(0o700) })
+            } else {
+                Ok(NodeKind::Missing)
+            }
+        })
+        .unwrap();
+        assert_eq!(file.path, "/qa/real/data.txt");
+        assert_eq!(file.mode, Some(0o700));
+        let missing = follow_write_target("/qa/new.txt", |_| Ok(NodeKind::Missing)).unwrap();
+        assert_eq!(missing.mode, None);
+        let dir = follow_write_target("/qa/logs", |_| Ok(NodeKind::Directory)).unwrap_err();
+        assert!(dir.to_string().contains("目录"));
+        let deep = follow_write_target("/qa/loop", |_| Ok(NodeKind::Symlink("/qa/loop".into()))).unwrap_err();
+        assert!(deep.to_string().contains("太深"));
+    }
+
+    #[test]
+    fn truncating_open_discards_original_bytes_before_the_write_finishes() {
+        let root = std::env::temp_dir().join(format!("ts-trunc-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let dest = root.join("keep.txt");
+        std::fs::write(&dest, b"original-secret").unwrap();
+        let file = std::fs::File::create(&dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"");
+        drop(file);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn staged_replace_keeps_original_until_rename() {
+        let root = std::env::temp_dir().join(format!("ts-stage-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let dest = root.join("keep.txt");
+        std::fs::write(&dest, b"original-secret").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let dest_text = dest.to_str().unwrap();
+        let target = follow_write_target(dest_text, local_node).unwrap();
+        let temp = staged_upload_path(&target.path, "abc123").unwrap();
+        std::fs::write(&temp, b"partial").unwrap();
+        std::fs::remove_file(&temp).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"original-secret");
+        assert!(!std::path::Path::new(&temp).exists());
+
+        let temp = staged_upload_path(&target.path, "def456").unwrap();
+        std::fs::write(&temp, b"new-bytes").unwrap();
+        #[cfg(unix)]
+        if let Some(mode) = target.mode {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        std::fs::rename(&temp, &target.path).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new-bytes");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_replace_updates_a_symlink_target_without_replacing_the_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("ts-stage-link-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let real = root.join("real.txt");
+        std::fs::write(&real, b"original-secret").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let followed = std::fs::File::create(&link).unwrap();
+        assert_eq!(std::fs::read(&real).unwrap(), b"");
+        drop(followed);
+        std::fs::write(&real, b"original-secret").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let target = follow_write_target(link.to_str().unwrap(), local_node).unwrap();
+        assert_eq!(target.path, real.to_str().unwrap());
+        assert_eq!(target.mode, Some(0o600));
+        let temp = staged_upload_path(&target.path, "abc123").unwrap();
+        std::fs::write(&temp, b"partial").unwrap();
+        std::fs::remove_file(&temp).unwrap();
+        assert_eq!(std::fs::read(&real).unwrap(), b"original-secret");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+
+        let temp = staged_upload_path(&target.path, "def456").unwrap();
+        std::fs::write(&temp, b"new-bytes").unwrap();
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::rename(&temp, &target.path).unwrap();
+        assert_eq!(std::fs::read(&real).unwrap(), b"new-bytes");
+        assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_link(&link).unwrap(), real);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn local_node(path: &str) -> Result<NodeKind, SftpError> {
+        match std::fs::symlink_metadata(path) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(NodeKind::Missing),
+            Err(err) => Err(SftpError::Io(err)),
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    let link = std::fs::read_link(path)?;
+                    Ok(NodeKind::Symlink(link.to_string_lossy().into_owned()))
+                } else if meta.is_dir() {
+                    Ok(NodeKind::Directory)
+                } else if meta.is_file() {
+                    #[cfg(unix)]
+                    let mode = {
+                        use std::os::unix::fs::PermissionsExt;
+                        Some(meta.permissions().mode() & 0o777)
+                    };
+                    #[cfg(not(unix))]
+                    let mode = None;
+                    Ok(NodeKind::File { mode })
+                } else {
+                    Ok(NodeKind::Other)
+                }
+            }
+        }
     }
 
     #[test]
