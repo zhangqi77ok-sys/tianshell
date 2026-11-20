@@ -45,6 +45,7 @@ const TERM_THEME = {
 let activeId: string | null = null;
 let fontSize = 14;
 const tabs = new Map<string, TabState>();
+const pendingConnections = new Map<string, { alias: string; host?: string; port?: number }>();
 const toastEl = document.getElementById('toast') as HTMLElement;
 
 function showToast(msg: string): void {
@@ -84,6 +85,7 @@ const treeCtrl = new HostTreeController({
   onOpenHost: (hostId) => void openSshTab(hostId),
   toast: showToast,
   promptText,
+  getActiveHostIds: () => new Set(Array.from(tabs.values()).map(t => t.info.hostId).filter(Boolean) as string[]),
 });
 
 const monCtrl = new MonitorAndToolsController({
@@ -160,6 +162,7 @@ function createTermInstance(info: ConnectInfo): void {
   term.open(slot);
   term.onData((data) => sendInput(data));
   tabs.set(info.sessionId, { info, term, fit, slot, metrics: null, closed: false });
+  treeCtrl.render();
   selectTab(info.sessionId);
 }
 
@@ -252,6 +255,16 @@ function renderTabs(): void {
     chip.addEventListener('click', () => selectTab(id));
     bar.appendChild(chip);
   }
+  for (const [, p] of pendingConnections) {
+    const chip = document.createElement('div');
+    chip.className = 'tab-chip connecting active';
+    const dot = document.createElement('span');
+    dot.className = 'tab-dot spin';
+    const label = document.createElement('span');
+    label.textContent = `${p.alias} (连接中...)`;
+    chip.append(dot, label);
+    bar.appendChild(chip);
+  }
 }
 
 async function closeTab(sessionId: string): Promise<void> {
@@ -261,16 +274,51 @@ async function closeTab(sessionId: string): Promise<void> {
   tab.term.dispose();
   tab.slot.remove();
   tabs.delete(sessionId);
+  treeCtrl.render();
   selectTab(Array.from(tabs.keys()).pop() ?? null);
 }
 
 async function openSshTab(hostId: string): Promise<void> {
+  if (pendingConnections.has(hostId)) return;
+  const host = treeCtrl.hosts.find((h) => h.id === hostId);
+  const alias = host ? host.alias : '远程主机';
+  pendingConnections.set(hostId, { alias, host: host?.host, port: host?.port });
+
+  const hostEl = document.getElementById(`host-${hostId}`);
+  hostEl?.classList.add('connecting');
+
+  const termEmpty = document.getElementById('term-empty');
+  if (termEmpty && tabs.size === 0) {
+    termEmpty.classList.remove('hidden');
+    termEmpty.innerHTML = `
+      <div class="connecting-box">
+        <div class="connecting-spinner"></div>
+        <div class="connecting-title">正在连接 ${alias}...</div>
+        <div class="connecting-sub">${host ? `${host.username}@${host.host}:${host.port}` : ''} · 正在协商密钥并分配终端</div>
+      </div>
+    `;
+  }
+  renderTabs();
+
   try {
     const grid = measureGrid();
-    createTermInstance(await webApi.openSession({ kind: 'ssh', hostId, cols: grid.cols, rows: grid.rows }));
+    const info = await webApi.openSession({ kind: 'ssh', hostId, cols: grid.cols, rows: grid.rows });
+    if (!info.hostId) info.hostId = hostId;
+    pendingConnections.delete(hostId);
+    hostEl?.classList.remove('connecting');
+    if (termEmpty) {
+      termEmpty.innerHTML = '<div>没有打开的终端</div><small>双击左侧主机，或使用「本机终端」。</small>';
+    }
+    createTermInstance(info);
     const tab = activeId ? tabs.get(activeId) : undefined;
     if (tab) requestAnimationFrame(() => fitTab(tab));
   } catch (err) {
+    pendingConnections.delete(hostId);
+    hostEl?.classList.remove('connecting');
+    if (termEmpty) {
+      termEmpty.innerHTML = '<div>没有打开的终端</div><small>双击左侧主机，或使用「本机终端」。</small>';
+    }
+    renderTabs();
     showToast(err instanceof Error ? err.message : '连接失败');
   }
 }

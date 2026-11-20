@@ -128,17 +128,57 @@ export class MonitorAndToolsController {
         const card = document.createElement('button');
         card.type = 'button';
         card.className = 'history-item';
-        card.title = '发送到当前终端';
+        card.title = `发送到终端: ${row.command}`;
+
         const meta = document.createElement('div');
         meta.className = 'history-meta';
-        const where = row.alias || (row.sessionKind === 'local' ? '本机' : row.sessionKind);
-        const status = row.exitCode === undefined ? '' : ` · ${row.exitCode === 0 ? '成功' : `退出 ${row.exitCode}`}`;
-        meta.textContent = `${row.at.slice(0, 19).replace('T', ' ')} · ${where}${status}`;
+
+        const metaLeft = document.createElement('div');
+        metaLeft.className = 'history-meta-left';
+
+        const timeSpan = document.createElement('span');
+        timeSpan.className = 'history-time';
+        timeSpan.textContent = formatHistoryTime(row.at);
+
+        const whereSpan = document.createElement('span');
+        whereSpan.className = 'history-tag';
+        whereSpan.textContent = row.alias || (row.sessionKind === 'local' ? '本机' : row.sessionKind);
+
+        metaLeft.append(timeSpan, whereSpan);
+
+        const statusSpan = document.createElement('span');
+        if (row.exitCode !== undefined) {
+          statusSpan.className = `history-status ${row.exitCode === 0 ? 'ok' : 'err'}`;
+          statusSpan.textContent = row.exitCode === 0 ? '成功' : `退出 ${row.exitCode}`;
+        }
+
+        meta.append(metaLeft, statusSpan);
+
+        const copyBtn = document.createElement('button');
+        copyBtn.type = 'button';
+        copyBtn.className = 'history-copy-btn';
+        copyBtn.title = '复制命令到剪贴板';
+        copyBtn.textContent = '📋 复制';
+        copyBtn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          try {
+            await navigator.clipboard.writeText(row.command);
+            this.deps.toast('已复制命令到剪贴板');
+          } catch {
+            this.deps.toast('复制失败');
+          }
+        });
+
         const cmd = document.createElement('div');
         cmd.className = 'history-cmd';
         cmd.textContent = row.command;
-        card.append(meta, cmd);
-        card.addEventListener('click', () => this.deps.onSendCommand(`${row.command}\r`));
+
+        card.append(meta, cmd, copyBtn);
+        card.addEventListener('click', () => {
+          card.classList.add('card-activated');
+          setTimeout(() => card.classList.remove('card-activated'), 250);
+          this.deps.onSendCommand(`${row.command}\r`);
+        });
         this.historyEl.appendChild(card);
       }
     } catch {
@@ -289,5 +329,19 @@ export class MonitorAndToolsController {
       });
       await this.renderTunnels();
     });
+  }
+}
+
+function formatHistoryTime(iso: string): string {
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return iso.slice(5, 16).replace('T', ' ');
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    const h = String(d.getHours()).padStart(2, '0');
+    const min = String(d.getMinutes()).padStart(2, '0');
+    return `${m}-${day} ${h}:${min}`;
+  } catch {
+    return iso.slice(5, 16).replace('T', ' ');
   }
 }

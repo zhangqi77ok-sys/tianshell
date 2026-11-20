@@ -28,6 +28,8 @@ pub struct ConnectInfo {
     pub host: String,
     pub port: u16,
     pub kind: String,
+    #[serde(rename = "hostId", skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -119,13 +121,14 @@ impl SessionHub {
         let pump_screens = screens.clone();
         let pump_history = history.clone();
         let pump_finished = finished.clone();
+        let pump_events = events.clone();
         let mut pump_rx = events.subscribe();
         std::thread::Builder::new()
             .name("term-screen".into())
             .spawn(move || {
                 loop {
                     match pump_rx.blocking_recv() {
-                        Ok(raw) => apply_terminal_output(&raw, &pump_screens, &pump_history, &pump_finished),
+                        Ok(raw) => apply_terminal_output(&raw, &pump_screens, &pump_history, &pump_finished, &pump_events),
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
@@ -195,6 +198,7 @@ impl SessionHub {
             host: "localhost".into(),
             port: 0,
             kind: "local".into(),
+            host_id: None,
         };
         lock(&self.tabs).insert(
             id,
@@ -258,6 +262,7 @@ impl SessionHub {
             host: leaf.host,
             port: leaf.port,
             kind: "ssh".into(),
+            host_id: Some(leaf.id.clone()),
         };
         lock(&self.tabs).insert(
             id,
@@ -419,6 +424,7 @@ impl SessionHub {
                         source: source.to_string(),
                     });
                 }
+                self.broadcast(serde_json::json!({"type": "catalog:changed", "kind": "history"}));
             }
         }
         self.write_raw(session_id, data)
@@ -448,7 +454,7 @@ impl SessionHub {
             .map(|history| history.redact_text(command))
             .unwrap_or_else(|| command.to_string());
         let history_id = self.history_handle().and_then(|history| {
-            history.record(HistoryDraft {
+            let id = history.record(HistoryDraft {
                 host_id: meta.host_id.clone(),
                 alias: meta.alias.clone(),
                 session_kind: meta.kind.clone(),
@@ -458,7 +464,9 @@ impl SessionHub {
                 exit_code: None,
                 ok: None,
                 source: source.to_string(),
-            })
+            });
+            self.broadcast(serde_json::json!({"type": "catalog:changed", "kind": "history"}));
+            id
         });
         {
             let mut mind = lock(&mind);
@@ -769,6 +777,7 @@ fn apply_terminal_output(
     screens: &Mutex<HashMap<String, Arc<Mutex<TabMind>>>>,
     history: &Mutex<Option<Arc<CommandHistory>>>,
     finished: &Mutex<HashMap<String, JobView>>,
+    events: &broadcast::Sender<String>,
 ) {
     let Ok(msg) = serde_json::from_str::<Value>(raw) else { return };
     if msg.get("type").and_then(|value| value.as_str()) != Some("term:data") {
@@ -791,6 +800,7 @@ fn apply_terminal_output(
     if let Some(finish) = finish {
         if let Some(history) = lock(history).clone() {
             history.finish(&finish.id, finish.exit_code, finish.cwd, finish.ok);
+            let _ = events.send(serde_json::json!({"type": "catalog:changed", "kind": "history"}).to_string());
         }
     }
 }

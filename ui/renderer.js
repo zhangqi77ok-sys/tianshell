@@ -6186,6 +6186,7 @@ WARNING: This link could potentially be dangerous`)) {
       body: JSON.stringify({ path: targetPath, mode })
     }),
     sftpDownloadUrl: (sid, targetPath) => `/api/sessions/${encodeURIComponent(sid)}/sftp/download?path=${encodeURIComponent(targetPath)}&token=${encodeURIComponent(resolveClientToken())}`,
+    sftpArchiveDownloadUrl: (sid, targetPath) => `/api/sessions/${encodeURIComponent(sid)}/sftp/archive-download?path=${encodeURIComponent(targetPath)}&token=${encodeURIComponent(resolveClientToken())}`,
     sftpUploadFile: async (sid, targetPath, file) => apiRequest(
       `/api/sessions/${encodeURIComponent(sid)}/sftp/upload?path=${encodeURIComponent(targetPath)}&total=${file.size}`,
       { method: "POST", body: file }
@@ -6278,34 +6279,56 @@ WARNING: This link could potentially be dangerous`)) {
       }
     }
     renderHostRow(h) {
+      const isOnline = Boolean(this.deps.getActiveHostIds?.().has(h.id));
       const item = document.createElement("div");
       item.className = "host-item";
+      item.id = `host-${h.id}`;
       const left = document.createElement("div");
       const alias = document.createElement("div");
       alias.className = "host-alias";
-      alias.textContent = `${h.jumpHostId ? "\u{1F500} " : ""}${h.alias}`;
+      if (isOnline) {
+        const dot = document.createElement("span");
+        dot.className = "online-dot";
+        dot.title = "在线活跃连接中";
+        alias.appendChild(dot);
+      }
+      const aliasText = document.createTextNode(`${h.jumpHostId ? "\u{1F500} " : ""}${h.alias}`);
+      alias.appendChild(aliasText);
       const meta = document.createElement("div");
       meta.className = "host-meta mono";
       meta.textContent = `${h.username}@${h.host}:${h.port}`;
       left.append(alias, meta);
       const ops = document.createElement("div");
       ops.className = "host-actions";
+      const connectBtn = document.createElement("button");
+      connectBtn.type = "button";
+      connectBtn.className = "host-connect-btn";
+      connectBtn.textContent = "连接";
+      connectBtn.title = "连接此远程主机";
+      connectBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.deps.onOpenHost(h.id);
+      });
       const editBtn = document.createElement("button");
       editBtn.type = "button";
-      editBtn.textContent = "\u6539";
+      editBtn.className = "host-btn-icon";
+      editBtn.textContent = "\u270F\uFE0F";
+      editBtn.title = "编辑主机配置";
       editBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         this.openModal(h);
       });
       const delBtn = document.createElement("button");
       delBtn.type = "button";
-      delBtn.textContent = "\u5220";
+      delBtn.className = "host-btn-icon";
+      delBtn.textContent = "\u{1F5D1}\uFE0F";
+      delBtn.title = "删除主机";
       delBtn.addEventListener("click", async (e) => {
         e.stopPropagation();
         await webApi.deleteHost(h.id);
         await this.refresh();
       });
-      ops.append(editBtn, delBtn);
+      ops.append(connectBtn, editBtn, delBtn);
       item.append(left, ops);
       item.addEventListener("dblclick", () => this.deps.onOpenHost(h.id));
       return item;
@@ -6408,13 +6431,31 @@ WARNING: This link could potentially be dangerous`)) {
     }
     return `${v.toFixed(1)} ${units[u]}`;
   }
+  function getFileMeta(name, isDir) {
+    if (isDir) return { icon: "\u{1F4C1}", cls: "file-dir" };
+    const dot = name.lastIndexOf(".");
+    const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+    switch (ext) {
+      case "sh": case "bash": case "zsh": case "bat": case "cmd": case "ps1":
+        return { icon: "\u26A1", cls: "file-sh" };
+      case "conf": case "config": case "yaml": case "yml": case "json": case "toml": case "ini": case "env": case "xml":
+        return { icon: "\u2699\uFE0F", cls: "file-conf" };
+      case "tar": case "gz": case "zip": case "tgz": case "7z": case "rar": case "xz": case "bz2":
+        return { icon: "\u{1F4E6}", cls: "file-archive" };
+      case "log": case "out": case "err":
+        return { icon: "\u{1F4DD}", cls: "file-log" };
+      case "key": case "pem": case "pub": case "crt": case "cer": case "p12":
+        return { icon: "\u{1F511}", cls: "file-key" };
+      case "py": case "rs": case "js": case "ts": case "go": case "java": case "c": case "cpp": case "h": case "html": case "css":
+        return { icon: "\u{1F4BB}", cls: "file-code" };
+      default:
+        return { icon: "\u{1F4C4}", cls: "file-default" };
+    }
+  }
   var SftpController = class {
     constructor(deps) {
       this.deps = deps;
       this.bindEvents();
-      window.setInterval(() => {
-        if (this.deps.getActiveSshId()) void this.load(this.currentDir, true);
-      }, 3e3);
     }
     currentDir = "/";
     showHidden = false;
@@ -6422,6 +6463,12 @@ WARNING: This link could potentially be dangerous`)) {
     transfers = /* @__PURE__ */ new Map();
     editingPath = null;
     pathInput = document.getElementById("sftp-path");
+    breadcrumbsEl = document.getElementById("sftp-breadcrumbs");
+    editPathBtn = document.getElementById("sftp-edit-path");
+    goBtn = document.getElementById("sftp-go");
+    archiveCurrentBtn = document.getElementById("sftp-archive-current");
+    dragOverlay = document.getElementById("sftp-drag-overlay");
+    dragTarget = document.getElementById("sftp-drag-target");
     bodyEl = document.getElementById("sftp-body");
     tableEl = document.getElementById("sftp-table");
     emptyEl = document.getElementById("sftp-empty");
@@ -6438,9 +6485,9 @@ WARNING: This link could potentially be dangerous`)) {
     syncSession() {
       this.lastSig = "";
       const active = Boolean(this.deps.getActiveSshId());
-      for (const id of ["sftp-up", "sftp-home", "sftp-path", "sftp-go", "sftp-mkdir", "sftp-upload", "sftp-refresh"]) {
+      for (const id of ["sftp-up", "sftp-path", "sftp-edit-path", "sftp-go", "sftp-mkdir", "sftp-upload", "sftp-archive-current", "sftp-refresh"]) {
         const el = document.getElementById(id);
-        el.disabled = !active;
+        if (el) el.disabled = !active;
       }
       if (active) {
         void this.load(this.currentDir, true);
@@ -6450,15 +6497,74 @@ WARNING: This link could potentially be dangerous`)) {
         this.emptyEl.classList.remove("hidden");
         this.emptyEl.textContent = "\u7A7A\u95F2\u3002\u8FDE\u4E0A SSH \u4F1A\u8BDD\u540E\uFF0C\u8FD9\u91CC\u663E\u793A\u8BE5\u4F1A\u8BDD\u7684\u5F53\u524D\u76EE\u5F55\u3002";
         this.bodyEl.textContent = "";
+        if (this.breadcrumbsEl) this.breadcrumbsEl.textContent = "";
+      }
+    }
+    renderBreadcrumbs(dirPath) {
+      if (!this.breadcrumbsEl) return;
+      this.breadcrumbsEl.textContent = "";
+      const norm = dirPath === "/" ? "/" : dirPath.replace(/\/+$/, "");
+      const parts = norm.split("/").filter(Boolean);
+
+      const rootChip = document.createElement("span");
+      rootChip.className = `breadcrumb-chip ${parts.length === 0 ? "active" : ""}`;
+      rootChip.textContent = "\u{1F3E0} /";
+      rootChip.title = "\u6839\u76EE\u5F55 (/)";
+      rootChip.addEventListener("click", (e) => {
+        e.stopPropagation();
+        void this.load("/");
+      });
+      this.breadcrumbsEl.appendChild(rootChip);
+
+      let accum = "";
+      for (let i = 0; i < parts.length; i++) {
+        const seg = parts[i];
+        accum += `/${seg}`;
+        const targetPath = accum;
+        const isLast = i === parts.length - 1;
+
+        const sep = document.createElement("span");
+        sep.className = "breadcrumb-sep";
+        sep.textContent = "\u203A";
+        this.breadcrumbsEl.appendChild(sep);
+
+        const chip = document.createElement("span");
+        chip.className = `breadcrumb-chip ${isLast ? "active" : ""}`;
+        chip.textContent = seg;
+        chip.title = targetPath;
+        chip.addEventListener("click", (e) => {
+          e.stopPropagation();
+          void this.load(targetPath);
+        });
+        this.breadcrumbsEl.appendChild(chip);
+      }
+    }
+    showPathInput(show) {
+      if (!this.breadcrumbsEl || !this.pathInput) return;
+      if (show) {
+        this.breadcrumbsEl.classList.add("hidden");
+        this.editPathBtn?.classList.add("hidden");
+        this.pathInput.classList.remove("hidden");
+        this.goBtn?.classList.remove("hidden");
+        this.pathInput.focus();
+        this.pathInput.select();
+      } else {
+        this.breadcrumbsEl.classList.remove("hidden");
+        this.editPathBtn?.classList.remove("hidden");
+        this.pathInput.classList.add("hidden");
+        this.goBtn?.classList.add("hidden");
       }
     }
     async load(dirPath, quiet = false) {
       const sid = this.deps.getActiveSshId();
       if (!sid) return;
+      this.tableEl.classList.add("loading");
       try {
         const list = await webApi.sftpList(sid, dirPath);
         this.currentDir = dirPath || "/";
         this.pathInput.value = this.currentDir;
+        this.renderBreadcrumbs(this.currentDir);
+        this.showPathInput(false);
         const visible = list.filter((e) => this.showHidden || !e.name.startsWith("."));
         const sig = `${this.currentDir}|${visible.map((e) => `${e.path}:${e.size}:${e.mtimeMs}:${e.mode}`).join("|")}`;
         if (sig === this.lastSig) return;
@@ -6466,6 +6572,8 @@ WARNING: This link could potentially be dangerous`)) {
         this.renderEntries(visible);
       } catch (err) {
         if (!quiet) this.deps.toast(err instanceof Error ? err.message : "SFTP \u8BFB\u53D6\u5931\u8D25");
+      } finally {
+        this.tableEl.classList.remove("loading");
       }
     }
     onTransferProgress(task) {
@@ -6481,11 +6589,16 @@ WARNING: This link could potentially be dangerous`)) {
         const tr = document.createElement("tr");
         const nameTd = document.createElement("td");
         const nameBtn = document.createElement("span");
-        nameBtn.textContent = `${entry.kind === "dir" ? "\u{1F4C1} " : "\u{1F4C4} "}${entry.name}`;
+        const isDir = entry.kind === "dir";
+        const meta = getFileMeta(entry.name, isDir);
+        nameBtn.textContent = `${meta.icon} ${entry.name}`;
         nameBtn.style.cursor = "pointer";
+        nameBtn.className = `sftp-item-name ${meta.cls}`;
+        nameBtn.style.cursor = "pointer";
+        nameBtn.className = "sftp-item-name";
         nameTd.appendChild(nameBtn);
         tr.appendChild(nameTd);
-        for (const val of [entry.permissions, entry.kind === "dir" ? "--" : formatBytes(entry.size), entry.mtimeMs ? new Date(entry.mtimeMs).toLocaleString() : "--"]) {
+        for (const val of [entry.permissions, isDir ? "--" : formatBytes(entry.size), entry.mtimeMs ? new Date(entry.mtimeMs).toLocaleString() : "--"]) {
           const td = document.createElement("td");
           td.className = "mono";
           td.textContent = val;
@@ -6494,17 +6607,34 @@ WARNING: This link could potentially be dangerous`)) {
         const opsTd = document.createElement("td");
         opsTd.style.display = "flex";
         opsTd.style.gap = "4px";
-        if (entry.kind === "file") {
+        if (!isDir) {
           this.addOpBtn(opsTd, "\u7F16\u8F91", () => void this.openEditor(entry.path));
           this.addOpBtn(opsTd, "\u4E0B\u8F7D", () => this.triggerDownload(entry.path));
+        } else {
+          this.addOpBtn(opsTd, "\u6253\u5305", () => this.triggerArchiveDownload(entry.path));
         }
         this.addOpBtn(opsTd, "\u6539\u540D", () => void this.renameItem(entry));
         this.addOpBtn(opsTd, "\u6743\u9650", () => void this.chmodItem(entry));
         this.addOpBtn(opsTd, "\u5220", () => void this.deleteItem(entry));
         tr.appendChild(opsTd);
-        tr.addEventListener("dblclick", () => {
-          if (entry.kind === "dir") void this.load(entry.path);
-          else if (entry.kind === "file") void this.openEditor(entry.path);
+
+        const handleOpen = () => {
+          if (isDir) {
+            void this.load(entry.path);
+          } else if (entry.kind === "file") {
+            void this.openEditor(entry.path);
+          } else {
+            void this.load(entry.path).catch(() => void this.openEditor(entry.path));
+          }
+        };
+
+        nameBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          handleOpen();
+        });
+        tr.addEventListener("dblclick", (e) => {
+          e.stopPropagation();
+          handleOpen();
         });
         this.bodyEl.appendChild(tr);
       }
@@ -6543,6 +6673,18 @@ WARNING: This link could potentially be dangerous`)) {
       document.body.appendChild(a);
       a.click();
       a.remove();
+    }
+    triggerArchiveDownload(remotePath) {
+      const sid = this.deps.getActiveSshId();
+      if (!sid) return;
+      const a = document.createElement("a");
+      a.href = webApi.sftpArchiveDownloadUrl(sid, remotePath);
+      const name = remotePath === "/" ? "root" : (remotePath.split("/").filter(Boolean).pop() || "archive");
+      a.download = `${name}.tar.gz`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      this.deps.toast(`\u5F00\u59CB\u6D41\u5F0F\u6253\u5305\u4E0B\u8F7D ${name}.tar.gz`);
     }
     async renameItem(entry) {
       const sid = this.deps.getActiveSshId();
@@ -6604,8 +6746,20 @@ WARNING: This link could potentially be dangerous`)) {
         parts.pop();
         void this.load(`/${parts.join("/")}`);
       });
-      document.getElementById("sftp-home")?.addEventListener("click", () => void this.load("/"));
-      document.getElementById("sftp-go")?.addEventListener("click", () => void this.load(this.pathInput.value));
+      this.editPathBtn?.addEventListener("click", () => this.showPathInput(true));
+      this.breadcrumbsEl?.addEventListener("dblclick", () => this.showPathInput(true));
+      this.pathInput?.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          void this.load(this.pathInput.value);
+          this.showPathInput(false);
+        } else if (e.key === "Escape") {
+          this.showPathInput(false);
+        }
+      });
+      this.goBtn?.addEventListener("click", () => {
+        void this.load(this.pathInput.value);
+        this.showPathInput(false);
+      });
       document.getElementById("sftp-refresh")?.addEventListener("click", () => void this.load(this.currentDir));
       document.getElementById("sftp-mkdir")?.addEventListener("click", async () => {
         const sid = this.deps.getActiveSshId();
@@ -6615,20 +6769,42 @@ WARNING: This link could potentially be dangerous`)) {
           await this.load(this.currentDir);
         }
       });
+      this.archiveCurrentBtn?.addEventListener("click", () => this.triggerArchiveDownload(this.currentDir));
       const fileInput = document.getElementById("sftp-file-input");
       document.getElementById("sftp-upload")?.addEventListener("click", () => fileInput.click());
       fileInput.addEventListener("change", () => {
         void this.uploadFiles(fileInput.files);
         fileInput.value = "";
       });
+      let dragCounter = 0;
+      this.wrapEl.addEventListener("dragenter", (e) => {
+        e.preventDefault();
+        dragCounter++;
+        if (this.dragOverlay) {
+          if (this.dragTarget) this.dragTarget.textContent = this.currentDir;
+          this.dragOverlay.classList.remove("hidden");
+        }
+      });
       this.wrapEl.addEventListener("dragover", (e) => {
         e.preventDefault();
-        this.wrapEl.classList.add("dragover");
+        if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+        if (this.dragOverlay && this.dragOverlay.classList.contains("hidden")) {
+          if (this.dragTarget) this.dragTarget.textContent = this.currentDir;
+          this.dragOverlay.classList.remove("hidden");
+        }
       });
-      this.wrapEl.addEventListener("dragleave", () => this.wrapEl.classList.remove("dragover"));
+      this.wrapEl.addEventListener("dragleave", (e) => {
+        e.preventDefault();
+        dragCounter--;
+        if (dragCounter <= 0) {
+          dragCounter = 0;
+          this.dragOverlay?.classList.add("hidden");
+        }
+      });
       this.wrapEl.addEventListener("drop", (e) => {
         e.preventDefault();
-        this.wrapEl.classList.remove("dragover");
+        dragCounter = 0;
+        this.dragOverlay?.classList.add("hidden");
         void this.uploadFiles(e.dataTransfer?.files ?? null);
       });
       document.getElementById("cancel-editor")?.addEventListener("click", () => this.editorDlg.close());
@@ -6645,6 +6821,19 @@ WARNING: This link could potentially be dangerous`)) {
   };
 
   // src/renderer/monitor-panel.ts
+  function formatHistoryTime(iso) {
+    try {
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return iso.slice(5, 16).replace("T", " ");
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      const h = String(d.getHours()).padStart(2, "0");
+      const min = String(d.getMinutes()).padStart(2, "0");
+      return `${m}-${day} ${h}:${min}`;
+    } catch {
+      return iso.slice(5, 16).replace("T", " ");
+    }
+  }
   var MonitorAndToolsController = class {
     constructor(deps) {
       this.deps = deps;
@@ -6754,17 +6943,49 @@ WARNING: This link could potentially be dangerous`)) {
           const card = document.createElement("button");
           card.type = "button";
           card.className = "history-item";
-          card.title = "\u53D1\u9001\u5230\u5F53\u524D\u7EC8\u7AEF";
+          card.title = `发送到终端: ${row.command}`;
           const meta = document.createElement("div");
           meta.className = "history-meta";
-          const where = row.alias || (row.sessionKind === "local" ? "\u672C\u673A" : row.sessionKind);
-          const status = row.exitCode === void 0 ? "" : ` \xB7 ${row.exitCode === 0 ? "\u6210\u529F" : `\u9000\u51FA ${row.exitCode}`}`;
-          meta.textContent = `${row.at.slice(0, 19).replace("T", " ")} \xB7 ${where}${status}`;
+          const metaLeft = document.createElement("div");
+          metaLeft.className = "history-meta-left";
+          const timeSpan = document.createElement("span");
+          timeSpan.className = "history-time";
+          timeSpan.textContent = formatHistoryTime(row.at);
+          const whereSpan = document.createElement("span");
+          whereSpan.className = "history-tag";
+          whereSpan.textContent = row.alias || (row.sessionKind === "local" ? "\u672C\u673A" : row.sessionKind);
+          metaLeft.append(timeSpan, whereSpan);
+          const statusSpan = document.createElement("span");
+          if (row.exitCode !== void 0) {
+            statusSpan.className = `history-status ${row.exitCode === 0 ? "ok" : "err"}`;
+            statusSpan.textContent = row.exitCode === 0 ? "\u6210\u529F" : `\u9000\u51FA ${row.exitCode}`;
+          }
+          meta.append(metaLeft, statusSpan);
+
+          const copyBtn = document.createElement("button");
+          copyBtn.type = "button";
+          copyBtn.className = "history-copy-btn";
+          copyBtn.title = "复制命令到剪贴板";
+          copyBtn.textContent = "📋 复制";
+          copyBtn.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            try {
+              await navigator.clipboard.writeText(row.command);
+              this.deps.toast("已复制命令到剪贴板");
+            } catch {
+              this.deps.toast("复制失败");
+            }
+          });
+
           const cmd = document.createElement("div");
           cmd.className = "history-cmd";
           cmd.textContent = row.command;
-          card.append(meta, cmd);
-          card.addEventListener("click", () => this.deps.onSendCommand(`${row.command}\r`));
+          card.append(meta, cmd, copyBtn);
+          card.addEventListener("click", () => {
+            card.classList.add("card-activated");
+            setTimeout(() => card.classList.remove("card-activated"), 250);
+            this.deps.onSendCommand(`${row.command}\r`);
+          });
           this.historyEl.appendChild(card);
         }
       } catch {
@@ -6941,6 +7162,7 @@ WARNING: This link could potentially be dangerous`)) {
   var activeId = null;
   var fontSize = 14;
   var tabs = /* @__PURE__ */ new Map();
+  var pendingConnections = /* @__PURE__ */ new Map();
   var toastEl = document.getElementById("toast");
   function showToast(msg) {
     toastEl.textContent = msg;
@@ -6978,7 +7200,8 @@ WARNING: This link could potentially be dangerous`)) {
   var treeCtrl = new HostTreeController({
     onOpenHost: (hostId) => void openSshTab(hostId),
     toast: showToast,
-    promptText
+    promptText,
+    getActiveHostIds: () => new Set(Array.from(tabs.values()).map((t) => t.info.hostId).filter(Boolean))
   });
   var monCtrl = new MonitorAndToolsController({
     onSendCommand: (cmd) => sendInput(cmd),
@@ -7050,6 +7273,7 @@ WARNING: This link could potentially be dangerous`)) {
     term.open(slot);
     term.onData((data) => sendInput(data));
     tabs.set(info.sessionId, { info, term, fit, slot, metrics: null, closed: false });
+    treeCtrl.render();
     selectTab(info.sessionId);
   }
   function fitTab(tab) {
@@ -7139,6 +7363,16 @@ WARNING: This link could potentially be dangerous`)) {
       chip.addEventListener("click", () => selectTab(id));
       bar.appendChild(chip);
     }
+    for (const [, p] of pendingConnections) {
+      const chip = document.createElement("div");
+      chip.className = "tab-chip connecting active";
+      const dot = document.createElement("span");
+      dot.className = "tab-dot spin";
+      const label = document.createElement("span");
+      label.textContent = `${p.alias} (连接中...)`;
+      chip.append(dot, label);
+      bar.appendChild(chip);
+    }
   }
   async function closeTab(sessionId) {
     const tab = tabs.get(sessionId);
@@ -7147,15 +7381,50 @@ WARNING: This link could potentially be dangerous`)) {
     tab.term.dispose();
     tab.slot.remove();
     tabs.delete(sessionId);
+    treeCtrl.render();
     selectTab(Array.from(tabs.keys()).pop() ?? null);
   }
   async function openSshTab(hostId) {
+    if (pendingConnections.has(hostId)) return;
+    const host = treeCtrl.hosts.find((h) => h.id === hostId);
+    const alias = host ? host.alias : "\u8FDE\u63A5\u4E3B\u673A";
+    pendingConnections.set(hostId, { alias, host: host?.host, port: host?.port });
+
+    const hostEl = document.getElementById(`host-${hostId}`);
+    hostEl?.classList.add("connecting");
+
+    const termEmpty = document.getElementById("term-empty");
+    if (termEmpty && tabs.size === 0) {
+      termEmpty.classList.remove("hidden");
+      termEmpty.innerHTML = `
+        <div class="connecting-box">
+          <div class="connecting-spinner"></div>
+          <div class="connecting-title">正在连接 ${alias}...</div>
+          <div class="connecting-sub">${host ? `${host.username}@${host.host}:${host.port}` : ""} · 正在协商密钥并分配终端</div>
+        </div>
+      `;
+    }
+    renderTabs();
+
     try {
       const grid = measureGrid();
-      createTermInstance(await webApi.openSession({ kind: "ssh", hostId, cols: grid.cols, rows: grid.rows }));
+      const info = await webApi.openSession({ kind: "ssh", hostId, cols: grid.cols, rows: grid.rows });
+      if (!info.hostId) info.hostId = hostId;
+      pendingConnections.delete(hostId);
+      hostEl?.classList.remove("connecting");
+      if (termEmpty) {
+        termEmpty.innerHTML = '<div>没有打开的终端</div><small>双击左侧主机，或使用「本机终端」。</small>';
+      }
+      createTermInstance(info);
       const tab = activeId ? tabs.get(activeId) : void 0;
       if (tab) requestAnimationFrame(() => fitTab(tab));
     } catch (err) {
+      pendingConnections.delete(hostId);
+      hostEl?.classList.remove("connecting");
+      if (termEmpty) {
+        termEmpty.innerHTML = '<div>没有打开的终端</div><small>双击左侧主机，或使用「本机终端」。</small>';
+      }
+      renderTabs();
       showToast(err instanceof Error ? err.message : "\u8FDE\u63A5\u5931\u8D25");
     }
   }

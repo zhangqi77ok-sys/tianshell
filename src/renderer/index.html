@@ -15,17 +15,17 @@
       <aside class="sidebar">
         <div class="brand">
           <svg class="mark" viewBox="0 0 36 36" aria-hidden="true">
-            <rect x="1.5" y="1.5" width="33" height="33" rx="9" fill="#24303a" stroke="#3d4b57" />
-            <path d="M11 13l5 5-5 5" fill="none" stroke="#3dbea5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
-            <path d="M19 23h8" fill="none" stroke="#e3a008" stroke-width="2.2" stroke-linecap="round" />
+            <rect x="1.5" y="1.5" width="33" height="33" rx="8" fill="#15181f" stroke="rgba(255,255,255,0.08)" />
+            <path d="M11 13l5 5-5 5" fill="none" stroke="#3b82f6" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M19 23h8" fill="none" stroke="#10b981" stroke-width="2.2" stroke-linecap="round" />
           </svg>
           <div>
             <div class="brand-name">TianShell</div>
-            <div class="brand-sub">SSH · SFTP · 监控 · 隧道 · MCP</div>
+            <div class="brand-sub">SSH · SFTP · 监控 · MCP</div>
           </div>
         </div>
         <div class="side-tools">
-          <input id="filter" type="search" placeholder="筛选主机 / 标签" autocomplete="off" />
+          <input id="filter" type="search" placeholder="搜索主机或标签..." autocomplete="off" />
           <button id="add-host" class="primary" type="button" title="添加 SSH 主机">+ 主机</button>
         </div>
         <div class="side-subtools">
@@ -77,19 +77,28 @@
           <div class="sftp-pane" id="sftp-pane">
             <div class="sftp-bar">
               <div class="sftp-nav">
-                <button id="sftp-up" type="button" disabled>上级</button>
-                <button id="sftp-home" type="button" disabled>/</button>
-                <input id="sftp-path" type="text" value="/" spellcheck="false" disabled />
-                <button id="sftp-go" type="button" disabled>跳转</button>
+                <button id="sftp-up" type="button" title="返回上一级目录" disabled>↑ 上级</button>
+                <div id="sftp-breadcrumbs" class="sftp-breadcrumbs" title="点击目录层级直达，双击编辑路径"></div>
+                <input id="sftp-path" type="text" value="/" spellcheck="false" class="hidden" disabled />
+                <button id="sftp-edit-path" type="button" class="btn-ghost" title="手动输入路径" disabled>✏️</button>
+                <button id="sftp-go" type="button" class="hidden" disabled>跳转</button>
               </div>
               <div class="sftp-ops">
                 <button id="sftp-mkdir" type="button" disabled>新建目录</button>
                 <button id="sftp-upload" type="button" disabled>上传文件</button>
+                <button id="sftp-archive-current" type="button" title="打包下载当前目录为 .tar.gz" disabled>打包下载</button>
                 <input id="sftp-file-input" type="file" multiple class="hidden" />
                 <button id="sftp-refresh" type="button" disabled>刷新</button>
               </div>
             </div>
             <div id="sftp-table-wrap" class="sftp-table-wrap">
+              <div id="sftp-drag-overlay" class="sftp-drag-overlay hidden">
+                <div class="sftp-drag-box">
+                  <div class="sftp-drag-icon">📥</div>
+                  <div class="sftp-drag-text">释放鼠标以上传文件至</div>
+                  <div id="sftp-drag-target" class="sftp-drag-path mono">/</div>
+                </div>
+              </div>
               <div id="sftp-empty" class="empty-muted">空闲。连上 SSH 会话后，这里显示该会话的当前目录。</div>
               <table id="sftp-table" class="sftp-table hidden">
                 <thead>

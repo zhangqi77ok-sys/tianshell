@@ -110,6 +110,8 @@ export const webApi = {
     }),
   sftpDownloadUrl: (sid: string, targetPath: string) =>
     `/api/sessions/${encodeURIComponent(sid)}/sftp/download?path=${encodeURIComponent(targetPath)}&token=${encodeURIComponent(resolveClientToken())}`,
+  sftpArchiveDownloadUrl: (sid: string, targetPath: string) =>
+    `/api/sessions/${encodeURIComponent(sid)}/sftp/archive-download?path=${encodeURIComponent(targetPath)}&token=${encodeURIComponent(resolveClientToken())}`,
   sftpUploadFile: async (sid: string, targetPath: string, file: File) =>
     apiRequest<{ tid: string }>(
       `/api/sessions/${encodeURIComponent(sid)}/sftp/upload?path=${encodeURIComponent(targetPath)}&total=${file.size}`,

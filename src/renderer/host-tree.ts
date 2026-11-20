@@ -5,6 +5,7 @@ export interface HostTreeDeps {
   onOpenHost: (hostId: string) => void;
   toast: (msg: string) => void;
   promptText: (title: string, defaultVal?: string) => Promise<string | null>;
+  getActiveHostIds?: () => Set<string>;
 }
 
 export class HostTreeController {
@@ -63,10 +64,19 @@ export class HostTreeController {
   private renderHostRow(h: PublicHost): HTMLElement {
     const item = document.createElement('div');
     item.className = 'host-item';
+    item.id = `host-${h.id}`;
+    const isOnline = Boolean(this.deps.getActiveHostIds?.().has(h.id));
     const left = document.createElement('div');
     const alias = document.createElement('div');
     alias.className = 'host-alias';
-    alias.textContent = `${h.jumpHostId ? '🔀 ' : ''}${h.alias}`;
+    if (isOnline) {
+      const dot = document.createElement('span');
+      dot.className = 'online-dot';
+      dot.title = '在线活跃连接中';
+      alias.appendChild(dot);
+    }
+    const aliasText = document.createTextNode(`${h.jumpHostId ? '🔀 ' : ''}${h.alias}`);
+    alias.appendChild(aliasText);
     const meta = document.createElement('div');
     meta.className = 'host-meta mono';
     meta.textContent = `${h.username}@${h.host}:${h.port}`;
@@ -74,19 +84,32 @@ export class HostTreeController {
 
     const ops = document.createElement('div');
     ops.className = 'host-actions';
+    const connectBtn = document.createElement('button');
+    connectBtn.type = 'button';
+    connectBtn.className = 'host-connect-btn';
+    connectBtn.textContent = '连接';
+    connectBtn.title = '连接此远程主机';
+    connectBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.deps.onOpenHost(h.id);
+    });
     const editBtn = document.createElement('button');
     editBtn.type = 'button';
-    editBtn.textContent = '改';
+    editBtn.className = 'host-btn-icon';
+    editBtn.textContent = '✏️';
+    editBtn.title = '编辑主机配置';
     editBtn.addEventListener('click', (e) => { e.stopPropagation(); this.openModal(h); });
     const delBtn = document.createElement('button');
     delBtn.type = 'button';
-    delBtn.textContent = '删';
+    delBtn.className = 'host-btn-icon';
+    delBtn.textContent = '🗑️';
+    delBtn.title = '删除主机';
     delBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
       await webApi.deleteHost(h.id);
       await this.refresh();
     });
-    ops.append(editBtn, delBtn);
+    ops.append(connectBtn, editBtn, delBtn);
     item.append(left, ops);
     item.addEventListener('dblclick', () => this.deps.onOpenHost(h.id));
     return item;

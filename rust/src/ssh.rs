@@ -172,7 +172,9 @@ pub fn connect_direct(target: &SshTarget) -> Result<(Session, String), SshError>
         &addr.parse().map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?,
         Duration::from_secs(15),
     )?;
+    let _ = tcp.set_nodelay(true);
     let mut sess = Session::new()?;
+    sess.set_timeout(15000);
     sess.set_tcp_stream(tcp);
     sess.handshake()?;
     let fingerprint = check_host_key(&sess, target.known_fingerprint.as_deref())?;
@@ -216,7 +218,9 @@ fn connect_through(current: &Session, next: &SshTarget) -> Result<(Session, Stri
         }
     });
     let tcp = TcpStream::connect(("127.0.0.1", local_port))?;
+    let _ = tcp.set_nodelay(true);
     let mut next_sess = Session::new()?;
+    next_sess.set_timeout(15000);
     next_sess.set_tcp_stream(tcp);
     next_sess.handshake()?;
     let fingerprint = check_host_key(&next_sess, next.known_fingerprint.as_deref())?;

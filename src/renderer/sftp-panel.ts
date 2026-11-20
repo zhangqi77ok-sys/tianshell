@@ -19,6 +19,28 @@ export function formatBytes(bytes: number): string {
   return `${v.toFixed(1)} ${units[u]}`;
 }
 
+function getFileMeta(name: string, isDir: boolean): { icon: string; cls: string } {
+  if (isDir) return { icon: '📁', cls: 'file-dir' };
+  const dot = name.lastIndexOf('.');
+  const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
+  switch (ext) {
+    case 'sh': case 'bash': case 'zsh': case 'bat': case 'cmd': case 'ps1':
+      return { icon: '⚡', cls: 'file-sh' };
+    case 'conf': case 'config': case 'yaml': case 'yml': case 'json': case 'toml': case 'ini': case 'env': case 'xml':
+      return { icon: '⚙️', cls: 'file-conf' };
+    case 'tar': case 'gz': case 'zip': case 'tgz': case '7z': case 'rar': case 'xz': case 'bz2':
+      return { icon: '📦', cls: 'file-archive' };
+    case 'log': case 'out': case 'err':
+      return { icon: '📝', cls: 'file-log' };
+    case 'key': case 'pem': case 'pub': case 'crt': case 'cer': case 'p12':
+      return { icon: '🔑', cls: 'file-key' };
+    case 'py': case 'rs': case 'js': case 'ts': case 'go': case 'java': case 'c': case 'cpp': case 'h': case 'html': case 'css':
+      return { icon: '💻', cls: 'file-code' };
+    default:
+      return { icon: '📄', cls: 'file-default' };
+  }
+}
+
 export class SftpController {
   private currentDir = '/';
   private showHidden = false;
@@ -27,6 +49,12 @@ export class SftpController {
   private editingPath: string | null = null;
 
   private readonly pathInput = document.getElementById('sftp-path') as HTMLInputElement;
+  private readonly breadcrumbsEl = document.getElementById('sftp-breadcrumbs') as HTMLDivElement;
+  private readonly editPathBtn = document.getElementById('sftp-edit-path') as HTMLButtonElement;
+  private readonly goBtn = document.getElementById('sftp-go') as HTMLButtonElement;
+  private readonly archiveCurrentBtn = document.getElementById('sftp-archive-current') as HTMLButtonElement | null;
+  private readonly dragOverlay = document.getElementById('sftp-drag-overlay') as HTMLDivElement | null;
+  private readonly dragTarget = document.getElementById('sftp-drag-target') as HTMLDivElement | null;
   private readonly bodyEl = document.getElementById('sftp-body') as HTMLTableSectionElement;
   private readonly tableEl = document.getElementById('sftp-table') as HTMLTableElement;
   private readonly emptyEl = document.getElementById('sftp-empty') as HTMLDivElement;
@@ -39,9 +67,6 @@ export class SftpController {
 
   constructor(private readonly deps: SftpControllerDeps) {
     this.bindEvents();
-    window.setInterval(() => {
-      if (this.deps.getActiveSshId()) void this.load(this.currentDir, true);
-    }, 3000);
   }
 
   setShowHidden(flag: boolean): void {
@@ -52,9 +77,9 @@ export class SftpController {
   syncSession(): void {
     this.lastSig = '';
     const active = Boolean(this.deps.getActiveSshId());
-    for (const id of ['sftp-up', 'sftp-home', 'sftp-path', 'sftp-go', 'sftp-mkdir', 'sftp-upload', 'sftp-refresh']) {
-      const el = document.getElementById(id) as HTMLButtonElement | HTMLInputElement;
-      el.disabled = !active;
+    for (const id of ['sftp-up', 'sftp-path', 'sftp-edit-path', 'sftp-go', 'sftp-mkdir', 'sftp-upload', 'sftp-archive-current', 'sftp-refresh']) {
+      const el = document.getElementById(id) as HTMLButtonElement | HTMLInputElement | null;
+      if (el) el.disabled = !active;
     }
     if (active) {
       void this.load(this.currentDir, true);
@@ -64,16 +89,77 @@ export class SftpController {
       this.emptyEl.classList.remove('hidden');
       this.emptyEl.textContent = '空闲。连上 SSH 会话后，这里显示该会话的当前目录。';
       this.bodyEl.textContent = '';
+      if (this.breadcrumbsEl) this.breadcrumbsEl.textContent = '';
+    }
+  }
+
+  private renderBreadcrumbs(dirPath: string): void {
+    if (!this.breadcrumbsEl) return;
+    this.breadcrumbsEl.textContent = '';
+    const norm = dirPath === '/' ? '/' : dirPath.replace(/\/+$/, '');
+    const parts = norm.split('/').filter(Boolean);
+
+    const rootChip = document.createElement('span');
+    rootChip.className = `breadcrumb-chip ${parts.length === 0 ? 'active' : ''}`;
+    rootChip.textContent = '🏠 /';
+    rootChip.title = '根目录 (/)';
+    rootChip.addEventListener('click', (e) => {
+      e.stopPropagation();
+      void this.load('/');
+    });
+    this.breadcrumbsEl.appendChild(rootChip);
+
+    let accum = '';
+    for (let i = 0; i < parts.length; i++) {
+      const seg = parts[i];
+      accum += `/${seg}`;
+      const targetPath = accum;
+      const isLast = i === parts.length - 1;
+
+      const sep = document.createElement('span');
+      sep.className = 'breadcrumb-sep';
+      sep.textContent = '›';
+      this.breadcrumbsEl.appendChild(sep);
+
+      const chip = document.createElement('span');
+      chip.className = `breadcrumb-chip ${isLast ? 'active' : ''}`;
+      chip.textContent = seg;
+      chip.title = targetPath;
+      chip.addEventListener('click', (e) => {
+        e.stopPropagation();
+        void this.load(targetPath);
+      });
+      this.breadcrumbsEl.appendChild(chip);
+    }
+  }
+
+  private showPathInput(show: boolean): void {
+    if (!this.breadcrumbsEl || !this.pathInput) return;
+    if (show) {
+      this.breadcrumbsEl.classList.add('hidden');
+      this.editPathBtn?.classList.add('hidden');
+      this.pathInput.classList.remove('hidden');
+      this.goBtn?.classList.remove('hidden');
+      this.pathInput.focus();
+      this.pathInput.select();
+    } else {
+      this.breadcrumbsEl.classList.remove('hidden');
+      this.editPathBtn?.classList.remove('hidden');
+      this.pathInput.classList.add('hidden');
+      this.goBtn?.classList.add('hidden');
     }
   }
 
   async load(dirPath: string, quiet = false): Promise<void> {
     const sid = this.deps.getActiveSshId();
     if (!sid) return;
+    this.tableEl.classList.add('loading');
     try {
       const list = await webApi.sftpList(sid, dirPath);
       this.currentDir = dirPath || '/';
       this.pathInput.value = this.currentDir;
+      this.renderBreadcrumbs(this.currentDir);
+      this.showPathInput(false);
       const visible = list.filter((e) => this.showHidden || !e.name.startsWith('.'));
       const sig = `${this.currentDir}|${visible.map((e) => `${e.path}:${e.size}:${e.mtimeMs}:${e.mode}`).join('|')}`;
       if (sig === this.lastSig) return;
@@ -81,6 +167,8 @@ export class SftpController {
       this.renderEntries(visible);
     } catch (err) {
       if (!quiet) this.deps.toast(err instanceof Error ? err.message : 'SFTP 读取失败');
+    } finally {
+      this.tableEl.classList.remove('loading');
     }
   }
 
@@ -98,12 +186,15 @@ export class SftpController {
       const tr = document.createElement('tr');
       const nameTd = document.createElement('td');
       const nameBtn = document.createElement('span');
-      nameBtn.textContent = `${entry.kind === 'dir' ? '📁 ' : '📄 '}${entry.name}`;
+      const isDir = entry.kind === 'dir';
+      const meta = getFileMeta(entry.name, isDir);
+      nameBtn.textContent = `${meta.icon} ${entry.name}`;
       nameBtn.style.cursor = 'pointer';
+      nameBtn.className = `sftp-item-name ${meta.cls}`;
       nameTd.appendChild(nameBtn);
       tr.appendChild(nameTd);
 
-      for (const val of [entry.permissions, entry.kind === 'dir' ? '--' : formatBytes(entry.size), entry.mtimeMs ? new Date(entry.mtimeMs).toLocaleString() : '--']) {
+      for (const val of [entry.permissions, isDir ? '--' : formatBytes(entry.size), entry.mtimeMs ? new Date(entry.mtimeMs).toLocaleString() : '--']) {
         const td = document.createElement('td');
         td.className = 'mono';
         td.textContent = val;
@@ -113,18 +204,34 @@ export class SftpController {
       const opsTd = document.createElement('td');
       opsTd.style.display = 'flex';
       opsTd.style.gap = '4px';
-      if (entry.kind === 'file') {
+      if (!isDir) {
         this.addOpBtn(opsTd, '编辑', () => void this.openEditor(entry.path));
         this.addOpBtn(opsTd, '下载', () => this.triggerDownload(entry.path));
+      } else {
+        this.addOpBtn(opsTd, '打包', () => this.triggerArchiveDownload(entry.path));
       }
       this.addOpBtn(opsTd, '改名', () => void this.renameItem(entry));
       this.addOpBtn(opsTd, '权限', () => void this.chmodItem(entry));
       this.addOpBtn(opsTd, '删', () => void this.deleteItem(entry));
       tr.appendChild(opsTd);
 
-      tr.addEventListener('dblclick', () => {
-        if (entry.kind === 'dir') void this.load(entry.path);
-        else if (entry.kind === 'file') void this.openEditor(entry.path);
+      const handleOpen = () => {
+        if (isDir) {
+          void this.load(entry.path);
+        } else if (entry.kind === 'file') {
+          void this.openEditor(entry.path);
+        } else {
+          void this.load(entry.path).catch(() => void this.openEditor(entry.path));
+        }
+      };
+
+      nameBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        handleOpen();
+      });
+      tr.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        handleOpen();
       });
       this.bodyEl.appendChild(tr);
     }
@@ -166,6 +273,19 @@ export class SftpController {
     document.body.appendChild(a);
     a.click();
     a.remove();
+  }
+
+  private triggerArchiveDownload(remotePath: string): void {
+    const sid = this.deps.getActiveSshId();
+    if (!sid) return;
+    const a = document.createElement('a');
+    a.href = webApi.sftpArchiveDownloadUrl(sid, remotePath);
+    const name = remotePath === '/' ? 'root' : (remotePath.split('/').filter(Boolean).pop() || 'archive');
+    a.download = `${name}.tar.gz`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    this.deps.toast(`开始流式打包下载 ${name}.tar.gz`);
   }
 
   private async renameItem(entry: SftpEntry): Promise<void> {
@@ -233,8 +353,20 @@ export class SftpController {
       parts.pop();
       void this.load(`/${parts.join('/')}`);
     });
-    document.getElementById('sftp-home')?.addEventListener('click', () => void this.load('/'));
-    document.getElementById('sftp-go')?.addEventListener('click', () => void this.load(this.pathInput.value));
+    this.editPathBtn?.addEventListener('click', () => this.showPathInput(true));
+    this.breadcrumbsEl?.addEventListener('dblclick', () => this.showPathInput(true));
+    this.pathInput?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        void this.load(this.pathInput.value);
+        this.showPathInput(false);
+      } else if (e.key === 'Escape') {
+        this.showPathInput(false);
+      }
+    });
+    this.goBtn?.addEventListener('click', () => {
+      void this.load(this.pathInput.value);
+      this.showPathInput(false);
+    });
     document.getElementById('sftp-refresh')?.addEventListener('click', () => void this.load(this.currentDir));
     document.getElementById('sftp-mkdir')?.addEventListener('click', async () => {
       const sid = this.deps.getActiveSshId();
@@ -244,20 +376,42 @@ export class SftpController {
         await this.load(this.currentDir);
       }
     });
+    this.archiveCurrentBtn?.addEventListener('click', () => this.triggerArchiveDownload(this.currentDir));
     const fileInput = document.getElementById('sftp-file-input') as HTMLInputElement;
     document.getElementById('sftp-upload')?.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', () => {
       void this.uploadFiles(fileInput.files);
       fileInput.value = '';
     });
+    let dragCounter = 0;
+    this.wrapEl.addEventListener('dragenter', (e) => {
+      e.preventDefault();
+      dragCounter++;
+      if (this.dragOverlay) {
+        if (this.dragTarget) this.dragTarget.textContent = this.currentDir;
+        this.dragOverlay.classList.remove('hidden');
+      }
+    });
     this.wrapEl.addEventListener('dragover', (e) => {
       e.preventDefault();
-      this.wrapEl.classList.add('dragover');
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+      if (this.dragOverlay && this.dragOverlay.classList.contains('hidden')) {
+        if (this.dragTarget) this.dragTarget.textContent = this.currentDir;
+        this.dragOverlay.classList.remove('hidden');
+      }
     });
-    this.wrapEl.addEventListener('dragleave', () => this.wrapEl.classList.remove('dragover'));
+    this.wrapEl.addEventListener('dragleave', (e) => {
+      e.preventDefault();
+      dragCounter--;
+      if (dragCounter <= 0) {
+        dragCounter = 0;
+        this.dragOverlay?.classList.add('hidden');
+      }
+    });
     this.wrapEl.addEventListener('drop', (e) => {
       e.preventDefault();
-      this.wrapEl.classList.remove('dragover');
+      dragCounter = 0;
+      this.dragOverlay?.classList.add('hidden');
       void this.uploadFiles(e.dataTransfer?.files ?? null);
     });
     document.getElementById('cancel-editor')?.addEventListener('click', () => this.editorDlg.close());

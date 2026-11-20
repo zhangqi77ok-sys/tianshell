@@ -70,13 +70,28 @@ pub fn list_dir(sess: &Session, dir_path: &str) -> Result<Vec<SftpEntry>, SftpEr
         }
         let stat = item.1;
         let mode = stat.perm.unwrap_or(0);
-        let kind = if (mode & 0o170000) == 0o040000 {
+        let mut kind = if (mode & 0o170000) == 0o040000 {
             "dir"
         } else if (mode & 0o170000) == 0o120000 {
             "symlink"
         } else {
             "file"
         };
+        if kind == "symlink" {
+            let full_path = if dir_path == "/" {
+                format!("/{}", name)
+            } else {
+                format!("{}/{}", dir_path.trim_end_matches('/'), name)
+            };
+            if let Ok(target_stat) = sftp.stat(Path::new(&full_path)) {
+                let target_mode = target_stat.perm.unwrap_or(0);
+                if (target_mode & 0o170000) == 0o040000 {
+                    kind = "dir";
+                } else {
+                    kind = "file";
+                }
+            }
+        }
         entries.push(SftpEntry {
             name: name.clone(),
             path: format!("{}/{}", dir_path.trim_end_matches('/'), name),

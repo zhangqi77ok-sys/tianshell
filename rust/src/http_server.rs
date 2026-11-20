@@ -233,6 +233,7 @@ fn router(state: AppState) -> Router {
         .route("/api/sessions/:id/sftp/chmod", post(sftp_chmod))
         .route("/api/sessions/:id/sftp/delete", post(sftp_delete))
         .route("/api/sessions/:id/sftp/download", get(sftp_download))
+        .route("/api/sessions/:id/sftp/archive-download", get(sftp_archive_download))
         .route("/api/sessions/:id/sftp/upload", post(sftp_upload))
         .route("/api/transfers/:id/cancel", post(cancel_transfer))
         .route("/api/mcp", get(mcp_info))
@@ -666,6 +667,121 @@ async fn sftp_download(_auth: Authed, State(state): State<AppState>, IdPath(id):
         }
         Ok(Err(err)) => json_err(StatusCode::BAD_REQUEST, err),
         Err(_) => json_err(StatusCode::BAD_REQUEST, "下载没有开始"),
+    }
+}
+
+async fn sftp_archive_download(
+    _auth: Authed,
+    State(state): State<AppState>,
+    IdPath(id): IdPath<String>,
+    Query(query): Query<PathQuery>,
+) -> Response {
+    let remote = query.path.unwrap_or_default();
+    if remote.is_empty() {
+        return json_err(StatusCode::BAD_REQUEST, "缺少 path 参数");
+    }
+    if remote.chars().any(|c| matches!(c, ';' | '|' | '&' | '$' | '>' | '<' | '`' | '\n' | '\r')) {
+        return json_err(StatusCode::BAD_REQUEST, "路径包含非法字符");
+    }
+
+    let norm = if remote == "/" { "/" } else { remote.trim_end_matches('/') };
+    let (parent, dirname) = match norm.rfind('/') {
+        Some(0) => ("/".to_string(), norm[1..].to_string()),
+        Some(idx) => (norm[..idx].to_string(), norm[idx + 1..].to_string()),
+        None => (".".to_string(), norm.to_string()),
+    };
+    let dirname = if dirname.is_empty() { "root".to_string() } else { dirname };
+    let filename = format!("{dirname}.tar.gz");
+
+    let tid = Uuid::new_v4().to_string();
+    let cancel = Arc::new(AtomicBool::new(false));
+    lock(&state.transfers).insert(tid.clone(), cancel.clone());
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let ready_slot = Arc::new(std::sync::Mutex::new(Some(ready_tx)));
+    let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
+    let hub = state.hub.clone();
+    let session_id = id.clone();
+    let remote_path = remote.to_string();
+    let fname = filename.clone();
+    let tid_progress = tid.clone();
+    let slot = ready_slot.clone();
+    let state_for_task = state.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let hub_job = hub.clone();
+        let slot_job = slot.clone();
+        let session_job = session_id.clone();
+        let remote_job = remote_path.clone();
+        let fname_job = fname.clone();
+        let tid_job = tid_progress.clone();
+        let outcome = with_ssh(&state_for_task, &session_id, move |session| {
+            session.set_blocking(true);
+            let mut channel = session.channel_session().map_err(|err| err.to_string())?;
+            let escaped_parent = parent.replace('\'', "'\\''");
+            let escaped_dirname = dirname.replace('\'', "'\\''");
+            let cmd = format!("tar -czf - -C '{escaped_parent}' '{escaped_dirname}'");
+            channel.exec(&cmd).map_err(|err| format!("执行远端打包失败: {err}"))?;
+
+            if let Some(sender) = lock(&slot_job).take() {
+                let _ = sender.send(Ok(()));
+            }
+            let mut buf = [0u8; 32_768];
+            let mut sent = 0u64;
+            loop {
+                if cancel.load(Ordering::Relaxed) {
+                    hub_job.broadcast(json!({
+                        "type": "transfer:progress",
+                        "task": transfer_task(&tid_job, &session_job, "download", &fname_job, &remote_job, sent, sent, "cancelled", None)
+                    }));
+                    return Ok(());
+                }
+                let n = channel.read(&mut buf).map_err(|err| err.to_string())?;
+                if n == 0 {
+                    break;
+                }
+                sent += n as u64;
+                if chunk_tx.blocking_send(Ok(Bytes::copy_from_slice(&buf[..n]))).is_err() {
+                    return Ok(());
+                }
+                hub_job.broadcast(json!({
+                    "type": "transfer:progress",
+                    "task": transfer_task(&tid_job, &session_job, "download", &fname_job, &remote_job, sent, 0, "running", None)
+                }));
+            }
+            channel.wait_close().ok();
+            hub_job.broadcast(json!({
+                "type": "transfer:progress",
+                "task": transfer_task(&tid_job, &session_job, "download", &fname_job, &remote_job, sent, sent.max(1), "done", None)
+            }));
+            Ok(())
+        });
+        if let Err(err) = outcome {
+            if let Some(sender) = lock(&slot).take() {
+                let _ = sender.send(Err(err.clone()));
+            }
+            hub.broadcast(json!({
+                "type": "transfer:progress",
+                "task": transfer_task(&tid_progress, &session_id, "download", &fname, &remote_path, 0, 0, "error", Some(err))
+            }));
+        }
+        lock(&state_for_task.transfers).remove(&tid_progress);
+    });
+
+    match ready_rx.await {
+        Ok(Ok(())) => {
+            let body = Body::from_stream(ReceiverStream::new(chunk_rx));
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/gzip")
+                .header(
+                    "content-disposition",
+                    format!("attachment; filename*=UTF-8''{}", encode_filename(&filename)),
+                )
+                .body(body)
+                .unwrap_or_else(|_| json_err(StatusCode::INTERNAL_SERVER_ERROR, "无法开始归档下载"))
+        }
+        Ok(Err(err)) => json_err(StatusCode::BAD_REQUEST, err),
+        Err(_) => json_err(StatusCode::BAD_REQUEST, "归档下载没有开始"),
     }
 }
 
