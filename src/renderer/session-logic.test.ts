@@ -1,10 +1,18 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  acceptLiveMetrics,
   broadcastRecipients,
+  claimSingleFlight,
+  editorWriteGuard,
+  isCurrentGeneration,
+  keystrokeRecipients,
   nextFindIndex,
   planSessionOpen,
+  resizeIfChanged,
   seedBroadcastChecks,
+  sessionOpenSteps,
+  shouldMeasureTerminal,
   tabLabels,
   type BroadcastTab,
   type OpenTabRef,
@@ -84,4 +92,46 @@ test('查找下一条和上一条会回绕', () => {
   assert.equal(nextFindIndex(2, 3, true), 0);
   assert.equal(nextFindIndex(0, 3, false), 2);
   assert.equal(nextFindIndex(0, 0, true), -1);
+});
+
+test('按键进入发出它的终端，断开的终端不能漏到其他会话', () => {
+  assert.deepEqual(keystrokeRecipients('ssh-b', tabs, [], false), ['ssh-b']);
+  assert.deepEqual(keystrokeRecipients('ssh-a', tabs, ['ssh-b', 'local'], true), ['ssh-a', 'ssh-b', 'local']);
+  assert.deepEqual(keystrokeRecipients('dead', tabs, ['ssh-a', 'ssh-b', 'local'], true), []);
+  assert.deepEqual(keystrokeRecipients('missing', tabs, ['ssh-a'], true), []);
+});
+
+test('重连旧标签时先占住名额，再关闭旧标签', () => {
+  const plan = planSessionOpen('h1', [{ id: 'dead', hostId: 'h1', closed: true }], false, 'reuse');
+  const steps = sessionOpenSteps(plan);
+  assert.deepEqual(steps, ['reserve', 'dispose', 'connect']);
+  assert.ok(steps.indexOf('reserve') < steps.indexOf('dispose'));
+  assert.deepEqual(sessionOpenSteps({ focusId: 'live', disposeId: null, wait: false }), ['focus']);
+  assert.deepEqual(sessionOpenSteps({ focusId: null, disposeId: null, wait: true }), []);
+});
+
+test('重复点击和隐藏终端不会再发一次动作或尺寸', () => {
+  assert.equal(claimSingleFlight(false), true);
+  assert.equal(claimSingleFlight(true), false);
+  assert.equal(shouldMeasureTerminal(true, false), true);
+  assert.equal(shouldMeasureTerminal(false, false), false);
+  assert.equal(shouldMeasureTerminal(true, true), false);
+  assert.deepEqual(resizeIfChanged(null, 80, 24), { cols: 80, rows: 24 });
+  assert.equal(resizeIfChanged({ cols: 80, rows: 24 }, 80, 24), null);
+  assert.equal(resizeIfChanged(null, 12, 24), null);
+  assert.equal(resizeIfChanged(null, 80, 4), null);
+});
+
+test('编辑器只写回打开它的会话，监控只采用仍有效的最新结果', () => {
+  assert.equal(editorWriteGuard('s1', 's1', false), 'write');
+  assert.equal(editorWriteGuard('s1', 's1', true), 'busy');
+  assert.equal(editorWriteGuard('s1', null, false), 'disconnected');
+  assert.equal(editorWriteGuard('s1', 's2', false), 'disconnected');
+  assert.equal(editorWriteGuard(null, 's1', false), 'idle');
+  assert.equal(acceptLiveMetrics('s1', 's1', false), true);
+  assert.equal(acceptLiveMetrics('s1', 's2', false), false);
+  assert.equal(acceptLiveMetrics('s1', 's1', true), false);
+  assert.equal(isCurrentGeneration(2, 2), true);
+  assert.equal(isCurrentGeneration(1, 2), false);
+  assert.equal(isCurrentGeneration(0, 0), false);
 });

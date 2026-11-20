@@ -6533,6 +6533,94 @@ WARNING: This link could potentially be dangerous`)) {
     }
   };
 
+  // src/renderer/session-logic.ts
+  function seedBroadcastChecks(tabs2) {
+    return tabs2.filter((tab) => !tab.closed && tab.kind === "ssh").map((tab) => tab.id);
+  }
+  function broadcastRecipients(activeId2, tabs2, checked, enabled) {
+    const open = new Set(tabs2.filter((tab) => !tab.closed).map((tab) => tab.id));
+    const ids = [];
+    if (activeId2 && open.has(activeId2)) ids.push(activeId2);
+    if (!enabled) return ids;
+    const seen = new Set(ids);
+    for (const id of checked) {
+      if (!open.has(id) || seen.has(id)) continue;
+      seen.add(id);
+      ids.push(id);
+    }
+    return ids;
+  }
+  function planSessionOpen(hostId, tabs2, pending, intent) {
+    if (pending) return { focusId: null, disposeId: null, wait: true };
+    if (intent === "another") return { focusId: null, disposeId: null, wait: false };
+    const live = tabs2.find((tab) => tab.hostId === hostId && !tab.closed);
+    if (live) return { focusId: live.id, disposeId: null, wait: false };
+    const stale = tabs2.find((tab) => tab.hostId === hostId && tab.closed);
+    return { focusId: null, disposeId: stale?.id ?? null, wait: false };
+  }
+  function tabLabels(tabs2) {
+    const totals = /* @__PURE__ */ new Map();
+    for (const tab of tabs2) {
+      if (!tab.hostId) continue;
+      totals.set(tab.hostId, (totals.get(tab.hostId) ?? 0) + 1);
+    }
+    const seen = /* @__PURE__ */ new Map();
+    const labels = /* @__PURE__ */ new Map();
+    for (const tab of tabs2) {
+      const total = tab.hostId ? totals.get(tab.hostId) ?? 1 : 1;
+      if (!tab.hostId || total <= 1) {
+        labels.set(tab.id, tab.alias);
+        continue;
+      }
+      const index = (seen.get(tab.hostId) ?? 0) + 1;
+      seen.set(tab.hostId, index);
+      labels.set(tab.id, `${tab.alias} \xB7 ${index}`);
+    }
+    return labels;
+  }
+  function keystrokeRecipients(sourceId, tabs2, checked, enabled) {
+    const source = tabs2.find((tab) => tab.id === sourceId);
+    if (!source || source.closed) return [];
+    return broadcastRecipients(sourceId, tabs2, checked, enabled);
+  }
+  function sessionOpenSteps(plan) {
+    if (plan.wait) return [];
+    if (plan.focusId) return ["focus"];
+    const steps = ["reserve"];
+    if (plan.disposeId) steps.push("dispose");
+    steps.push("connect");
+    return steps;
+  }
+  function claimSingleFlight(inFlight) {
+    return !inFlight;
+  }
+  function shouldMeasureTerminal(viewActive, slotHidden) {
+    return viewActive && !slotHidden;
+  }
+  function resizeIfChanged(previous, cols, rows) {
+    if (cols < 30 || rows < 6) return null;
+    if (previous && previous.cols === cols && previous.rows === rows) return null;
+    return { cols, rows };
+  }
+  function editorWriteGuard(editingSession, activeSession, inFlight) {
+    if (!editingSession) return "idle";
+    if (inFlight) return "busy";
+    if (!activeSession || activeSession !== editingSession) return "disconnected";
+    return "write";
+  }
+  function acceptLiveMetrics(sessionId, activeId2, closed) {
+    return Boolean(activeId2) && activeId2 === sessionId && !closed;
+  }
+  function isCurrentGeneration(ticket, latest) {
+    return ticket > 0 && ticket === latest;
+  }
+  function nextFindIndex(current, count, forward) {
+    if (count <= 0) return -1;
+    if (current < 0) return forward ? 0 : count - 1;
+    const step = forward ? 1 : -1;
+    return (current + step + count) % count;
+  }
+
   // src/renderer/sftp-panel.ts
   function formatBytes(bytes) {
     if (bytes < 1024) return `${bytes} B`;
@@ -6615,6 +6703,8 @@ WARNING: This link could potentially be dangerous`)) {
     loadTicket = 0;
     transfers = /* @__PURE__ */ new Map();
     editingPath = null;
+    editingSession = null;
+    editorSaving = false;
     pathInput = document.getElementById("sftp-path");
     breadcrumbsEl = document.getElementById("sftp-breadcrumbs");
     editPathBtn = document.getElementById("sftp-edit-path");
@@ -6840,10 +6930,14 @@ WARNING: This link could potentially be dangerous`)) {
     }
     async openEditor(remotePath) {
       const sid = this.deps.getActiveSshId();
-      if (!sid) return;
+      if (!sid) {
+        this.deps.toast("\u6CA1\u6709\u4ECD\u8FDE\u63A5\u7684 SSH \u4F1A\u8BDD\uFF0C\u8BFB\u4E0D\u4E86\u8FD9\u4E2A\u6587\u4EF6", "error");
+        return;
+      }
       try {
         const res = await webApi.sftpReadText(sid, remotePath);
         this.editingPath = remotePath;
+        this.editingSession = sid;
         const fileName = remotePath.split("/").pop() || "\u6587\u4EF6";
         const meta = getFileMeta(fileName, false);
         if (this.editorFileIcon) this.editorFileIcon.textContent = meta.icon;
@@ -6889,18 +6983,27 @@ WARNING: This link could potentially be dangerous`)) {
       this.editorDirtyBadge.textContent = dirty ? "\u25CF \u672A\u4FDD\u5B58" : "\u2713 \u5DF2\u4FDD\u5B58";
     }
     async saveEditorContent() {
-      const sid = this.deps.getActiveSshId();
-      if (!sid || !this.editingPath) return false;
+      const decision = editorWriteGuard(this.editingSession, this.deps.getActiveSshId(), this.editorSaving);
+      if (decision === "idle" || decision === "busy" || !this.editingPath || !this.editingSession) return false;
+      if (decision === "disconnected") {
+        this.deps.toast("\u8FD9\u4E2A\u4F1A\u8BDD\u5DF2\u7ECF\u65AD\u5F00\uFF0C\u4FEE\u6539\u8FD8\u7559\u5728\u7F16\u8F91\u5668\u91CC", "error");
+        return false;
+      }
+      const sid = this.editingSession;
+      const path = this.editingPath;
+      this.editorSaving = true;
       try {
-        await webApi.sftpWriteText(sid, this.editingPath, this.editorContent.value);
+        await webApi.sftpWriteText(sid, path, this.editorContent.value);
         this.editorOriginalContent = this.editorContent.value;
         this.checkEditorDirty();
-        this.deps.toast(`\u5DF2\u5199\u56DE\u8FDC\u7AEF\u6587\u4EF6: ${this.editingPath.split("/").pop()}`);
+        this.deps.toast(`\u5DF2\u5199\u56DE\u8FDC\u7AEF\u6587\u4EF6: ${path.split("/").pop()}`);
         void this.load(this.currentDir);
         return true;
       } catch (err) {
         this.deps.toast(err instanceof Error ? `\u4FDD\u5B58\u5931\u8D25: ${err.message}` : "\u4FDD\u5B58\u5931\u8D25", "error");
         return false;
+      } finally {
+        this.editorSaving = false;
       }
     }
     async handleCloseEditor() {
@@ -6908,6 +7011,8 @@ WARNING: This link could potentially be dangerous`)) {
         const ok = await this.deps.confirm("\u653E\u5F03\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF1F", "\u5173\u95ED\u540E\uFF0C\u8FD9\u6B21\u7F16\u8F91\u4E0D\u4F1A\u5199\u56DE\u8FDC\u7AEF\u3002", "\u653E\u5F03\u4FEE\u6539");
         if (!ok) return;
       }
+      this.editingPath = null;
+      this.editingSession = null;
       this.editorDlg.close();
     }
     async triggerDownload(remotePath) {
@@ -7206,6 +7311,7 @@ WARNING: This link could potentially be dangerous`)) {
     procsEl = document.getElementById("mon-procs");
     historyEl = document.getElementById("history-list");
     historyQuery = "";
+    historyTicket = 0;
     tunnelDialogOpen = false;
     renderMetrics(metrics, mode = metrics ? "live" : "idle") {
       const bento = document.getElementById("mon-bento");
@@ -7314,8 +7420,10 @@ WARNING: This link could potentially be dangerous`)) {
     }
     async refreshHistory() {
       if (!this.historyEl) return;
+      const ticket = ++this.historyTicket;
       try {
         const rows = await webApi.listHistory(this.historyQuery);
+        if (!isCurrentGeneration(ticket, this.historyTicket)) return;
         this.historyEl.textContent = "";
         if (!rows.length) {
           const empty = document.createElement("div");
@@ -7377,6 +7485,7 @@ WARNING: This link could potentially be dangerous`)) {
           this.historyEl.appendChild(card);
         }
       } catch {
+        if (!isCurrentGeneration(ticket, this.historyTicket)) return;
         this.historyEl.textContent = "";
         const empty = document.createElement("div");
         empty.className = "empty-muted";
@@ -7513,58 +7622,6 @@ WARNING: This link could potentially be dangerous`)) {
     } catch {
       return iso.slice(5, 16).replace("T", " ");
     }
-  }
-
-  // src/renderer/session-logic.ts
-  function seedBroadcastChecks(tabs2) {
-    return tabs2.filter((tab) => !tab.closed && tab.kind === "ssh").map((tab) => tab.id);
-  }
-  function broadcastRecipients(activeId2, tabs2, checked, enabled) {
-    const open = new Set(tabs2.filter((tab) => !tab.closed).map((tab) => tab.id));
-    const ids = [];
-    if (activeId2 && open.has(activeId2)) ids.push(activeId2);
-    if (!enabled) return ids;
-    const seen = new Set(ids);
-    for (const id of checked) {
-      if (!open.has(id) || seen.has(id)) continue;
-      seen.add(id);
-      ids.push(id);
-    }
-    return ids;
-  }
-  function planSessionOpen(hostId, tabs2, pending, intent) {
-    if (pending) return { focusId: null, disposeId: null, wait: true };
-    if (intent === "another") return { focusId: null, disposeId: null, wait: false };
-    const live = tabs2.find((tab) => tab.hostId === hostId && !tab.closed);
-    if (live) return { focusId: live.id, disposeId: null, wait: false };
-    const stale = tabs2.find((tab) => tab.hostId === hostId && tab.closed);
-    return { focusId: null, disposeId: stale?.id ?? null, wait: false };
-  }
-  function tabLabels(tabs2) {
-    const totals = /* @__PURE__ */ new Map();
-    for (const tab of tabs2) {
-      if (!tab.hostId) continue;
-      totals.set(tab.hostId, (totals.get(tab.hostId) ?? 0) + 1);
-    }
-    const seen = /* @__PURE__ */ new Map();
-    const labels = /* @__PURE__ */ new Map();
-    for (const tab of tabs2) {
-      const total = tab.hostId ? totals.get(tab.hostId) ?? 1 : 1;
-      if (!tab.hostId || total <= 1) {
-        labels.set(tab.id, tab.alias);
-        continue;
-      }
-      const index = (seen.get(tab.hostId) ?? 0) + 1;
-      seen.set(tab.hostId, index);
-      labels.set(tab.id, `${tab.alias} \xB7 ${index}`);
-    }
-    return labels;
-  }
-  function nextFindIndex(current, count, forward) {
-    if (count <= 0) return -1;
-    if (current < 0) return forward ? 0 : count - 1;
-    const step = forward ? 1 : -1;
-    return (current + step + count) % count;
   }
 
   // src/renderer/renderer.ts
@@ -7771,7 +7828,7 @@ WARNING: This link could potentially be dangerous`)) {
       const tab = tabs.get(msg.sessionId);
       if (!tab || tab.closed) return;
       tab.metrics = msg.metrics;
-      if (activeId === msg.sessionId) showMetricsFor(tab);
+      if (acceptLiveMetrics(msg.sessionId, activeId, tab.closed)) showMetricsFor(tab);
     } else if (type === "catalog:changed") {
       void refreshLive(String(msg.kind || "disk"));
     } else if (type === "transfer:progress") {
@@ -7880,9 +7937,17 @@ ${op.command}`;
     }
     ws.send(JSON.stringify({ type: "term:broadcast", sessionIds: ids, data }));
   }
+  function inputRecipients(sourceId) {
+    return keystrokeRecipients(sourceId, tabModels(), Array.from(broadcastChecked), broadcastOn());
+  }
   function sendInput(data) {
-    const enabled = document.getElementById("broadcast-toggle").checked;
-    dispatchInput(broadcastRecipients(activeId, tabModels(), Array.from(broadcastChecked), enabled), data);
+    if (!activeId) return;
+    const ids = inputRecipients(activeId);
+    if (!ids.length) {
+      showToast("\u5F53\u524D\u7EC8\u7AEF\u5DF2\u65AD\u5F00\uFF0C\u547D\u4EE4\u6CA1\u6709\u53D1\u51FA", "error");
+      return;
+    }
+    dispatchInput(ids, data);
   }
   function sendToActive(data) {
     dispatchInput(broadcastRecipients(activeId, tabModels(), [], false), data);
@@ -8009,8 +8074,11 @@ ${op.command}`;
     const fit = new import_addon_fit.FitAddon();
     term.loadAddon(fit);
     term.open(slot);
-    term.onData((data) => sendInput(data));
-    tabs.set(info.sessionId, { info, term, fit, slot, metrics: null, closed: false });
+    const sourceId = info.sessionId;
+    const dataSub = term.onData((data) => {
+      dispatchInput(inputRecipients(sourceId), data);
+    });
+    tabs.set(info.sessionId, { info, term, fit, slot, metrics: null, closed: false, dataSub, lastResize: null });
     treeCtrl.render();
     selectTab(info.sessionId);
   }
@@ -8019,14 +8087,14 @@ ${op.command}`;
     return Boolean(viewTerm && viewTerm.classList.contains("active"));
   }
   function fitTab(tab) {
-    if (!isTerminalViewActive() || tab.slot.classList.contains("hidden")) return;
+    if (!shouldMeasureTerminal(isTerminalViewActive(), tab.slot.classList.contains("hidden"))) return;
     const stage2 = document.getElementById("terminal-stage");
     if (!stage2 || stage2.clientWidth < 100 || stage2.clientHeight < 50) return;
     tab.fit.fit();
-    const { cols, rows } = tab.term;
-    if (!tab.closed && cols >= 30 && rows >= 6 && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "term:resize", sessionId: tab.info.sessionId, cols, rows }));
-    }
+    const next = resizeIfChanged(tab.lastResize, tab.term.cols, tab.term.rows);
+    if (!next || tab.closed || ws.readyState !== WebSocket.OPEN) return;
+    tab.lastResize = next;
+    ws.send(JSON.stringify({ type: "term:resize", sessionId: tab.info.sessionId, cols: next.cols, rows: next.rows }));
   }
   function measureGrid() {
     const stage2 = document.getElementById("terminal-stage");
@@ -8353,6 +8421,7 @@ ${op.command}`;
       await webApi.closeSession(sessionId);
     } catch {
     }
+    tab.dataSub.dispose();
     tab.term.dispose();
     tab.slot.remove();
     tabs.delete(sessionId);
@@ -8449,12 +8518,12 @@ ${op.command}`;
       pendingConnections.has(hostId),
       intent
     );
-    if (plan.wait) return;
-    if (plan.focusId) {
+    const steps = sessionOpenSteps(plan);
+    if (steps[0] === "focus" && plan.focusId) {
       selectTab(plan.focusId);
       return;
     }
-    if (plan.disposeId) await disposeTab(plan.disposeId, true);
+    if (!steps.includes("connect")) return;
     cancelledHostIds.delete(hostId);
     const host = treeCtrl.hosts.find((item) => item.id === hostId);
     const alias = host?.alias ?? "\u8FDC\u7A0B\u4E3B\u673A";
@@ -8470,6 +8539,17 @@ ${op.command}`;
     renderTabs();
     treeCtrl.render();
     try {
+      if (steps.includes("dispose") && plan.disposeId) {
+        await disposeTab(plan.disposeId, true);
+        if (abort.signal.aborted || pendingConnections.get(hostId)?.cancelled) {
+          pendingConnections.delete(hostId);
+          cancelledHostIds.delete(hostId);
+          renderTabs();
+          treeCtrl.render();
+          if (tabs.size === 0) showIdleEmpty();
+          return;
+        }
+      }
       const grid = measureGrid();
       const info = await webApi.openSession({ kind: "ssh", hostId, cols: grid.cols, rows: grid.rows }, abort.signal);
       if (!info.hostId) info.hostId = hostId;
@@ -8559,6 +8639,10 @@ ${op.command}`;
     const wrapped = previous >= 0 && (forward && findCursor < previous || !forward && findCursor > previous);
     setFindCount(`${findCursor + 1}/${findHits.length}`, wrapped ? "\u5DF2\u4ECE\u53E6\u4E00\u5934\u7EE7\u7EED" : "");
   }
+  function closeFind() {
+    document.getElementById("search-bar")?.classList.add("hidden");
+    if (currentView === "terminal" && activeId) tabs.get(activeId)?.term.focus();
+  }
   function openFind() {
     switchView("terminal");
     const bar = document.getElementById("search-bar");
@@ -8613,9 +8697,18 @@ ${op.command}`;
     document.getElementById("nav-host-badge")?.addEventListener("click", () => {
       if (activeId) switchView("terminal");
     });
+    let localOpenInFlight = false;
     const handleOpenLocal = async () => {
-      const grid = measureGrid();
-      createTermInstance(await webApi.openSession({ kind: "local", cols: grid.cols, rows: grid.rows }));
+      if (!claimSingleFlight(localOpenInFlight)) return;
+      localOpenInFlight = true;
+      try {
+        const grid = measureGrid();
+        createTermInstance(await webApi.openSession({ kind: "local", cols: grid.cols, rows: grid.rows }));
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : "\u672C\u673A\u7EC8\u7AEF\u6CA1\u6709\u6253\u5F00", "error");
+      } finally {
+        localOpenInFlight = false;
+      }
     };
     document.getElementById("new-tab-local")?.addEventListener("click", () => void handleOpenLocal());
     document.getElementById("split-single")?.addEventListener("click", () => setSplitMode("single"));
@@ -8638,7 +8731,7 @@ ${op.command}`;
       moreWrap?.classList.remove("open");
     });
     document.getElementById("search-toggle")?.addEventListener("click", () => openFind());
-    document.getElementById("search-close")?.addEventListener("click", () => document.getElementById("search-bar")?.classList.add("hidden"));
+    document.getElementById("search-close")?.addEventListener("click", () => closeFind());
     document.getElementById("search-prev")?.addEventListener("click", () => findInActiveTerm(document.getElementById("search-input").value, false));
     document.getElementById("search-next")?.addEventListener("click", () => findInActiveTerm(document.getElementById("search-input").value, true));
     document.getElementById("search-input")?.addEventListener("keydown", (event) => {
@@ -8665,10 +8758,8 @@ ${op.command}`;
       syncThemeToggle();
       applyTermTheme();
       sftpCtrl.setShowHidden(s.showHiddenFiles);
-      for (const tab of tabs.values()) {
-        tab.term.options.fontSize = fontSize;
-        tab.fit.fit();
-      }
+      for (const tab of tabs.values()) tab.term.options.fontSize = fontSize;
+      fitVisibleTabs();
       setDlg.close();
     });
     document.getElementById("ctx-copy")?.addEventListener("click", () => {
@@ -8720,8 +8811,13 @@ ${op.command}`;
       }
     });
     window.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") {
-        document.getElementById("terminal-context-menu")?.classList.add("hidden");
+      if (e.key !== "Escape") return;
+      const el = document.activeElement;
+      if (el?.closest("dialog")) return;
+      document.getElementById("terminal-context-menu")?.classList.add("hidden");
+      if (el?.closest("#search-bar")) {
+        e.preventDefault();
+        closeFind();
       }
     });
   }
@@ -8761,10 +8857,9 @@ ${op.command}`;
     if (font) font.value = String(s.fontSize);
     if (interval) interval.value = String(s.monitorIntervalMs);
     if (hidden) hidden.checked = s.showHiddenFiles;
-    for (const tab of tabs.values()) {
-      tab.term.options.fontSize = fontSize;
-      tab.fit.fit();
-    }
+    for (const tab of tabs.values()) tab.term.options.fontSize = fontSize;
+    for (const tab of tabs.values()) tab.lastResize = null;
+    fitVisibleTabs();
   }
   function mcpConfigs(url, token) {
     const cursor = {

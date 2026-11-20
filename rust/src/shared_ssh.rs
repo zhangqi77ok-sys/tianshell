@@ -108,10 +108,41 @@ impl SideSsh {
     }
 }
 
+/// 工作台事件总线的容量。必须是 2 的幂，和 tokio 广播实际使用的长度一致。
+pub(crate) const EVENT_BUS_CAPACITY: usize = 256;
+/// 给指标、目录变更这些控制事件留出的空位。终端字节把队列顶满时，广播会丢掉最旧的一条。
+const EVENT_BUS_HEADROOM: usize = 16;
+const EVENT_BUS_WAIT_SPINS: u32 = 200;
+const EVENT_BUS_WAIT_STEP: Duration = Duration::from_millis(2);
+
+/// 队列离容量只剩预留空位时，终端输出要等一等，而不是把已经读到的字节挤掉。
+pub(crate) fn bus_is_congested(queued: usize, capacity: usize) -> bool {
+    if capacity == 0 {
+        return false;
+    }
+    let limit = capacity.saturating_sub(EVENT_BUS_HEADROOM).max(1);
+    queued >= limit
+}
+
+fn send_when_room(events: &broadcast::Sender<String>, payload: String, capacity: usize) {
+    let mut spins = 0;
+    while bus_is_congested(events.len(), capacity) {
+        if events.receiver_count() == 0 || spins >= EVENT_BUS_WAIT_SPINS {
+            break;
+        }
+        spins += 1;
+        std::thread::sleep(EVENT_BUS_WAIT_STEP);
+    }
+    let _ = events.send(payload);
+}
+
 pub(crate) fn emit_data(events: &broadcast::Sender<String>, session_id: &str, bytes: &[u8]) {
     let data = base64::engine::general_purpose::STANDARD.encode(bytes);
-    let _ = events
-        .send(json!({"type": "term:data", "sessionId": session_id, "data": data}).to_string());
+    send_when_room(
+        events,
+        json!({"type": "term:data", "sessionId": session_id, "data": data}).to_string(),
+        EVENT_BUS_CAPACITY,
+    );
 }
 
 trait ShellIo {
@@ -242,6 +273,7 @@ mod tests {
     use std::sync::atomic::AtomicU64;
     use std::sync::Mutex;
     use std::time::Instant;
+    use tokio::sync::broadcast;
 
     struct FakeShell {
         drains: Arc<AtomicU64>,
@@ -371,5 +403,48 @@ mod tests {
                 "side job ended while checking pty drain"
             );
         });
+    }
+
+    #[test]
+    fn terminal_output_waits_before_the_bus_runs_out_of_room() {
+        assert!(EVENT_BUS_CAPACITY.is_power_of_two());
+        assert!(!bus_is_congested(0, 256));
+        assert!(!bus_is_congested(239, 256));
+        assert!(bus_is_congested(240, 256));
+        assert!(bus_is_congested(256, 256));
+        assert!(bus_is_congested(1, 8));
+        assert!(!bus_is_congested(0, 0));
+    }
+
+    #[test]
+    fn slow_subscriber_still_receives_every_terminal_chunk() {
+        let (tx, mut rx) = broadcast::channel(8);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for index in 0..24 {
+                    send_when_room(&tx, format!("c{index}"), 8);
+                }
+            });
+            let mut got = Vec::new();
+            for _ in 0..24 {
+                match rx.blocking_recv() {
+                    Ok(value) => got.push(value),
+                    Err(err) => panic!("终端字节被丢掉了: {err}"),
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            assert_eq!(got.len(), 24);
+            assert_eq!(got[0], "c0");
+            assert_eq!(got[23], "c23");
+        });
+    }
+
+    #[test]
+    fn publish_does_not_wait_when_nobody_is_listening() {
+        let (tx, rx) = broadcast::channel::<String>(4);
+        drop(rx);
+        let started = Instant::now();
+        send_when_room(&tx, "gone".into(), 4);
+        assert!(started.elapsed() < Duration::from_millis(80));
     }
 }
