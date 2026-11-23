@@ -68,3 +68,7 @@ pkcs1 = { version = "0.7.5", features = ["alloc", "pem"] }
 [profile.test.package.rsa]
 opt-level = 3
 
+[profile.test.package.ssh-key]
+opt-level = 3
+
+

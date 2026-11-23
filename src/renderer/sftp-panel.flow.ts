@@ -258,7 +258,13 @@ export async function runSymlinkOpenFlow(): Promise<void> {
     assert.equal(reads.length, beforeReads);
     assert.ok(namesIn(body).some((node) => node.textContent.includes('inside.txt')));
 
+    const beforeCacheCheck = lists.length;
     await ctrl.load('/');
+    assert.equal(lists.length, beforeCacheCheck, '缓存命中时不应发起新的网络列目录请求');
+    ctrl.invalidateCache('/');
+    await ctrl.load('/', 'notify', true);
+    assert.equal(lists.length, beforeCacheCheck + 1, '强制刷新或缓存失效后应发起新的网络请求');
+
     const plain = namesIn(body).find((node) => node.textContent.includes('plain.txt'));
     assert.ok(plain);
     const listsBeforeFile = lists.length;

@@ -5,16 +5,28 @@ use std::time::Duration;
 use tianshell_core::http_server::{start_workbench, ServerOptions};
 use tianshell_core::VERSION;
 
+fn log_debug(msg: &str) {
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let dir = std::path::PathBuf::from(appdata).join("tianshell");
+        let _ = std::fs::create_dir_all(&dir);
+        let log_path = dir.join("debug.log");
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log_path) {
+            let _ = writeln!(file, "[{}] {}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0), msg);
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    log_debug("=== tianshell main() started ===");
+
     #[cfg(target_os = "windows")]
     unsafe {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
         extern "system" {
-            fn AttachConsole(dwProcessId: u32) -> i32;
             fn SetCurrentProcessExplicitAppUserModelID(AppID: *const u16) -> i32;
         }
-        AttachConsole(0xFFFFFFFF);
         let app_id: Vec<u16> = OsStr::new("TianShell.Workbench.Desktop.0.0.1")
             .encode_wide()
             .chain(std::iter::once(0))
@@ -24,6 +36,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args: Vec<String> = env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h" || arg == "help") {
+        #[cfg(target_os = "windows")]
+        unsafe {
+            extern "system" {
+                fn AttachConsole(dwProcessId: u32) -> i32;
+            }
+            AttachConsole(0xFFFFFFFF);
+        }
         print!("{}", help_text());
         let _ = std::io::Write::flush(&mut std::io::stdout());
         return Ok(());
@@ -34,9 +53,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "windows")]
     if !serve_only {
         if activate_existing_window() {
+            log_debug("activate_existing_window returned true, exiting main");
             return Ok(());
         }
     }
+    log_debug("start_workbench starting");
     let mut port = None;
     let mut index = 0;
     while index < args.len() {
@@ -47,23 +68,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         index += 1;
     }
-    let running = start_workbench(ServerOptions {
+    let running = match start_workbench(ServerOptions {
         data_dir: None,
         port,
         open_browser: false,
-    })?;
+    }) {
+        Ok(r) => {
+            log_debug(&format!("start_workbench OK, url: {}", r.url));
+            r
+        }
+        Err(err) => {
+            log_debug(&format!("start_workbench FAILED: {}", err));
+            return Err(err.into());
+        }
+    };
     eprintln!("{}", banner(&running));
     let use_window = cfg!(feature = "desktop") && !serve_only;
+    log_debug(&format!("use_window: {}", use_window));
     if use_window {
         #[cfg(feature = "desktop")]
         {
             if let Err(err) = run_window(&running.url) {
+                log_debug(&format!("run_window returned Err: {}", err));
                 eprintln!("原生窗口没有打开：{err}");
                 eprintln!("可以改用浏览器打开上面的地址。");
                 if !no_open {
                     open_browser(&running.url);
                 }
                 wait_for_ctrl_c();
+            } else {
+                log_debug("run_window exited Ok(())");
             }
         }
     } else {
@@ -190,7 +224,17 @@ fn run_window(url: &str) -> Result<(), Box<dyn std::error::Error>> {
         window_builder = window_builder.with_undecorated_shadow(true);
     }
 
-    let window = window_builder.build(&event_loop)?;
+    log_debug("run_window: calling window_builder.build");
+    let window = match window_builder.build(&event_loop) {
+        Ok(w) => {
+            log_debug("run_window: window_builder.build SUCCESS");
+            w
+        }
+        Err(e) => {
+            log_debug(&format!("run_window: window_builder.build FAILED: {}", e));
+            return Err(e.into());
+        }
+    };
 
     #[cfg(target_os = "windows")]
     unsafe {
@@ -210,11 +254,12 @@ fn run_window(url: &str) -> Result<(), Box<dyn std::error::Error>> {
         ShowWindow(hwnd, 5);
         SetForegroundWindow(hwnd);
 
-        // 挂载 Windows 系统托盘（右下角后台常驻图标）
-        setup_tray_icon(hwnd);
+        // 挂载 Windows 系统托盘（通过独立后台常驻线程，确保桌面边界完全隔离且稳定运行）
+        spawn_tray_thread(proxy.clone(), url.to_string());
     }
 
-    let _webview = WebViewBuilder::new()
+    log_debug("run_window: calling WebViewBuilder.build");
+    let _webview = match WebViewBuilder::new()
         .with_url(url)
         .with_ipc_handler(move |req| {
             let msg = req.body().trim();
@@ -234,7 +279,18 @@ fn run_window(url: &str) -> Result<(), Box<dyn std::error::Error>> {
                 _ => {}
             }
         })
-        .build(&window)?;
+        .build(&window) {
+        Ok(wv) => {
+            log_debug("run_window: WebViewBuilder.build SUCCESS");
+            wv
+        }
+        Err(e) => {
+            log_debug(&format!("run_window: WebViewBuilder.build FAILED: {}", e));
+            return Err(e.into());
+        }
+    };
+
+    log_debug("WebViewBuilder built successfully, entering event_loop.run");
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -243,6 +299,18 @@ fn run_window(url: &str) -> Result<(), Box<dyn std::error::Error>> {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
+                log_debug("Event: CloseRequested -> Exiting");
+                #[cfg(target_os = "windows")]
+                unsafe {
+                    remove_tray_icon();
+                }
+                *control_flow = ControlFlow::Exit;
+            }
+            Event::WindowEvent {
+                event: WindowEvent::Destroyed,
+                ..
+            } => {
+                log_debug("Event: WindowDestroyed -> Exiting");
                 #[cfg(target_os = "windows")]
                 unsafe {
                     remove_tray_icon();
@@ -295,6 +363,7 @@ fn run_window(url: &str) -> Result<(), Box<dyn std::error::Error>> {
                 let _ = window.drag_window();
             }
             Event::LoopDestroyed => {
+                log_debug("Event: LoopDestroyed");
                 #[cfg(target_os = "windows")]
                 unsafe {
                     remove_tray_icon();
@@ -393,14 +462,155 @@ struct POINT {
 }
 
 #[cfg(target_os = "windows")]
-static OLD_WNDPROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+#[repr(C)]
+struct WNDCLASSW {
+    style: u32,
+    lpfn_wnd_proc: unsafe extern "system" fn(isize, u32, usize, isize) -> isize,
+    cb_cls_extra: i32,
+    cb_wnd_extra: i32,
+    h_instance: isize,
+    h_icon: isize,
+    h_cursor: isize,
+    hbr_background: isize,
+    lpsz_menu_name: *const u16,
+    lpsz_class_name: *const u16,
+}
+
+#[cfg(target_os = "windows")]
+static TRAY_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 #[cfg(target_os = "windows")]
 static GLOBAL_NID: Mutex<Option<NOTIFYICONDATAW>> = Mutex::new(None);
+#[cfg(target_os = "windows")]
+static WM_TASKBAR_CREATED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+#[cfg(target_os = "windows")]
+fn spawn_tray_thread(proxy: tao::event_loop::EventLoopProxy<AppWindowEvent>, url: String) {
+    let _ = std::thread::Builder::new()
+        .name("tianshell-tray".into())
+        .spawn(move || unsafe {
+            tray_thread_main(proxy, url);
+        });
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn tray_thread_main(_proxy: tao::event_loop::EventLoopProxy<AppWindowEvent>, _url: String) {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    extern "system" {
+        fn OpenDesktopW(lpszDesktop: *const u16, dwFlags: u32, fInherit: i32, dwDesiredAccess: u32) -> isize;
+        fn SetThreadDesktop(hDesktop: isize) -> i32;
+        fn CloseDesktop(hDesktop: isize) -> i32;
+        fn GetMessageW(lpMsg: *mut MSG, hWnd: isize, wMsgFilterMin: u32, wMsgFilterMax: u32) -> i32;
+        fn TranslateMessage(lpMsg: *const MSG) -> i32;
+        fn DispatchMessageW(lpMsg: *const MSG) -> isize;
+    }
+
+    #[repr(C)]
+    struct MSG {
+        hwnd: isize,
+        message: u32,
+        wparam: usize,
+        lparam: isize,
+        time: u32,
+        pt_x: i32,
+        pt_y: i32,
+    }
+
+    let desk_name: Vec<u16> = OsStr::new("default").encode_wide().chain(std::iter::once(0)).collect();
+    let h_desk = OpenDesktopW(desk_name.as_ptr(), 0, 0, 0x02000000 /* MAXIMUM_ALLOWED */ | 0x000F01FF);
+    if h_desk != 0 {
+        let _ = SetThreadDesktop(h_desk);
+    }
+
+    let tray_hwnd = create_tray_window();
+    TRAY_HWND.store(tray_hwnd, std::sync::atomic::Ordering::SeqCst);
+    setup_tray_icon(tray_hwnd);
+
+    log_debug("tray_thread_main: entering message loop");
+    let mut msg: MSG = std::mem::zeroed();
+    loop {
+        let ret = GetMessageW(&mut msg, 0, 0, 0);
+        if ret <= 0 {
+            log_debug(&format!("tray_thread_main: GetMessageW returned {}", ret));
+            break;
+        }
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    log_debug("tray_thread_main: message loop exited");
+
+    remove_tray_icon();
+    if h_desk != 0 {
+        CloseDesktop(h_desk);
+    }
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn create_tray_window() -> isize {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    extern "system" {
+        fn RegisterClassW(lpWndClass: *const WNDCLASSW) -> u16;
+        fn CreateWindowExW(
+            dwExStyle: u32,
+            lpClassName: *const u16,
+            lpWindowName: *const u16,
+            dwStyle: u32,
+            X: i32,
+            Y: i32,
+            nWidth: i32,
+            nHeight: i32,
+            hWndParent: isize,
+            hMenu: isize,
+            hInstance: isize,
+            lpParam: *mut std::ffi::c_void,
+        ) -> isize;
+        fn GetModuleHandleW(lpModuleName: *const u16) -> isize;
+    }
+
+    let cls_name: Vec<u16> = OsStr::new("TianShellTrayHiddenClass")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let h_instance = GetModuleHandleW(std::ptr::null());
+    let wc = WNDCLASSW {
+        style: 0,
+        lpfn_wnd_proc: tray_wnd_proc,
+        cb_cls_extra: 0,
+        cb_wnd_extra: 0,
+        h_instance,
+        h_icon: 0,
+        h_cursor: 0,
+        hbr_background: 0,
+        lpsz_menu_name: std::ptr::null(),
+        lpsz_class_name: cls_name.as_ptr(),
+    };
+    RegisterClassW(&wc);
+
+    CreateWindowExW(
+        0,
+        cls_name.as_ptr(),
+        cls_name.as_ptr(),
+        0x80000000 /* WS_POPUP */,
+        0, 0, 0, 0,
+        0, 0, h_instance,
+        std::ptr::null_mut(),
+    )
+}
 
 #[cfg(target_os = "windows")]
 unsafe extern "system" fn tray_wnd_proc(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize {
     extern "system" {
-        fn CallWindowProcW(lpPrevWndFunc: isize, hWnd: isize, Msg: u32, wParam: usize, lParam: isize) -> isize;
+        fn DefWindowProcW(hWnd: isize, Msg: u32, wParam: usize, lParam: isize) -> isize;
+    }
+
+    let taskbar_created = WM_TASKBAR_CREATED.load(std::sync::atomic::Ordering::SeqCst);
+    if taskbar_created != 0 && msg == taskbar_created {
+        setup_tray_icon(hwnd);
+        return 0;
     }
 
     if msg == WM_TRAY_CALLBACK {
@@ -421,8 +631,7 @@ unsafe extern "system" fn tray_wnd_proc(hwnd: isize, msg: u32, wparam: usize, lp
         // WM_DESTROY
         remove_tray_icon();
     }
-    let prev = OLD_WNDPROC.load(std::sync::atomic::Ordering::SeqCst);
-    CallWindowProcW(prev, hwnd, msg, wparam, lparam)
+    DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
 #[cfg(target_os = "windows")]
@@ -499,8 +708,7 @@ unsafe fn setup_tray_icon(hwnd: isize) {
 
     extern "system" {
         fn Shell_NotifyIconW(dwMessage: u32, lpData: *const NOTIFYICONDATAW) -> i32;
-        fn GetWindowLongPtrW(hWnd: isize, nIndex: i32) -> isize;
-        fn SetWindowLongPtrW(hWnd: isize, nIndex: i32, dwNewLong: isize) -> isize;
+        fn RegisterWindowMessageW(lpString: *const u16) -> u32;
     }
 
     let h_icon = get_or_create_app_icon(hwnd);
@@ -529,32 +737,59 @@ unsafe fn setup_tray_icon(hwnd: isize) {
         nid.sz_tip[i] = c;
     }
 
-    let res = Shell_NotifyIconW(NIM_ADD, &nid);
-    if res == 0 {
-        nid.cb_size = 504;
-        let res2 = Shell_NotifyIconW(NIM_ADD, &nid);
-        if res2 == 0 {
-            nid.cb_size = 952;
-            let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+    let mut success = false;
+    for _ in 0..3 {
+        nid.cb_size = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        if Shell_NotifyIconW(NIM_ADD, &nid) != 0 {
+            success = true;
+            break;
         }
+        nid.cb_size = 968; // NOTIFYICONDATAW_V3_SIZE
+        if Shell_NotifyIconW(NIM_ADD, &nid) != 0 {
+            success = true;
+            break;
+        }
+        nid.cb_size = 952; // NOTIFYICONDATAW_V2_SIZE
+        if Shell_NotifyIconW(NIM_ADD, &nid) != 0 {
+            success = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
+
+    if success {
+        nid.u_timeout_or_version = 4; // NOTIFYICON_VERSION_4
+        let _ = Shell_NotifyIconW(0x00000004 /* NIM_SETVERSION */, &nid);
+    }
+
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let dir = std::path::PathBuf::from(appdata).join("tianshell");
+        let _ = std::fs::create_dir_all(&dir);
+        let log_path = dir.join("tray.log");
+        let msg = format!("setup_tray_icon: success={}, cb_size={}, hwnd={:x}, icon={:x}\n", success, nid.cb_size, hwnd, h_icon);
+        let _ = std::fs::write(log_path, msg);
+    }
+
     *GLOBAL_NID.lock().unwrap() = Some(nid);
 
-    // Subclass 窗口过程以接收 WM_TRAY_CALLBACK
-    let prev = GetWindowLongPtrW(hwnd, -4 /* GWLP_WNDPROC */);
-    if prev != 0 {
-        OLD_WNDPROC.store(prev, std::sync::atomic::Ordering::SeqCst);
-        SetWindowLongPtrW(hwnd, -4, tray_wnd_proc as *const () as isize);
-    }
+    let taskbar_name: Vec<u16> = OsStr::new("TaskbarCreated").encode_wide().chain(std::iter::once(0)).collect();
+    let taskbar_msg = RegisterWindowMessageW(taskbar_name.as_ptr());
+    WM_TASKBAR_CREATED.store(taskbar_msg, std::sync::atomic::Ordering::SeqCst);
 }
 
 #[cfg(target_os = "windows")]
 unsafe fn remove_tray_icon() {
+    log_debug("remove_tray_icon called");
     extern "system" {
         fn Shell_NotifyIconW(dwMessage: u32, lpData: *const NOTIFYICONDATAW) -> i32;
+        fn DestroyWindow(hWnd: isize) -> i32;
     }
     if let Some(nid) = GLOBAL_NID.lock().unwrap().take() {
         Shell_NotifyIconW(NIM_DELETE, &nid);
+    }
+    let tray_hwnd = TRAY_HWND.swap(0, std::sync::atomic::Ordering::SeqCst);
+    if tray_hwnd != 0 {
+        DestroyWindow(tray_hwnd);
     }
 }
 
