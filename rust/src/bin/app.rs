@@ -1,9 +1,19 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::env;
 use std::time::Duration;
 use tianshell_core::http_server::{start_workbench, ServerOptions};
 use tianshell_core::VERSION;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        extern "system" {
+            fn AttachConsole(dwProcessId: u32) -> i32;
+        }
+        AttachConsole(0xFFFFFFFF);
+    }
+
     let args: Vec<String> = env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h" || arg == "help") {
         print!("{}", help_text());
