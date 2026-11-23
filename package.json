@@ -1,6 +1,6 @@
 {
   "name": "tianshell",
-  "version": "0.4.0",
+  "version": "0.0.1",
   "description": "TianShell：高性能 Rust 桌面终端工作台与内置零依赖 MCP 服务 (前端界面与静态资源构建工具)",
   "private": true,
   "type": "module",

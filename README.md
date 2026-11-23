@@ -1,4 +1,4 @@
-# TianShell
+# TianShell (v0.0.1)
 
 一个跨平台的 SSH/SFTP 协同工作台，内置标准 **MCP (Model Context Protocol)** 服务。既可以在浏览器里管理多台服务器，也可以让支持 MCP 的助手（TianCode / Cursor / Claude Desktop）连上同一套已保存的主机。
 
@@ -10,6 +10,12 @@
 
 ## 核心特性
 
+- **现代沉浸式桌面工作台 (v0.0.1)**：
+  - **Mac 质感无框暗黑顶栏**：半透明毛玻璃质感与 Windows 原生最小化、最大化、关闭控制按钮无缝融合，支持双击缩放与原生平滑拖拽。
+  - **Tab 绝对居中锁定 (0 抖动)**：顶部「终端 / 文件 / 监控」视图标签采用绝对居中定位，多视图与控制区切换时保持视觉零跳动。
+  - **左侧主机管理对称设计**：等宽紧凑网格（+主机 / +分组 / 隧道）、单行优雅连接胶囊、悬浮触发动作按钮（切换、再开、编辑、删除）。
+  - **常用开发运维动作库**：集成 12 项高频运维命令卡片（容器查看/日志追踪/清理、端口监听排查、进程资源体检、TCP 链路统计等），一键填入终端。
+  - **专属定制「T」字终端徽标**：内嵌 PE 资源与多分辨率 Windows 运行时图标，在窗口与任务栏完美呈现。
 - **Rust 工作台，网页界面仍由这个进程提供**：
   - `cargo run --bin tianshell -- serve` 不启动 Node，也不再打包 Electron。
   - 凭据使用 **AES-256-GCM** 加密存储；Windows 下通过系统原生 **DPAPI (`CurrentUser`, `TS1D` 封装)** 保护 `vault.key`，POSIX 下新的钥匙文件是 `TS1R`（仅当前用户可读），旧的 `TS1D` / Node 写出的 `TS1R` 都能读。
@@ -30,7 +36,28 @@
 - **快捷命令库与暗/亮双主题**：
   - 内置常用 Linux 诊断命令卡片并支持自定义分类 CRUD、暗/亮双主题、终端字号与采样周期持久化配置。
 
-## 环境与运行
+## 下载与安装 (Windows)
+
+从 GitHub [Releases](https://github.com/zhangqi77ok-sys/tianshell/releases) 下载最新安装包：
+- **`TianShell-Setup-0.0.1.exe`**：标准 Windows 单文件安装包（体积仅约 5.8 MB）。
+
+### 安装与更新特性
+1. **自定义安装目录**：支持用户自由选择安装路径，默认安装至 `%LOCALAPPDATA%\Programs\TianShell`（免管理员权限）。
+2. **智能更新识别**：当检测到系统已安装旧版本时，安装向导自动读取注册表锁定已有安装目录，默认原位平滑升级。
+3. **数据安全隔离**：用户的主机配置、分组标签与加密凭据全部存放于 `%APPDATA%\tianshell`，与程序文件物理隔离，版本更新绝不丢失数据。
+4. **标准安全卸载**：可在 Windows「设置 > 应用 > 安装的应用」或控制面板中一键卸载；卸载向导会提示是否保留用户配置数据（默认推荐保留）。
+
+### 开发者打包安装程序
+
+在仓库根目录下执行构建脚本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-installer.ps1
+```
+
+该脚本将自动执行 `cargo build --release` 编译优化二进制，并调用 NSIS 编译生成 `target\TianShell-Setup-0.0.1.exe`。
+
+## 环境与运行 (源码开发)
 
 启动工作台需要 Rust（stable）。已经提交的 `ui/` 可以直接跑，改界面时才需要 Node.js。
 

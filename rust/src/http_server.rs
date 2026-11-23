@@ -1213,6 +1213,12 @@ fn read_ui(name: &str) -> String {
         dirs.push(cwd.join("ui"));
         dirs.push(cwd.join("dist"));
     }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            dirs.push(parent.join("ui"));
+            dirs.push(parent.join("dist"));
+        }
+    }
     for dir in dirs {
         if let Ok(text) = std::fs::read_to_string(dir.join(name)) {
             if !text.is_empty() {
@@ -1239,6 +1245,12 @@ fn read_ui_bytes(name: &str) -> Vec<u8> {
     if let Ok(cwd) = std::env::current_dir() {
         dirs.push(cwd.join("ui"));
         dirs.push(cwd.join("dist"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            dirs.push(parent.join("ui"));
+            dirs.push(parent.join("dist"));
+        }
     }
     for dir in dirs {
         if let Ok(bytes) = std::fs::read(dir.join(name)) {

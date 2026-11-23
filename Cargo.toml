@@ -1,6 +1,6 @@
 [package]
 name = "tianshell"
-version = "0.4.0"
+version = "0.0.1"
 edition = "2021"
 authors = ["zq (zhangqi77ok-sys)"]
 description = "TianShell Rust workbench and MCP server. Serves the web UI and starts Streamable HTTP MCP on 127.0.0.1."
