@@ -54,6 +54,7 @@ button.danger:hover:not(:disabled) { background: rgba(244, 63, 94, 0.1); border-
 
 /* 顶部一体化导航栏 (Global Nav - Mac 质感与沉浸式无边框) */
 .global-nav {
+  position: relative;
   height: 40px;
   background: rgba(20, 24, 32, 0.94);
   backdrop-filter: blur(20px);
@@ -68,7 +69,14 @@ button.danger:hover:not(:disabled) { background: rgba(244, 63, 94, 0.1); border-
   user-select: none;
   -webkit-user-select: none;
 }
-.nav-left { display: flex; align-items: center; gap: 14px; }
+.nav-left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  max-width: calc(50% - 110px);
+  overflow: hidden;
+}
 
 /* 沉浸式窗口三钮 (Window Controls - 右侧符合 Windows 习惯) */
 .window-controls {
@@ -119,16 +127,30 @@ button.danger:hover:not(:disabled) { background: rgba(244, 63, 94, 0.1); border-
   color: var(--ink);
   cursor: pointer;
   transition: all 0.15s ease;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
 }
 .nav-host-badge:hover { background: rgba(255, 255, 255, 0.08); border-color: rgba(255, 255, 255, 0.15); }
+#nav-host-alias { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #64748b; flex-shrink: 0; }
 .status-dot.connected { background: var(--teal); box-shadow: 0 0 6px rgba(16, 185, 129, 0.4); }
 .status-dot.closed { background: #eab308; box-shadow: none; }
 .status-dot.disconnected { background: #64748b; box-shadow: none; }
-.host-ip-dim { font-size: 10px; color: var(--muted); font-family: "JetBrains Mono", Consolas, monospace; }
+.host-ip-dim { font-size: 10px; color: var(--muted); font-family: "JetBrains Mono", Consolas, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* 核心三合一分段导航切换器 (Segmented Control) */
-.nav-center { display: flex; align-items: center; }
+/* 核心三合一分段导航切换器 (Segmented Control) - 绝对居中锚定在视口 50%，消除视图切换时的位移与跳动 */
+.nav-center {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  z-index: 10;
+  pointer-events: auto;
+}
 .segmented-control {
   display: flex;
   background: var(--elevated);
@@ -138,9 +160,10 @@ button.danger:hover:not(:disabled) { background: rgba(244, 63, 94, 0.1); border-
   gap: 2px;
 }
 .seg-item {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 5px;
+  justify-content: center;
+  min-width: 54px;
   padding: 4px 14px;
   font-size: 12px;
   font-weight: 500;
@@ -150,6 +173,8 @@ button.danger:hover:not(:disabled) { background: rgba(244, 63, 94, 0.1); border-
   border: none;
   background: transparent;
   transition: all 0.15s ease;
+  user-select: none;
+  white-space: nowrap;
 }
 .seg-item:hover { color: var(--ink); background: rgba(255, 255, 255, 0.04); }
 .seg-item.active {
@@ -159,12 +184,17 @@ button.danger:hover:not(:disabled) { background: rgba(244, 63, 94, 0.1); border-
   box-shadow: 0 2px 6px rgba(59, 130, 246, 0.35);
 }
 
-.nav-right { display: flex; align-items: center; gap: 8px; }
+.nav-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
 .btn-tool {
   background: var(--elevated);
   border: 1px solid var(--line);
   color: var(--muted);
-  padding: 4px 9px;
+  padding: 3px 8px;
   border-radius: 5px;
   font-size: 11.5px;
   cursor: pointer;
@@ -172,6 +202,7 @@ button.danger:hover:not(:disabled) { background: rgba(244, 63, 94, 0.1); border-
   align-items: center;
   gap: 4px;
   transition: all 0.12s ease;
+  white-space: nowrap;
 }
 .btn-tool:hover { color: var(--ink); background: rgba(255, 255, 255, 0.06); border-color: rgba(255, 255, 255, 0.15); }
 .btn-tool.active { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border-color: rgba(59, 130, 246, 0.4); }
@@ -391,7 +422,7 @@ button.danger:hover:not(:disabled) { background: rgba(244, 63, 94, 0.1); border-
 #nav-more { display: none; }
 .app[data-view="sftp"] .term-only,
 .app[data-view="monitor"] .term-only { display: none !important; }
-@media (max-width: 1180px) {
+@media (max-width: 1400px) {
   #nav-more { display: inline-flex; }
   .nav-more-menu {
     display: none;
@@ -401,12 +432,15 @@ button.danger:hover:not(:disabled) { background: rgba(244, 63, 94, 0.1); border-
     flex-direction: column;
     align-items: stretch;
     min-width: 120px;
-    background: var(--surface);
-    border: 1px solid var(--line);
+    background: rgba(22, 26, 34, 0.96);
+    border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 8px;
     padding: 6px;
+    gap: 4px;
     z-index: 1000;
-    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
   }
   .nav-more-wrap.open .nav-more-menu { display: flex; }
 }
