@@ -27,5 +27,6 @@ pub mod tunnel;
 pub mod types;
 pub mod util;
 pub mod vault;
+pub mod icon_data;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

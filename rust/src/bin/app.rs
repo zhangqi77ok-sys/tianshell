@@ -131,6 +131,15 @@ fn run_window(url: &str) -> Result<(), Box<dyn std::error::Error>> {
         .with_decorations(false)
         .with_resizable(true);
 
+    // 注入应用图标 (Windows 任务栏与 Alt+Tab 即时生效)
+    {
+        use tao::window::Icon;
+        use tianshell_core::icon_data::{ICON_32_HEIGHT, ICON_32_RGBA, ICON_32_WIDTH};
+        if let Ok(icon) = Icon::from_rgba(ICON_32_RGBA.to_vec(), ICON_32_WIDTH, ICON_32_HEIGHT) {
+            window_builder = window_builder.with_window_icon(Some(icon));
+        }
+    }
+
     #[cfg(target_os = "windows")]
     {
         use tao::platform::windows::WindowBuilderExtWindows;

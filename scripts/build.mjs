@@ -21,6 +21,13 @@ export async function build(options = { quiet: false }) {
   });
 
   copyFileSync(path.join(root, 'src/renderer/index.html'), path.join(ui, 'index.html'));
+
+  const assets = path.join(root, 'rust/assets');
+  for (const f of ['icon.ico', 'icon.svg']) {
+    const src = path.join(assets, f);
+    const dest = path.join(ui, f === 'icon.ico' ? 'favicon.ico' : 'favicon.svg');
+    try { copyFileSync(src, dest); } catch {}
+  }
 }
 
 const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

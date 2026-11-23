@@ -210,6 +210,8 @@ fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/", get(index))
         .route("/index.html", get(index))
+        .route("/favicon.ico", get(favicon_ico))
+        .route("/favicon.svg", get(favicon_svg))
         .route("/renderer.js", get(script))
         .route("/renderer.css", get(style))
         .route("/ws", get(ws_upgrade))
@@ -314,6 +316,14 @@ async fn script() -> Response {
 
 async fn style() -> Response {
     ([("content-type", "text/css; charset=utf-8")], read_ui("renderer.css")).into_response()
+}
+
+async fn favicon_ico() -> Response {
+    ([(axum::http::header::CONTENT_TYPE, "image/x-icon")], read_ui_bytes("favicon.ico")).into_response()
+}
+
+async fn favicon_svg() -> Response {
+    ([(axum::http::header::CONTENT_TYPE, "image/svg+xml")], read_ui("favicon.svg")).into_response()
 }
 
 async fn fallback(State(state): State<AppState>, request: axum::extract::Request) -> Response {
@@ -1214,7 +1224,32 @@ fn read_ui(name: &str) -> String {
         "index.html" => include_str!("../../ui/index.html").to_string(),
         "renderer.js" => include_str!("../../ui/renderer.js").to_string(),
         "renderer.css" => include_str!("../../ui/renderer.css").to_string(),
+        "favicon.svg" => include_str!("../../ui/favicon.svg").to_string(),
         _ => String::new(),
+    }
+}
+
+fn read_ui_bytes(name: &str) -> Vec<u8> {
+    let mut dirs = Vec::new();
+    if let Ok(dir) = std::env::var("TIANSHELL_UI") {
+        if !dir.trim().is_empty() {
+            dirs.push(PathBuf::from(dir.trim()));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        dirs.push(cwd.join("ui"));
+        dirs.push(cwd.join("dist"));
+    }
+    for dir in dirs {
+        if let Ok(bytes) = std::fs::read(dir.join(name)) {
+            if !bytes.is_empty() {
+                return bytes;
+            }
+        }
+    }
+    match name {
+        "favicon.ico" => include_bytes!("../../ui/favicon.ico").to_vec(),
+        _ => Vec::new(),
     }
 }
 
