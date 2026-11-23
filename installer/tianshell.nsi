@@ -111,6 +111,7 @@ Section "MainSection" SEC01
     ; 复制核心二进制与静态资源
     File "..\target\release\${PRODUCT_EXE}"
     File "..\target\release\${PRODUCT_MCP_EXE}"
+    File "..\target\release\WebView2Loader.dll"
     File "/oname=icon.ico" "${PRODUCT_ICON}"
 
     ; 复制前端 UI 资源
@@ -175,6 +176,7 @@ Section "Uninstall"
         ; 清理安装目录文件
         Delete "$INSTDIR\${PRODUCT_EXE}"
         Delete "$INSTDIR\${PRODUCT_MCP_EXE}"
+        Delete "$INSTDIR\WebView2Loader.dll"
         Delete "$INSTDIR\icon.ico"
         Delete "$INSTDIR\uninstall.exe"
         RMDir /r "$INSTDIR\ui"

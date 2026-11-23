@@ -16,6 +16,7 @@ cargo build --release
 
 $AppExe = Join-Path $ProjectRoot "target\release\tianshell.exe"
 $McpExe = Join-Path $ProjectRoot "target\release\tianshell-mcp.exe"
+$LoaderDll = Join-Path $ProjectRoot "target\release\WebView2Loader.dll"
 
 if (-not (Test-Path $AppExe)) {
     throw "Build failed: tianshell.exe not found at $AppExe"
@@ -24,8 +25,26 @@ if (-not (Test-Path $McpExe)) {
     throw "Build failed: tianshell-mcp.exe not found at $McpExe"
 }
 
+# 确保 WebView2Loader.dll 存在于 release 目录
+if (-not (Test-Path $LoaderDll)) {
+    $DllCandidates = Get-ChildItem -Path (Join-Path $ProjectRoot "target\release\build\webview2-com-sys") -Filter "WebView2Loader.dll" -Recurse | Where-Object { $_.FullName -like "*\x64\*" }
+    if ($DllCandidates) {
+        Copy-Item $DllCandidates[0].FullName $LoaderDll -Force
+    } else {
+        $DebugDll = Join-Path $ProjectRoot "target\debug\WebView2Loader.dll"
+        if (Test-Path $DebugDll) {
+            Copy-Item $DebugDll $LoaderDll -Force
+        }
+    }
+}
+
+if (-not (Test-Path $LoaderDll)) {
+    throw "Build failed: WebView2Loader.dll not found."
+}
+
 Write-Host "  -> tianshell.exe size: $((Get-Item $AppExe).Length / 1MB | ForEach-Object { '{0:N2} MB' -f $_ })" -ForegroundColor Green
 Write-Host "  -> tianshell-mcp.exe size: $((Get-Item $McpExe).Length / 1MB | ForEach-Object { '{0:N2} MB' -f $_ })" -ForegroundColor Green
+Write-Host "  -> WebView2Loader.dll size: $((Get-Item $LoaderDll).Length / 1KB | ForEach-Object { '{0:N2} KB' -f $_ })" -ForegroundColor Green
 
 # 2. 定位 makensis
 Write-Host "[2/3] Locating NSIS compiler (makensis.exe)..." -ForegroundColor Yellow
