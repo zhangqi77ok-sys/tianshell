@@ -190,6 +190,58 @@ static GLOBAL_PROXY: Mutex<Option<tao::event_loop::EventLoopProxy<AppWindowEvent
 #[cfg(feature = "desktop")]
 #[cfg(target_os = "windows")]
 static GLOBAL_URL: Mutex<String> = Mutex::new(String::new());
+#[cfg(feature = "desktop")]
+#[cfg(target_os = "windows")]
+static GLOBAL_WINDOW_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+#[cfg(target_os = "windows")]
+unsafe fn force_foreground_window(hwnd: isize) {
+    if hwnd == 0 {
+        return;
+    }
+    extern "system" {
+        fn GetForegroundWindow() -> isize;
+        fn GetWindowThreadProcessId(hWnd: isize, lpdwProcessId: *mut u32) -> u32;
+        fn GetCurrentThreadId() -> u32;
+        fn AttachThreadInput(idAttach: u32, idAttachTo: u32, fAttach: i32) -> i32;
+        fn ShowWindow(hWnd: isize, nCmdShow: i32) -> i32;
+        fn SetWindowPos(hWnd: isize, hWndInsertAfter: isize, X: i32, Y: i32, cx: i32, cy: i32, uFlags: u32) -> i32;
+        fn BringWindowToTop(hWnd: isize) -> i32;
+        fn SetForegroundWindow(hWnd: isize) -> i32;
+        fn SwitchToThisWindow(hWnd: isize, fAltTab: i32);
+        fn AllowSetForegroundWindow(dwProcessId: u32) -> i32;
+    }
+
+    let _ = AllowSetForegroundWindow(0xFFFFFFFF); // ASFW_ANY
+
+    let h_fore = GetForegroundWindow();
+    let fore_thread = if h_fore != 0 {
+        GetWindowThreadProcessId(h_fore, std::ptr::null_mut())
+    } else {
+        0
+    };
+    let cur_thread = GetCurrentThreadId();
+
+    if fore_thread != 0 && fore_thread != cur_thread {
+        AttachThreadInput(cur_thread, fore_thread, 1);
+        ShowWindow(hwnd, 9); // SW_RESTORE
+        ShowWindow(hwnd, 5); // SW_SHOW
+        SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0003); // HWND_TOPMOST, SWP_NOMOVE | SWP_NOSIZE
+        SetWindowPos(hwnd, -2, 0, 0, 0, 0, 0x0003); // HWND_NOTOPMOST, SWP_NOMOVE | SWP_NOSIZE
+        BringWindowToTop(hwnd);
+        SetForegroundWindow(hwnd);
+        SwitchToThisWindow(hwnd, 1);
+        AttachThreadInput(cur_thread, fore_thread, 0);
+    } else {
+        ShowWindow(hwnd, 9); // SW_RESTORE
+        ShowWindow(hwnd, 5); // SW_SHOW
+        SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0003);
+        SetWindowPos(hwnd, -2, 0, 0, 0, 0, 0x0003);
+        BringWindowToTop(hwnd);
+        SetForegroundWindow(hwnd);
+        SwitchToThisWindow(hwnd, 1);
+    }
+}
 
 #[cfg(feature = "desktop")]
 fn run_window(url: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -246,23 +298,17 @@ fn run_window(url: &str) -> Result<(), Box<dyn std::error::Error>> {
     unsafe {
         use tao::platform::windows::WindowExtWindows;
         let hwnd = window.hwnd() as isize;
+        GLOBAL_WINDOW_HWND.store(hwnd, std::sync::atomic::Ordering::SeqCst);
         extern "system" {
             fn GetWindowLongW(hWnd: isize, nIndex: i32) -> i32;
             fn SetWindowLongW(hWnd: isize, nIndex: i32, dwNewLong: i32) -> i32;
             fn SetWindowPos(hWnd: isize, hWndInsertAfter: isize, X: i32, Y: i32, cx: i32, cy: i32, uFlags: u32) -> i32;
-            fn ShowWindow(hWnd: isize, nCmdShow: i32) -> i32;
-            fn SetForegroundWindow(hWnd: isize) -> i32;
-            fn SwitchToThisWindow(hWnd: isize, fAltTab: i32);
         }
         let ex_style = GetWindowLongW(hwnd, -20);
         let new_ex_style = (ex_style | 0x00040000) & !0x00000080;
         SetWindowLongW(hwnd, -20, new_ex_style);
         SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0027);
-        ShowWindow(hwnd, 5); // SW_SHOW
-        SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0003);
-        SetWindowPos(hwnd, -2, 0, 0, 0, 0, 0x0003);
-        SetForegroundWindow(hwnd);
-        SwitchToThisWindow(hwnd, 1);
+        force_foreground_window(hwnd);
         log_debug(&format!("run_window: hwnd=0x{:x} configured and shown", hwnd));
 
         // 挂载 Windows 系统托盘（通过独立后台常驻线程，确保桌面边界完全隔离且稳定运行）
@@ -337,18 +383,7 @@ fn run_window(url: &str) -> Result<(), Box<dyn std::error::Error>> {
                 unsafe {
                     use tao::platform::windows::WindowExtWindows;
                     let hwnd = window.hwnd() as isize;
-                    extern "system" {
-                        fn ShowWindow(hWnd: isize, nCmdShow: i32) -> i32;
-                        fn SetWindowPos(hWnd: isize, hWndInsertAfter: isize, X: i32, Y: i32, cx: i32, cy: i32, uFlags: u32) -> i32;
-                        fn SetForegroundWindow(hWnd: isize) -> i32;
-                        fn SwitchToThisWindow(hWnd: isize, fAltTab: i32);
-                    }
-                    ShowWindow(hwnd, 9); // SW_RESTORE
-                    ShowWindow(hwnd, 5); // SW_SHOW
-                    SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0003);
-                    SetWindowPos(hwnd, -2, 0, 0, 0, 0, 0x0003);
-                    SetForegroundWindow(hwnd);
-                    SwitchToThisWindow(hwnd, 1);
+                    force_foreground_window(hwnd);
                     log_debug(&format!("ShowAndFocus: restored hwnd=0x{:x}", hwnd));
                 }
             }
@@ -400,10 +435,6 @@ fn activate_existing_window() -> bool {
 
     extern "system" {
         fn FindWindowW(lpClassName: *const u16, lpWindowName: *const u16) -> isize;
-        fn ShowWindow(hWnd: isize, nCmdShow: i32) -> i32;
-        fn SetWindowPos(hWnd: isize, hWndInsertAfter: isize, X: i32, Y: i32, cx: i32, cy: i32, uFlags: u32) -> i32;
-        fn SetForegroundWindow(hWnd: isize) -> i32;
-        fn SwitchToThisWindow(hWnd: isize, fAltTab: i32);
     }
 
     let titles = [
@@ -420,12 +451,7 @@ fn activate_existing_window() -> bool {
         unsafe {
             let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
             if hwnd != 0 {
-                ShowWindow(hwnd, 9); // SW_RESTORE
-                ShowWindow(hwnd, 5); // SW_SHOW
-                SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0003);
-                SetWindowPos(hwnd, -2, 0, 0, 0, 0, 0x0003);
-                SetForegroundWindow(hwnd);
-                SwitchToThisWindow(hwnd, 1);
+                force_foreground_window(hwnd);
                 return true;
             }
         }
@@ -648,6 +674,10 @@ unsafe extern "system" fn tray_wnd_proc(hwnd: isize, msg: u32, wparam: usize, lp
         if event_code == NIN_SELECT || event_code == NIN_KEYSELECT || event_code == WM_LBUTTONUP || event_code == WM_LBUTTONDBLCLK {
             // 点击/双击/回车激活托盘图标 -> 唤醒置顶窗口
             log_debug("tray_wnd_proc: activation event -> sending ShowAndFocus");
+            let main_hwnd = GLOBAL_WINDOW_HWND.load(std::sync::atomic::Ordering::SeqCst);
+            if main_hwnd != 0 {
+                force_foreground_window(main_hwnd);
+            }
             if let Some(proxy) = GLOBAL_PROXY.lock().unwrap().as_ref() {
                 let _ = proxy.send_event(AppWindowEvent::ShowAndFocus);
             }
@@ -718,6 +748,10 @@ unsafe fn show_tray_popup_menu(hwnd: isize, url: &str) {
     match cmd {
         101 => {
             log_debug("tray_menu: item 101 selected (ShowAndFocus)");
+            let main_hwnd = GLOBAL_WINDOW_HWND.load(std::sync::atomic::Ordering::SeqCst);
+            if main_hwnd != 0 {
+                force_foreground_window(main_hwnd);
+            }
             if let Some(proxy) = GLOBAL_PROXY.lock().unwrap().as_ref() {
                 let _ = proxy.send_event(AppWindowEvent::ShowAndFocus);
             }
