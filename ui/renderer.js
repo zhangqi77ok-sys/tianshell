@@ -6330,6 +6330,7 @@ WARNING: This link could potentially be dangerous`)) {
       if (ui?.error) item.classList.add("failed");
       item.setAttribute("aria-selected", ui?.selected ? "true" : "false");
       const left = document.createElement("div");
+      left.className = "host-info";
       const alias = document.createElement("div");
       alias.className = "host-alias";
       if (isOnline) {
@@ -8063,12 +8064,18 @@ WARNING: This link could potentially be dangerous`)) {
     }
   }
   var BUILTIN_QUICK_OPS = [
-    { icon: "\u{1F4CA}", name: "\u8D1F\u8F7D/\u5185\u5B58", category: "\u8BCA\u65AD", command: "uptime && free -h", isBuiltin: true },
-    { icon: "\u{1F50C}", name: "\u76D1\u542C\u7AEF\u53E3", category: "\u7F51\u7EDC", command: "ss -tulnp 2>/dev/null || netstat -tlpn", isBuiltin: true },
-    { icon: "\u{1F4BE}", name: "\u78C1\u76D8\u7A7A\u95F4", category: "\u78C1\u76D8", command: "df -hT", isBuiltin: true },
-    { icon: "\u26A1", name: "\u5185\u5B58Top10", category: "\u8FDB\u7A0B", command: "ps aux --sort=-%mem | head -n 11", isBuiltin: true },
-    { icon: "\u{1F6A8}", name: "\u7CFB\u7EDF\u9519\u8BEF", category: "\u65E5\u5FD7", command: "journalctl -p 3 -xb -n 30 --no-pager 2>/dev/null || dmesg | tail -n 30", isBuiltin: true },
-    { icon: "\u{1F433}", name: "Docker\u72B6\u6001", category: "\u5BB9\u5668", command: "docker ps -a 2>/dev/null || podman ps -a", isBuiltin: true }
+    { icon: "\u{1F4CA}", name: "\u7CFB\u7EDF\u8D1F\u8F7D\u4E0E\u5185\u5B58", category: "\u7CFB\u7EDF", command: "uptime; free -h", isBuiltin: true },
+    { icon: "\u26A1", name: "CPU \u5360\u7528 Top10", category: "\u6392\u67E5", command: "ps aux --sort=-%cpu | head -n 11", isBuiltin: true },
+    { icon: "\u{1F9E0}", name: "\u5185\u5B58\u5360\u7528 Top10", category: "\u6392\u67E5", command: "ps aux --sort=-%mem | head -n 11", isBuiltin: true },
+    { icon: "\u{1F50C}", name: "\u76D1\u542C\u7AEF\u53E3\u4E0E\u8FDB\u7A0B", category: "\u7F51\u7EDC", command: "ss -tulpn 2>/dev/null || netstat -tulpn", isBuiltin: true },
+    { icon: "\u{1F310}", name: "\u7F51\u5361\u4E0E\u672C\u673AIP", category: "\u7F51\u7EDC", command: "ip -br a 2>/dev/null || ifconfig", isBuiltin: true },
+    { icon: "\u{1F433}", name: "Docker \u5BB9\u5668\u72B6\u6001", category: "\u5BB9\u5668", command: 'docker ps --format "table {{.Names}}	{{.Status}}	{{.Ports}}" 2>/dev/null || podman ps', isBuiltin: true },
+    { icon: "\u{1F4DC}", name: "\u6700\u65B0\u5BB9\u5668\u8FD0\u884C\u65E5\u5FD7", category: "\u5BB9\u5668", command: "docker ps -lq | xargs -r docker logs --tail 40", isBuiltin: true },
+    { icon: "\u{1F4E6}", name: "Git \u5206\u652F\u4E0E\u72B6\u6001", category: "Git", command: 'git status -sb 2>/dev/null || echo "\u975E Git \u4ED3\u5E93"', isBuiltin: true },
+    { icon: "\u{1F33F}", name: "Git \u6700\u8FD1\u63D0\u4EA4\u6811", category: "Git", command: 'git log --oneline -n 10 --graph 2>/dev/null || echo "\u975E Git \u4ED3\u5E93"', isBuiltin: true },
+    { icon: "\u{1F4BE}", name: "\u78C1\u76D8\u6302\u8F7D\u4E0E\u7A7A\u95F4", category: "\u78C1\u76D8", command: "df -hT", isBuiltin: true },
+    { icon: "\u{1F50D}", name: "\u5F53\u524D\u76EE\u5F55\u5927\u6587\u4EF6 Top10", category: "\u78C1\u76D8", command: "du -ah -d 1 . 2>/dev/null | sort -rh | head -n 10", isBuiltin: true },
+    { icon: "\u{1F6A8}", name: "\u7CFB\u7EDF\u6838\u5FC3\u9519\u8BEF\u65E5\u5FD7", category: "\u7CFB\u7EDF", command: "journalctl -p 3 -xb -n 30 --no-pager 2>/dev/null || dmesg | tail -n 30", isBuiltin: true }
   ];
   async function renderQuickOpsBar() {
     const container = document.getElementById("quick-ops-list");
@@ -8101,7 +8108,10 @@ ${op.command}`;
       const nameSpan = document.createElement("span");
       nameSpan.className = "chip-name";
       nameSpan.textContent = op.name;
-      chip.append(iconSpan, nameSpan);
+      const catSpan = document.createElement("span");
+      catSpan.className = "chip-cat-badge";
+      catSpan.textContent = op.category;
+      chip.append(iconSpan, nameSpan, catSpan);
       if (op.id) {
         const del = document.createElement("button");
         del.type = "button";
@@ -8927,10 +8937,36 @@ ${op.command}`;
     document.getElementById("nav-btn-monitor")?.addEventListener("click", () => switchView("monitor"));
     const navOpsToggle = document.getElementById("nav-ops-toggle");
     const navOpsMenu = document.getElementById("nav-ops-menu");
+    const tabSnippets = document.getElementById("ops-tab-snippets");
+    const tabHistory = document.getElementById("ops-tab-history");
+    const viewSnippets = document.getElementById("ops-view-snippets");
+    const viewHistory = document.getElementById("ops-view-history");
+    function switchOpsTab(tab) {
+      tabSnippets?.classList.toggle("active", tab === "snippets");
+      tabSnippets?.setAttribute("aria-selected", tab === "snippets" ? "true" : "false");
+      tabHistory?.classList.toggle("active", tab === "history");
+      tabHistory?.setAttribute("aria-selected", tab === "history" ? "true" : "false");
+      viewSnippets?.classList.toggle("active", tab === "snippets");
+      viewHistory?.classList.toggle("active", tab === "history");
+      if (tab === "history") {
+        void monCtrl.refreshHistory();
+      }
+    }
+    tabSnippets?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      switchOpsTab("snippets");
+    });
+    tabHistory?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      switchOpsTab("history");
+    });
     navOpsToggle?.addEventListener("click", (e) => {
       e.stopPropagation();
       const open = navOpsMenu?.classList.toggle("hidden") === false;
       navOpsToggle.setAttribute("aria-expanded", open ? "true" : "false");
+      if (open && tabHistory?.classList.contains("active")) {
+        void monCtrl.refreshHistory();
+      }
     });
     const moreBtn = document.getElementById("nav-more");
     const moreWrap = moreBtn?.parentElement;
@@ -8953,6 +8989,33 @@ ${op.command}`;
       if (e.key === "Escape" && navOpsMenu && !navOpsMenu.classList.contains("hidden")) {
         navOpsMenu.classList.add("hidden");
       }
+    });
+    document.getElementById("win-min")?.addEventListener("click", () => {
+      window.ipc?.postMessage("min");
+    });
+    document.getElementById("win-max")?.addEventListener("click", () => {
+      window.ipc?.postMessage("max");
+    });
+    document.getElementById("win-close")?.addEventListener("click", () => {
+      window.ipc?.postMessage("close");
+    });
+    const globalNav = document.querySelector(".global-nav");
+    globalNav?.addEventListener("mousedown", (e) => {
+      const mouseEvent = e;
+      if (mouseEvent.button !== 0) return;
+      const target = mouseEvent.target;
+      if (!target) return;
+      if (target.closest("button, input, select, textarea, .segmented-control, .ops-menu, .nav-host-badge, .toggle-chip, .split-controls")) {
+        return;
+      }
+      window.ipc?.postMessage("drag");
+    });
+    globalNav?.addEventListener("dblclick", (e) => {
+      const target = e.target;
+      if (!target || target.closest("button, input, select, textarea, .segmented-control, .ops-menu, .nav-host-badge, .toggle-chip, .split-controls")) {
+        return;
+      }
+      window.ipc?.postMessage("max");
     });
     const sidebar = document.getElementById("sidebar");
     const sideToggleBtn = document.getElementById("sidebar-toggle-btn");

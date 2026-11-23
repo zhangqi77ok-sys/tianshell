@@ -41,18 +41,29 @@
 
         <div class="nav-right">
           <div class="ops-dropdown-wrap">
-            <button id="nav-ops-toggle" class="btn-tool" type="button" title="常用运维快捷指令和命令历史" aria-haspopup="menu" aria-expanded="false">运维</button>
+            <button id="nav-ops-toggle" class="btn-tool" type="button" title="常用运维快捷指令与执行历史" aria-haspopup="menu" aria-expanded="false">⚡ 运维动作 ▾</button>
             <div id="nav-ops-menu" class="ops-menu hidden" role="menu">
-              <div class="ops-section-label">快捷动作</div>
-              <div id="quick-ops-list" class="quick-ops-list"></div>
-              <div class="ops-menu-footer">
-                <button id="add-snippet" class="btn-ghost-sm" type="button" title="新增自定义快捷命令">+ 自定义</button>
+              <!-- 顶部两项 Tab 切换控制器 -->
+              <div class="ops-tabs-header" role="tablist" aria-label="运维分类">
+                <button type="button" id="ops-tab-snippets" class="ops-tab-btn active" role="tab" aria-selected="true" data-ops-tab="snippets">⚡ 快捷指令</button>
+                <button type="button" id="ops-tab-history" class="ops-tab-btn" role="tab" aria-selected="false" data-ops-tab="history">🕒 执行历史</button>
               </div>
-              <div class="ops-section-label">命令历史</div>
-              <input id="history-filter" type="search" placeholder="搜索历史命令" autocomplete="off" aria-label="搜索历史命令" />
-              <div id="history-list" class="history-list"></div>
-              <div class="ops-menu-footer">
-                <button id="history-refresh" class="btn-ghost-sm" type="button">刷新</button>
+
+              <!-- Tab 1 内容：快捷指令视图 -->
+              <div id="ops-view-snippets" class="ops-tab-view active" role="tabpanel" aria-labelledby="ops-tab-snippets">
+                <div id="quick-ops-list" class="quick-ops-list"></div>
+                <div class="ops-menu-footer">
+                  <button id="add-snippet" class="btn-ghost-sm" type="button" title="新增自定义快捷命令">+ 新增快捷指令</button>
+                </div>
+              </div>
+
+              <!-- Tab 2 内容：执行历史视图 -->
+              <div id="ops-view-history" class="ops-tab-view" role="tabpanel" aria-labelledby="ops-tab-history">
+                <div class="ops-history-search-row">
+                  <input id="history-filter" type="search" placeholder="搜索历史命令 (如 docker, top...)" autocomplete="off" aria-label="搜索历史命令" />
+                  <button id="history-refresh" class="btn-ghost-sm" type="button" title="重新获取历史记录">刷新</button>
+                </div>
+                <div id="history-list" class="history-list"></div>
               </div>
             </div>
           </div>
@@ -72,6 +83,12 @@
               <button id="open-settings" class="btn-tool" type="button" title="外观与监控设置">设置</button>
             </div>
           </div>
+          <!-- 沉浸式窗口三钮 (仅桌面端生效，位于右侧符合 Windows 习惯) -->
+          <div class="window-controls" id="window-controls">
+            <button id="win-min" class="win-btn win-min" type="button" title="最小化" aria-label="最小化">─</button>
+            <button id="win-max" class="win-btn win-max" type="button" title="最大化/还原" aria-label="最大化">□</button>
+            <button id="win-close" class="win-btn win-close" type="button" title="关闭" aria-label="关闭">✕</button>
+          </div>
         </div>
       </header>
 
@@ -82,13 +99,13 @@
             <span>主机与连接</span>
             <button id="sidebar-toggle-btn" class="btn-toggle-side" type="button" title="收起/展开左侧栏" aria-label="收起左侧栏">◀</button>
           </div>
-          <div class="side-tools">
+          <div class="side-search-box">
             <input id="filter" type="search" placeholder="搜索主机或标签..." autocomplete="off" />
-            <button id="add-host" class="primary" type="button" title="添加 SSH 主机">+ 主机</button>
           </div>
-          <div class="side-subtools">
-            <button id="add-group" type="button">+ 分组</button>
-            <button id="open-tunnels" type="button">隧道</button>
+          <div class="side-btn-grid">
+            <button id="add-host" class="primary" type="button" title="添加 SSH 主机">+ 主机</button>
+            <button id="add-group" type="button" title="添加主机分组">+ 分组</button>
+            <button id="open-tunnels" type="button" title="端口转发与隧道">隧道</button>
           </div>
           <div id="host-tree" class="host-tree"></div>
           <div class="mcp-strip">

@@ -280,12 +280,18 @@ interface QuickOpItem {
 }
 
 const BUILTIN_QUICK_OPS: QuickOpItem[] = [
-  { icon: '📊', name: '负载/内存', category: '诊断', command: 'uptime && free -h', isBuiltin: true },
-  { icon: '🔌', name: '监听端口', category: '网络', command: 'ss -tulnp 2>/dev/null || netstat -tlpn', isBuiltin: true },
-  { icon: '💾', name: '磁盘空间', category: '磁盘', command: 'df -hT', isBuiltin: true },
-  { icon: '⚡', name: '内存Top10', category: '进程', command: 'ps aux --sort=-%mem | head -n 11', isBuiltin: true },
-  { icon: '🚨', name: '系统错误', category: '日志', command: 'journalctl -p 3 -xb -n 30 --no-pager 2>/dev/null || dmesg | tail -n 30', isBuiltin: true },
-  { icon: '🐳', name: 'Docker状态', category: '容器', command: 'docker ps -a 2>/dev/null || podman ps -a', isBuiltin: true },
+  { icon: '📊', name: '系统负载与内存', category: '系统', command: 'uptime; free -h', isBuiltin: true },
+  { icon: '⚡', name: 'CPU 占用 Top10', category: '排查', command: 'ps aux --sort=-%cpu | head -n 11', isBuiltin: true },
+  { icon: '🧠', name: '内存占用 Top10', category: '排查', command: 'ps aux --sort=-%mem | head -n 11', isBuiltin: true },
+  { icon: '🔌', name: '监听端口与进程', category: '网络', command: 'ss -tulpn 2>/dev/null || netstat -tulpn', isBuiltin: true },
+  { icon: '🌐', name: '网卡与本机IP', category: '网络', command: 'ip -br a 2>/dev/null || ifconfig', isBuiltin: true },
+  { icon: '🐳', name: 'Docker 容器状态', category: '容器', command: 'docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || podman ps', isBuiltin: true },
+  { icon: '📜', name: '最新容器运行日志', category: '容器', command: 'docker ps -lq | xargs -r docker logs --tail 40', isBuiltin: true },
+  { icon: '📦', name: 'Git 分支与状态', category: 'Git', command: 'git status -sb 2>/dev/null || echo "非 Git 仓库"', isBuiltin: true },
+  { icon: '🌿', name: 'Git 最近提交树', category: 'Git', command: 'git log --oneline -n 10 --graph 2>/dev/null || echo "非 Git 仓库"', isBuiltin: true },
+  { icon: '💾', name: '磁盘挂载与空间', category: '磁盘', command: 'df -hT', isBuiltin: true },
+  { icon: '🔍', name: '当前目录大文件 Top10', category: '磁盘', command: 'du -ah -d 1 . 2>/dev/null | sort -rh | head -n 10', isBuiltin: true },
+  { icon: '🚨', name: '系统核心错误日志', category: '系统', command: 'journalctl -p 3 -xb -n 30 --no-pager 2>/dev/null || dmesg | tail -n 30', isBuiltin: true },
 ];
 
 async function renderQuickOpsBar(): Promise<void> {
@@ -325,7 +331,11 @@ async function renderQuickOpsBar(): Promise<void> {
     nameSpan.className = 'chip-name';
     nameSpan.textContent = op.name;
 
-    chip.append(iconSpan, nameSpan);
+    const catSpan = document.createElement('span');
+    catSpan.className = 'chip-cat-badge';
+    catSpan.textContent = op.category;
+
+    chip.append(iconSpan, nameSpan, catSpan);
     if (op.id) {
       const del = document.createElement('button');
       del.type = 'button';
@@ -1233,13 +1243,42 @@ function bindGlobalUi(): void {
   document.getElementById('nav-btn-sftp')?.addEventListener('click', () => switchView('sftp'));
   document.getElementById('nav-btn-monitor')?.addEventListener('click', () => switchView('monitor'));
 
-  // 顶部导航：悬浮运维动作下拉
+  // 顶部导航：悬浮运维动作下拉及 Tab 切换
   const navOpsToggle = document.getElementById('nav-ops-toggle');
   const navOpsMenu = document.getElementById('nav-ops-menu');
+  const tabSnippets = document.getElementById('ops-tab-snippets');
+  const tabHistory = document.getElementById('ops-tab-history');
+  const viewSnippets = document.getElementById('ops-view-snippets');
+  const viewHistory = document.getElementById('ops-view-history');
+
+  function switchOpsTab(tab: 'snippets' | 'history') {
+    tabSnippets?.classList.toggle('active', tab === 'snippets');
+    tabSnippets?.setAttribute('aria-selected', tab === 'snippets' ? 'true' : 'false');
+    tabHistory?.classList.toggle('active', tab === 'history');
+    tabHistory?.setAttribute('aria-selected', tab === 'history' ? 'true' : 'false');
+    viewSnippets?.classList.toggle('active', tab === 'snippets');
+    viewHistory?.classList.toggle('active', tab === 'history');
+    if (tab === 'history') {
+      void monCtrl.refreshHistory();
+    }
+  }
+
+  tabSnippets?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    switchOpsTab('snippets');
+  });
+  tabHistory?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    switchOpsTab('history');
+  });
+
   navOpsToggle?.addEventListener('click', (e) => {
     e.stopPropagation();
     const open = navOpsMenu?.classList.toggle('hidden') === false;
     navOpsToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open && tabHistory?.classList.contains('active')) {
+      void monCtrl.refreshHistory();
+    }
   });
   const moreBtn = document.getElementById('nav-more');
   const moreWrap = moreBtn?.parentElement;
@@ -1262,6 +1301,37 @@ function bindGlobalUi(): void {
     if (e.key === 'Escape' && navOpsMenu && !navOpsMenu.classList.contains('hidden')) {
       navOpsMenu.classList.add('hidden');
     }
+  });
+
+  // 沉浸式窗口三钮与顶栏拖拽 (Wry IPC 桥接)
+  document.getElementById('win-min')?.addEventListener('click', () => {
+    (window as any).ipc?.postMessage('min');
+  });
+  document.getElementById('win-max')?.addEventListener('click', () => {
+    (window as any).ipc?.postMessage('max');
+  });
+  document.getElementById('win-close')?.addEventListener('click', () => {
+    (window as any).ipc?.postMessage('close');
+  });
+
+  const globalNav = document.querySelector('.global-nav');
+  globalNav?.addEventListener('mousedown', (e: Event) => {
+    const mouseEvent = e as MouseEvent;
+    if (mouseEvent.button !== 0) return;
+    const target = mouseEvent.target as HTMLElement | null;
+    if (!target) return;
+    if (target.closest('button, input, select, textarea, .segmented-control, .ops-menu, .nav-host-badge, .toggle-chip, .split-controls')) {
+      return;
+    }
+    (window as any).ipc?.postMessage('drag');
+  });
+
+  globalNav?.addEventListener('dblclick', (e: Event) => {
+    const target = (e as MouseEvent).target as HTMLElement | null;
+    if (!target || target.closest('button, input, select, textarea, .segmented-control, .ops-menu, .nav-host-badge, .toggle-chip, .split-controls')) {
+      return;
+    }
+    (window as any).ipc?.postMessage('max');
   });
 
   // 左侧栏收起 / 展开

@@ -102,6 +102,7 @@ export class HostTreeController {
     if (ui?.error) item.classList.add('failed');
     item.setAttribute('aria-selected', ui?.selected ? 'true' : 'false');
     const left = document.createElement('div');
+    left.className = 'host-info';
     const alias = document.createElement('div');
     alias.className = 'host-alias';
     if (isOnline) {

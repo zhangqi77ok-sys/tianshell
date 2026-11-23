@@ -105,28 +105,84 @@ fn wait_for_ctrl_c() {
 }
 
 #[cfg(feature = "desktop")]
+#[derive(Debug, Clone, Copy)]
+enum AppWindowEvent {
+    Minimize,
+    Maximize,
+    Close,
+    Drag,
+}
+
+#[cfg(feature = "desktop")]
 fn run_window(url: &str) -> Result<(), Box<dyn std::error::Error>> {
     use tao::dpi::LogicalSize;
     use tao::event::{Event, WindowEvent};
-    use tao::event_loop::{ControlFlow, EventLoop};
+    use tao::event_loop::{ControlFlow, EventLoopBuilder};
     use tao::window::WindowBuilder;
     use wry::WebViewBuilder;
 
-    let event_loop = EventLoop::new();
-    let window = WindowBuilder::new()
+    let event_loop = EventLoopBuilder::<AppWindowEvent>::with_user_event().build();
+    let proxy = event_loop.create_proxy();
+
+    let mut window_builder = WindowBuilder::new()
         .with_title("TianShell · 全功能终端工作台")
         .with_inner_size(LogicalSize::new(1280.0, 800.0))
         .with_min_inner_size(LogicalSize::new(960.0, 600.0))
-        .build(&event_loop)?;
-    let _webview = WebViewBuilder::new().with_url(url).build(&window)?;
+        .with_decorations(false)
+        .with_resizable(true);
+
+    #[cfg(target_os = "windows")]
+    {
+        use tao::platform::windows::WindowBuilderExtWindows;
+        window_builder = window_builder.with_undecorated_shadow(true);
+    }
+
+    let window = window_builder.build(&event_loop)?;
+
+    let _webview = WebViewBuilder::new()
+        .with_url(url)
+        .with_ipc_handler(move |req| {
+            let msg = req.body().trim();
+            match msg {
+                "min" => {
+                    let _ = proxy.send_event(AppWindowEvent::Minimize);
+                }
+                "max" => {
+                    let _ = proxy.send_event(AppWindowEvent::Maximize);
+                }
+                "close" => {
+                    let _ = proxy.send_event(AppWindowEvent::Close);
+                }
+                "drag" => {
+                    let _ = proxy.send_event(AppWindowEvent::Drag);
+                }
+                _ => {}
+            }
+        })
+        .build(&window)?;
+
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
-        if let Event::WindowEvent {
-            event: WindowEvent::CloseRequested,
-            ..
-        } = event
-        {
-            *control_flow = ControlFlow::Exit;
+        match event {
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => {
+                *control_flow = ControlFlow::Exit;
+            }
+            Event::UserEvent(AppWindowEvent::Minimize) => {
+                window.set_minimized(true);
+            }
+            Event::UserEvent(AppWindowEvent::Maximize) => {
+                window.set_maximized(!window.is_maximized());
+            }
+            Event::UserEvent(AppWindowEvent::Close) => {
+                *control_flow = ControlFlow::Exit;
+            }
+            Event::UserEvent(AppWindowEvent::Drag) => {
+                let _ = window.drag_window();
+            }
+            _ => {}
         }
     });
 }
