@@ -22,16 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(target_os = "windows")]
     unsafe {
-        use std::ffi::OsStr;
-        use std::os::windows::ffi::OsStrExt;
-        extern "system" {
-            fn SetCurrentProcessExplicitAppUserModelID(AppID: *const u16) -> i32;
-        }
-        let app_id: Vec<u16> = OsStr::new("TianShell.Workbench.Desktop.0.0.1")
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        let _ = SetCurrentProcessExplicitAppUserModelID(app_id.as_ptr());
+        init_windows_session_and_app_id();
     }
 
     let args: Vec<String> = env::args().skip(1).collect();
@@ -140,6 +131,21 @@ fn banner(running: &tianshell_core::http_server::RunningServer) -> String {
     )
 }
 
+#[cfg(target_os = "windows")]
+unsafe fn init_windows_session_and_app_id() {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    extern "system" {
+        fn SetCurrentProcessExplicitAppUserModelID(AppID: *const u16) -> i32;
+    }
+
+    let app_id: Vec<u16> = OsStr::new("TianShell.Workbench.Desktop.0.0.1")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let _ = SetCurrentProcessExplicitAppUserModelID(app_id.as_ptr());
+}
+
 fn open_browser(url: &str) {
     #[cfg(target_os = "windows")]
     let _ = std::process::Command::new("cmd").args(["/c", "start", "", url]).spawn();
@@ -246,13 +252,18 @@ fn run_window(url: &str) -> Result<(), Box<dyn std::error::Error>> {
             fn SetWindowPos(hWnd: isize, hWndInsertAfter: isize, X: i32, Y: i32, cx: i32, cy: i32, uFlags: u32) -> i32;
             fn ShowWindow(hWnd: isize, nCmdShow: i32) -> i32;
             fn SetForegroundWindow(hWnd: isize) -> i32;
+            fn SwitchToThisWindow(hWnd: isize, fAltTab: i32);
         }
         let ex_style = GetWindowLongW(hwnd, -20);
         let new_ex_style = (ex_style | 0x00040000) & !0x00000080;
         SetWindowLongW(hwnd, -20, new_ex_style);
         SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0027);
-        ShowWindow(hwnd, 5);
+        ShowWindow(hwnd, 5); // SW_SHOW
+        SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0003);
+        SetWindowPos(hwnd, -2, 0, 0, 0, 0, 0x0003);
         SetForegroundWindow(hwnd);
+        SwitchToThisWindow(hwnd, 1);
+        log_debug(&format!("run_window: hwnd=0x{:x} configured and shown", hwnd));
 
         // 挂载 Windows 系统托盘（通过独立后台常驻线程，确保桌面边界完全隔离且稳定运行）
         spawn_tray_thread(proxy.clone(), url.to_string());
@@ -318,6 +329,7 @@ fn run_window(url: &str) -> Result<(), Box<dyn std::error::Error>> {
                 *control_flow = ControlFlow::Exit;
             }
             Event::UserEvent(AppWindowEvent::ShowAndFocus) => {
+                log_debug("Event: ShowAndFocus received");
                 window.set_visible(true);
                 window.set_minimized(false);
                 window.set_focus();
@@ -327,10 +339,17 @@ fn run_window(url: &str) -> Result<(), Box<dyn std::error::Error>> {
                     let hwnd = window.hwnd() as isize;
                     extern "system" {
                         fn ShowWindow(hWnd: isize, nCmdShow: i32) -> i32;
+                        fn SetWindowPos(hWnd: isize, hWndInsertAfter: isize, X: i32, Y: i32, cx: i32, cy: i32, uFlags: u32) -> i32;
                         fn SetForegroundWindow(hWnd: isize) -> i32;
+                        fn SwitchToThisWindow(hWnd: isize, fAltTab: i32);
                     }
                     ShowWindow(hwnd, 9); // SW_RESTORE
+                    ShowWindow(hwnd, 5); // SW_SHOW
+                    SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0003);
+                    SetWindowPos(hwnd, -2, 0, 0, 0, 0, 0x0003);
                     SetForegroundWindow(hwnd);
+                    SwitchToThisWindow(hwnd, 1);
+                    log_debug(&format!("ShowAndFocus: restored hwnd=0x{:x}", hwnd));
                 }
             }
             Event::UserEvent(AppWindowEvent::Minimize) => {
@@ -382,9 +401,8 @@ fn activate_existing_window() -> bool {
     extern "system" {
         fn FindWindowW(lpClassName: *const u16, lpWindowName: *const u16) -> isize;
         fn ShowWindow(hWnd: isize, nCmdShow: i32) -> i32;
+        fn SetWindowPos(hWnd: isize, hWndInsertAfter: isize, X: i32, Y: i32, cx: i32, cy: i32, uFlags: u32) -> i32;
         fn SetForegroundWindow(hWnd: isize) -> i32;
-        fn IsIconic(hWnd: isize) -> i32;
-        fn BringWindowToTop(hWnd: isize) -> i32;
         fn SwitchToThisWindow(hWnd: isize, fAltTab: i32);
     }
 
@@ -402,12 +420,10 @@ fn activate_existing_window() -> bool {
         unsafe {
             let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
             if hwnd != 0 {
-                if IsIconic(hwnd) != 0 {
-                    ShowWindow(hwnd, 9); // SW_RESTORE
-                } else {
-                    ShowWindow(hwnd, 5); // SW_SHOW
-                }
-                BringWindowToTop(hwnd);
+                ShowWindow(hwnd, 9); // SW_RESTORE
+                ShowWindow(hwnd, 5); // SW_SHOW
+                SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0003);
+                SetWindowPos(hwnd, -2, 0, 0, 0, 0, 0x0003);
                 SetForegroundWindow(hwnd);
                 SwitchToThisWindow(hwnd, 1);
                 return true;
@@ -433,6 +449,19 @@ const NIF_TIP: u32 = 0x00000004;
 const WM_APP: u32 = 0x8000;
 #[cfg(target_os = "windows")]
 const WM_TRAY_CALLBACK: u32 = WM_APP + 42;
+
+#[cfg(target_os = "windows")]
+const NIN_SELECT: u32 = 0x0400;
+#[cfg(target_os = "windows")]
+const NIN_KEYSELECT: u32 = 0x0401;
+#[cfg(target_os = "windows")]
+const WM_CONTEXTMENU: u32 = 0x007B;
+#[cfg(target_os = "windows")]
+const WM_LBUTTONUP: u32 = 0x0202;
+#[cfg(target_os = "windows")]
+const WM_LBUTTONDBLCLK: u32 = 0x0203;
+#[cfg(target_os = "windows")]
+const WM_RBUTTONUP: u32 = 0x0205;
 
 #[cfg(target_os = "windows")]
 #[repr(C)]
@@ -614,15 +643,18 @@ unsafe extern "system" fn tray_wnd_proc(hwnd: isize, msg: u32, wparam: usize, lp
     }
 
     if msg == WM_TRAY_CALLBACK {
-        let mouse_msg = (lparam & 0xFFFF) as u32;
-        if mouse_msg == 0x0202 || mouse_msg == 0x0203 {
-            // WM_LBUTTONUP (0x0202) or WM_LBUTTONDBLCLK (0x0203) -> 唤醒置顶窗口
+        let event_code = (lparam & 0xFFFF) as u32;
+        log_debug(&format!("tray_wnd_proc: WM_TRAY_CALLBACK event_code=0x{:04x}", event_code));
+        if event_code == NIN_SELECT || event_code == NIN_KEYSELECT || event_code == WM_LBUTTONUP || event_code == WM_LBUTTONDBLCLK {
+            // 点击/双击/回车激活托盘图标 -> 唤醒置顶窗口
+            log_debug("tray_wnd_proc: activation event -> sending ShowAndFocus");
             if let Some(proxy) = GLOBAL_PROXY.lock().unwrap().as_ref() {
                 let _ = proxy.send_event(AppWindowEvent::ShowAndFocus);
             }
             return 0;
-        } else if mouse_msg == 0x0205 {
-            // WM_RBUTTONUP (0x0205) -> 弹出右键托盘菜单
+        } else if event_code == WM_CONTEXTMENU || event_code == WM_RBUTTONUP {
+            // 右键托盘图标 -> 弹出右键托盘菜单
+            log_debug("tray_wnd_proc: context menu event -> showing popup menu");
             let url = GLOBAL_URL.lock().unwrap().clone();
             show_tray_popup_menu(hwnd, &url);
             return 0;
@@ -685,14 +717,17 @@ unsafe fn show_tray_popup_menu(hwnd: isize, url: &str) {
 
     match cmd {
         101 => {
+            log_debug("tray_menu: item 101 selected (ShowAndFocus)");
             if let Some(proxy) = GLOBAL_PROXY.lock().unwrap().as_ref() {
                 let _ = proxy.send_event(AppWindowEvent::ShowAndFocus);
             }
         }
         102 => {
+            log_debug("tray_menu: item 102 selected (open_browser)");
             open_browser(url);
         }
         103 => {
+            log_debug("tray_menu: item 103 selected (Quit)");
             if let Some(proxy) = GLOBAL_PROXY.lock().unwrap().as_ref() {
                 let _ = proxy.send_event(AppWindowEvent::Quit);
             }
