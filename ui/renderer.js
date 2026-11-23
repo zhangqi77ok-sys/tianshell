@@ -6821,7 +6821,7 @@ WARNING: This link could potentially be dangerous`)) {
         return { icon: "\u{1F4C4}", cls: "file-default" };
     }
   }
-  var SftpController = class {
+  var SftpController = class _SftpController {
     currentDir = "/";
     boundSession = null;
     showHidden = false;
@@ -6835,6 +6835,9 @@ WARNING: This link could potentially be dangerous`)) {
     editorClosePending = false;
     listedNames = [];
     haveListing = false;
+    dirCache = /* @__PURE__ */ new Map();
+    static CACHE_TTL_MS = 3e4;
+    static MAX_CACHE_ENTRIES = 100;
     pathInput = document.getElementById("sftp-path");
     breadcrumbsEl = document.getElementById("sftp-breadcrumbs");
     editPathBtn = document.getElementById("sftp-edit-path");
@@ -6873,6 +6876,21 @@ WARNING: This link could potentially be dangerous`)) {
     }
     currentPath() {
       return this.currentDir;
+    }
+    invalidateCache(dirPath) {
+      const sid = this.deps.getActiveSshId();
+      if (!sid) return;
+      if (dirPath) {
+        this.dirCache.delete(this.getCacheKey(sid, dirPath));
+      } else {
+        for (const key of this.dirCache.keys()) {
+          if (key.startsWith(`${sid}:`)) this.dirCache.delete(key);
+        }
+      }
+    }
+    getCacheKey(sid, dirPath) {
+      const norm = dirPath === "/" ? "/" : dirPath.replace(/\/+$/, "");
+      return `${sid}:${norm}`;
     }
     syncSession() {
       const sid = this.deps.getActiveSshId();
@@ -6964,15 +6982,39 @@ WARNING: This link could potentially be dangerous`)) {
      * `defer`：这次失败不提示、不换列表，把结果交回调用方。
      * 符号链接需要后者。`load` 自己接住列表错误后会正常返回，调用方的 catch 接不到。
      */
-    async load(dirPath, failure = "notify") {
+    async load(dirPath, failure = "notify", force = false) {
       const sid = this.deps.getActiveSshId();
       if (!sid) return "idle";
       const requested = dirPath || "/";
+      const cacheKey = this.getCacheKey(sid, requested);
+      const now = Date.now();
+      const cached = !force ? this.dirCache.get(cacheKey) : void 0;
+      if (cached && now - cached.timestamp < _SftpController.CACHE_TTL_MS) {
+        this.currentDir = requested;
+        this.pathInput.value = this.currentDir;
+        this.renderBreadcrumbs(this.currentDir);
+        this.haveListing = true;
+        this.showPathInput(false);
+        this.deps.onDirChange?.(this.currentDir);
+        this.listedNames = cached.list.map((entry) => entry.name);
+        const visible = cached.list.filter((e) => this.showHidden || !e.name.startsWith("."));
+        const sig = `${sid}|${this.currentDir}|${visible.map((e) => `${e.path}:${e.size}:${e.mtimeMs}:${e.mode}`).join("|")}`;
+        if (sig !== this.lastSig) {
+          this.lastSig = sig;
+          this.renderEntries(visible);
+        }
+        return "shown";
+      }
       const ticket = ++this.loadTicket;
       this.tableEl.classList.add("loading");
       try {
         const list = await webApi.sftpList(sid, requested);
         if (!this.listingCurrent(sid, ticket)) return "idle";
+        if (this.dirCache.size >= _SftpController.MAX_CACHE_ENTRIES) {
+          const oldest = this.dirCache.keys().next().value;
+          if (oldest) this.dirCache.delete(oldest);
+        }
+        this.dirCache.set(cacheKey, { list, timestamp: Date.now() });
         this.currentDir = requested;
         this.pathInput.value = this.currentDir;
         this.renderBreadcrumbs(this.currentDir);
@@ -7009,7 +7051,10 @@ WARNING: This link could potentially be dangerous`)) {
     onTransferProgress(task) {
       this.transfers.set(task.id, task);
       this.renderTransfers();
-      if (task.status === "done" && task.direction === "upload") void this.load(this.currentDir);
+      if (task.status === "done" && task.direction === "upload") {
+        this.invalidateCache(this.currentDir);
+        void this.load(this.currentDir, "notify", true);
+      }
     }
     renderEntries(entries) {
       this.bodyEl.textContent = "";
@@ -7170,7 +7215,8 @@ WARNING: This link could potentially be dangerous`)) {
         this.editorOriginalContent = this.editorContent.value;
         this.checkEditorDirty();
         this.deps.toast(`\u5DF2\u5199\u56DE\u8FDC\u7AEF\u6587\u4EF6: ${path.split("/").pop()}`);
-        void this.load(this.currentDir);
+        this.invalidateCache(this.currentDir);
+        void this.load(this.currentDir, "notify", true);
         return true;
       } catch (err) {
         this.deps.toast(err instanceof Error ? `\u4FDD\u5B58\u5931\u8D25: ${err.message}` : "\u4FDD\u5B58\u5931\u8D25", "error");
@@ -7247,7 +7293,8 @@ WARNING: This link could potentially be dangerous`)) {
       const parent = slash <= 0 ? "" : entry.path.slice(0, slash);
       try {
         await webApi.sftpRename(sid, entry.path, `${parent}/${nextName}`);
-        await this.load(parent || "/");
+        this.invalidateCache(parent || "/");
+        await this.load(parent || "/", "notify", true);
       } catch (err) {
         this.deps.toast(err instanceof Error ? err.message : "\u91CD\u547D\u540D\u5931\u8D25", "error");
       }
@@ -7261,7 +7308,8 @@ WARNING: This link could potentially be dangerous`)) {
       if (mode === null) return this.deps.toast("\u6743\u9650\u683C\u5F0F\u65E0\u6548\uFF0C\u8BF7\u7528\u4E09\u4F4D\u6216\u56DB\u4F4D\u516B\u8FDB\u5236", "error");
       try {
         await webApi.sftpChmod(sid, entry.path, mode);
-        await this.load(this.currentDir);
+        this.invalidateCache(this.currentDir);
+        await this.load(this.currentDir, "notify", true);
       } catch (err) {
         this.deps.toast(err instanceof Error ? err.message : "\u4FEE\u6539\u6743\u9650\u5931\u8D25", "error");
       }
@@ -7274,7 +7322,8 @@ WARNING: This link could potentially be dangerous`)) {
       if (!ok) return;
       try {
         await webApi.sftpDelete(sid, entry.path);
-        await this.load(this.currentDir);
+        this.invalidateCache(this.currentDir);
+        await this.load(this.currentDir, "notify", true);
       } catch (err) {
         this.deps.toast(err instanceof Error ? err.message : "\u5220\u9664\u5931\u8D25", "error");
       }
@@ -7366,7 +7415,10 @@ WARNING: This link could potentially be dangerous`)) {
       this.goBtn?.addEventListener("click", () => {
         void this.load(this.pathInput.value);
       });
-      document.getElementById("sftp-refresh")?.addEventListener("click", () => void this.load(this.currentDir));
+      document.getElementById("sftp-refresh")?.addEventListener("click", () => {
+        this.invalidateCache(this.currentDir);
+        void this.load(this.currentDir, "notify", true);
+      });
       document.getElementById("sftp-mkdir")?.addEventListener("click", async () => {
         const sid = this.deps.getActiveSshId();
         const dir = this.currentDir;
@@ -7378,7 +7430,8 @@ WARNING: This link could potentially be dangerous`)) {
         }
         try {
           await webApi.sftpMkdir(sid, `${dir === "/" ? "" : dir}/${name}`);
-          await this.load(dir);
+          this.invalidateCache(dir);
+          await this.load(dir, "notify", true);
         } catch (err) {
           this.deps.toast(err instanceof Error ? err.message : "\u65B0\u5EFA\u76EE\u5F55\u5931\u8D25", "error");
         }

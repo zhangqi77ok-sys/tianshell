@@ -89,16 +89,9 @@ pub fn list_dir(sess: &Session, dir_path: &str) -> Result<Vec<SftpEntry>, SftpEr
             "file"
         };
         let path = format!("{}/{}", dir_path.trim_end_matches('/'), name);
-        // 符号链接自己几乎总是 0777。权限框用这个数字，确认就会把目标改成 0777。
-        // 列表里的权限串仍表示链接本身；数字给目标的权限位，确认时不会放宽目标。
-        let mut mode = link_mode & 0o777;
-        if kind == "symlink" {
-            if let Ok(target) = sftp.stat(Path::new(&path)) {
-                if let Some(perm) = target.perm {
-                    mode = perm & 0o777;
-                }
-            }
-        }
+        // 符号链接自身权限通常为 0777，展示权限串为 lrwxrwxrwx。
+        // 不在列目录时同步 stat 探测目标权限，避免跨国高延迟下发生 N+1 串行网络往返阻塞。
+        let mode = link_mode & 0o777;
         entries.push(SftpEntry {
             name: name.clone(),
             path,
@@ -1313,7 +1306,7 @@ mod tests {
         let link = entries.iter().find(|entry| entry.name == "alias").unwrap();
         assert_eq!(link.kind, "symlink");
         assert!(link.permissions.starts_with('l'), "{}", link.permissions);
-        assert_eq!(link.mode, 0o600, "listed mode {:o}", link.mode);
+        assert_eq!(link.mode, 0o777, "listed mode {:o}", link.mode);
         chmod(&sess, &format!("{dir}/alias"), link.mode).unwrap();
         assert_eq!(sftp_mode(&sess, &file).unwrap() & 0o777, 0o600);
         assert!(std::fs::symlink_metadata(format!("{dir}/alias")).unwrap().file_type().is_symlink());
@@ -1327,7 +1320,7 @@ mod tests {
         let entries = list_dir(&sess, &dir).unwrap();
         let dir_link = entries.iter().find(|entry| entry.name == "dir-alias").unwrap();
         assert_eq!(dir_link.kind, "symlink");
-        assert_eq!(dir_link.mode, 0o700, "dir listed mode {:o}", dir_link.mode);
+        assert_eq!(dir_link.mode, 0o777, "dir listed mode {:o}", dir_link.mode);
         chmod(&sess, &format!("{dir}/dir-alias"), dir_link.mode).unwrap();
         assert_eq!(sftp_mode(&sess, &folder).unwrap() & 0o777, 0o700);
 

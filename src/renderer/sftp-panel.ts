@@ -60,6 +60,9 @@ export class SftpController {
   private editorClosePending = false;
   private listedNames: string[] = [];
   private haveListing = false;
+  private readonly dirCache = new Map<string, { list: SftpEntry[]; timestamp: number }>();
+  private static readonly CACHE_TTL_MS = 30_000;
+  private static readonly MAX_CACHE_ENTRIES = 100;
 
   private readonly pathInput = document.getElementById('sftp-path') as HTMLInputElement;
   private readonly breadcrumbsEl = document.getElementById('sftp-breadcrumbs') as HTMLDivElement;
@@ -102,6 +105,23 @@ export class SftpController {
 
   currentPath(): string {
     return this.currentDir;
+  }
+
+  invalidateCache(dirPath?: string): void {
+    const sid = this.deps.getActiveSshId();
+    if (!sid) return;
+    if (dirPath) {
+      this.dirCache.delete(this.getCacheKey(sid, dirPath));
+    } else {
+      for (const key of this.dirCache.keys()) {
+        if (key.startsWith(`${sid}:`)) this.dirCache.delete(key);
+      }
+    }
+  }
+
+  private getCacheKey(sid: string, dirPath: string): string {
+    const norm = dirPath === '/' ? '/' : dirPath.replace(/\/+$/, '');
+    return `${sid}:${norm}`;
   }
 
   syncSession(): void {
@@ -202,15 +222,41 @@ export class SftpController {
    * `defer`：这次失败不提示、不换列表，把结果交回调用方。
    * 符号链接需要后者。`load` 自己接住列表错误后会正常返回，调用方的 catch 接不到。
    */
-  async load(dirPath: string, failure: 'notify' | 'defer' = 'notify'): Promise<'shown' | 'failed' | 'idle'> {
+  async load(dirPath: string, failure: 'notify' | 'defer' = 'notify', force = false): Promise<'shown' | 'failed' | 'idle'> {
     const sid = this.deps.getActiveSshId();
     if (!sid) return 'idle';
     const requested = dirPath || '/';
+    const cacheKey = this.getCacheKey(sid, requested);
+    const now = Date.now();
+    const cached = !force ? this.dirCache.get(cacheKey) : undefined;
+
+    if (cached && (now - cached.timestamp < SftpController.CACHE_TTL_MS)) {
+      this.currentDir = requested;
+      this.pathInput.value = this.currentDir;
+      this.renderBreadcrumbs(this.currentDir);
+      this.haveListing = true;
+      this.showPathInput(false);
+      this.deps.onDirChange?.(this.currentDir);
+      this.listedNames = cached.list.map((entry) => entry.name);
+      const visible = cached.list.filter((e) => this.showHidden || !e.name.startsWith('.'));
+      const sig = `${sid}|${this.currentDir}|${visible.map((e) => `${e.path}:${e.size}:${e.mtimeMs}:${e.mode}`).join('|')}`;
+      if (sig !== this.lastSig) {
+        this.lastSig = sig;
+        this.renderEntries(visible);
+      }
+      return 'shown';
+    }
+
     const ticket = ++this.loadTicket;
     this.tableEl.classList.add('loading');
     try {
       const list = await webApi.sftpList(sid, requested);
       if (!this.listingCurrent(sid, ticket)) return 'idle';
+      if (this.dirCache.size >= SftpController.MAX_CACHE_ENTRIES) {
+        const oldest = this.dirCache.keys().next().value;
+        if (oldest) this.dirCache.delete(oldest);
+      }
+      this.dirCache.set(cacheKey, { list, timestamp: Date.now() });
       this.currentDir = requested;
       this.pathInput.value = this.currentDir;
       this.renderBreadcrumbs(this.currentDir);
@@ -249,7 +295,10 @@ export class SftpController {
   onTransferProgress(task: TransferTask): void {
     this.transfers.set(task.id, task);
     this.renderTransfers();
-    if (task.status === 'done' && task.direction === 'upload') void this.load(this.currentDir);
+    if (task.status === 'done' && task.direction === 'upload') {
+      this.invalidateCache(this.currentDir);
+      void this.load(this.currentDir, 'notify', true);
+    }
   }
 
   private renderEntries(entries: SftpEntry[]): void {
@@ -423,7 +472,8 @@ export class SftpController {
       this.editorOriginalContent = this.editorContent.value;
       this.checkEditorDirty();
       this.deps.toast(`已写回远端文件: ${path.split('/').pop()}`);
-      void this.load(this.currentDir);
+      this.invalidateCache(this.currentDir);
+      void this.load(this.currentDir, 'notify', true);
       return true;
     } catch (err) {
       this.deps.toast(err instanceof Error ? `保存失败: ${err.message}` : '保存失败', 'error');
@@ -506,7 +556,8 @@ export class SftpController {
     const parent = slash <= 0 ? '' : entry.path.slice(0, slash);
     try {
       await webApi.sftpRename(sid, entry.path, `${parent}/${nextName}`);
-      await this.load(parent || '/');
+      this.invalidateCache(parent || '/');
+      await this.load(parent || '/', 'notify', true);
     } catch (err) {
       this.deps.toast(err instanceof Error ? err.message : '重命名失败', 'error');
     }
@@ -521,7 +572,8 @@ export class SftpController {
     if (mode === null) return this.deps.toast('权限格式无效，请用三位或四位八进制', 'error');
     try {
       await webApi.sftpChmod(sid, entry.path, mode);
-      await this.load(this.currentDir);
+      this.invalidateCache(this.currentDir);
+      await this.load(this.currentDir, 'notify', true);
     } catch (err) {
       this.deps.toast(err instanceof Error ? err.message : '修改权限失败', 'error');
     }
@@ -535,7 +587,8 @@ export class SftpController {
     if (!ok) return;
     try {
       await webApi.sftpDelete(sid, entry.path);
-      await this.load(this.currentDir);
+      this.invalidateCache(this.currentDir);
+      await this.load(this.currentDir, 'notify', true);
     } catch (err) {
       this.deps.toast(err instanceof Error ? err.message : '删除失败', 'error');
     }
@@ -630,7 +683,10 @@ export class SftpController {
     this.goBtn?.addEventListener('click', () => {
       void this.load(this.pathInput.value);
     });
-    document.getElementById('sftp-refresh')?.addEventListener('click', () => void this.load(this.currentDir));
+    document.getElementById('sftp-refresh')?.addEventListener('click', () => {
+      this.invalidateCache(this.currentDir);
+      void this.load(this.currentDir, 'notify', true);
+    });
     document.getElementById('sftp-mkdir')?.addEventListener('click', async () => {
       const sid = this.deps.getActiveSshId();
       const dir = this.currentDir;
@@ -642,7 +698,8 @@ export class SftpController {
       }
       try {
         await webApi.sftpMkdir(sid, `${dir === '/' ? '' : dir}/${name}`);
-        await this.load(dir);
+        this.invalidateCache(dir);
+        await this.load(dir, 'notify', true);
       } catch (err) {
         this.deps.toast(err instanceof Error ? err.message : '新建目录失败', 'error');
       }
