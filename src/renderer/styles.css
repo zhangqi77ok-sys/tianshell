@@ -775,7 +775,18 @@ button.danger:hover:not(:disabled) { background: rgba(244, 63, 94, 0.1); border-
 .split-handle:hover { background: var(--amber); height: 3px; }
 
 .sftp-pane { flex: 0 0 220px; display: flex; flex-direction: column; background: var(--surface); min-height: 0; max-height: 42%; overflow: hidden; position: relative; z-index: 2; border-top: 1px solid var(--line); }
-.sftp-bar { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 4px 12px; border-bottom: 1px solid var(--line); flex: none; background: var(--surface); flex-wrap: wrap; }
+.sftp-bar { display: flex; flex-direction: column; gap: 5px; padding: 6px 12px; border-bottom: 1px solid var(--line); flex: none; background: var(--surface); }
+.sftp-header-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; min-width: 0; }
+.sftp-row-nav { min-height: 26px; }
+.sftp-row-actions { min-height: 26px; border-top: 1px dashed rgba(255, 255, 255, 0.06); padding-top: 4px; }
+.sftp-actions-group { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.sftp-sync-group { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.btn-sftp-action { padding: 2px 8px; font-size: 11px; border-radius: 4px; border: 1px solid var(--line); background: var(--elevated); color: var(--ink); cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; gap: 3px; transition: all 0.12s ease; }
+.btn-sftp-action:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); border-color: rgba(255, 255, 255, 0.18); color: var(--ink); }
+.btn-sftp-action:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-sync-term { color: var(--accent) !important; border-color: rgba(56, 189, 248, 0.3) !important; background: rgba(56, 189, 248, 0.08) !important; font-weight: 500; }
+.btn-sync-term:hover:not(:disabled) { background: rgba(56, 189, 248, 0.16) !important; border-color: var(--accent) !important; }
+
 .sftp-nav { display: flex; align-items: center; gap: 5px; flex: 1; min-width: 0; }
 .sftp-nav input { flex: 1; min-width: 0; font-family: "JetBrains Mono", Consolas, monospace; font-size: 11px; padding: 3px 6px; }
 .sftp-breadcrumbs { display: flex; align-items: center; gap: 3px; flex: 1; min-width: 0; overflow-x: auto; padding: 2px 6px; background: var(--elevated); border: 1px solid var(--line); border-radius: 4px; font-family: "JetBrains Mono", Consolas, monospace; font-size: 11px; scrollbar-width: none; }
@@ -788,6 +799,7 @@ button.danger:hover:not(:disabled) { background: rgba(244, 63, 94, 0.1); border-
 .btn-ghost:hover { opacity: 1; }
 .sftp-ops { display: flex; gap: 5px; flex: none; flex-wrap: wrap; }
 @media (max-width: 860px) {
+  .sftp-header-row { flex-wrap: wrap; }
   .sftp-nav, .sftp-ops { flex: 1 1 100%; }
   .editor-modal-head { flex-wrap: wrap; align-items: flex-start; gap: 8px; }
   .editor-head-actions { flex-wrap: wrap; }

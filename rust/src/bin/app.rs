@@ -8,10 +8,18 @@ use tianshell_core::VERSION;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "windows")]
     unsafe {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
         extern "system" {
             fn AttachConsole(dwProcessId: u32) -> i32;
+            fn SetCurrentProcessExplicitAppUserModelID(AppID: *const u16) -> i32;
         }
         AttachConsole(0xFFFFFFFF);
+        let app_id: Vec<u16> = OsStr::new("TianShell.Workbench.Desktop.0.0.1")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let _ = SetCurrentProcessExplicitAppUserModelID(app_id.as_ptr());
     }
 
     let args: Vec<String> = env::args().skip(1).collect();
@@ -22,6 +30,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let serve_only = args.iter().any(|arg| arg == "serve" || arg == "--serve" || arg == "--no-window");
     let no_open = args.iter().any(|arg| arg == "--no-open");
+
+    #[cfg(target_os = "windows")]
+    if !serve_only {
+        if activate_existing_window() {
+            return Ok(());
+        }
+    }
     let mut port = None;
     let mut index = 0;
     while index < args.len() {
@@ -158,6 +173,25 @@ fn run_window(url: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     let window = window_builder.build(&event_loop)?;
 
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use tao::platform::windows::WindowExtWindows;
+        let hwnd = window.hwnd() as isize;
+        extern "system" {
+            fn GetWindowLongW(hWnd: isize, nIndex: i32) -> i32;
+            fn SetWindowLongW(hWnd: isize, nIndex: i32, dwNewLong: i32) -> i32;
+            fn SetWindowPos(hWnd: isize, hWndInsertAfter: isize, X: i32, Y: i32, cx: i32, cy: i32, uFlags: u32) -> i32;
+            fn ShowWindow(hWnd: isize, nCmdShow: i32) -> i32;
+            fn SetForegroundWindow(hWnd: isize) -> i32;
+        }
+        let ex_style = GetWindowLongW(hwnd, -20);
+        let new_ex_style = (ex_style | 0x00040000) & !0x00000080;
+        SetWindowLongW(hwnd, -20, new_ex_style);
+        SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0027);
+        ShowWindow(hwnd, 5);
+        SetForegroundWindow(hwnd);
+    }
+
     let _webview = WebViewBuilder::new()
         .with_url(url)
         .with_ipc_handler(move |req| {
@@ -204,4 +238,47 @@ fn run_window(url: &str) -> Result<(), Box<dyn std::error::Error>> {
             _ => {}
         }
     });
+}
+
+#[cfg(target_os = "windows")]
+fn activate_existing_window() -> bool {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    extern "system" {
+        fn FindWindowW(lpClassName: *const u16, lpWindowName: *const u16) -> isize;
+        fn ShowWindow(hWnd: isize, nCmdShow: i32) -> i32;
+        fn SetForegroundWindow(hWnd: isize) -> i32;
+        fn IsIconic(hWnd: isize) -> i32;
+        fn BringWindowToTop(hWnd: isize) -> i32;
+        fn SwitchToThisWindow(hWnd: isize, fAltTab: i32);
+    }
+
+    let titles = [
+        "TianShell · 全功能终端工作台",
+        "TianShell",
+    ];
+
+    for t in titles {
+        let title: Vec<u16> = OsStr::new(t)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        unsafe {
+            let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
+            if hwnd != 0 {
+                if IsIconic(hwnd) != 0 {
+                    ShowWindow(hwnd, 9); // SW_RESTORE
+                } else {
+                    ShowWindow(hwnd, 5); // SW_SHOW
+                }
+                BringWindowToTop(hwnd);
+                SetForegroundWindow(hwnd);
+                SwitchToThisWindow(hwnd, 1);
+                return true;
+            }
+        }
+    }
+    false
 }

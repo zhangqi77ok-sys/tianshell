@@ -153,22 +153,28 @@
           <section id="view-sftp" class="workspace-view" role="tabpanel" aria-labelledby="nav-btn-sftp">
             <div class="sftp-pane" id="sftp-pane">
               <div class="sftp-bar">
-                <div class="sftp-nav">
+                <!-- 第一行：会话联动与路径导航条 -->
+                <div class="sftp-header-row sftp-row-nav">
                   <span id="sftp-host-badge" class="badge-host-link" title="当前联动的远程主机会话">未选中主机</span>
-                  <button id="sftp-up" type="button" title="返回上一级目录" disabled>↑ 上级</button>
                   <div id="sftp-breadcrumbs" class="sftp-breadcrumbs" title="点击目录层级直达，双击编辑路径"></div>
                   <input id="sftp-path" type="text" value="/" spellcheck="false" class="hidden" disabled />
                   <button id="sftp-edit-path" type="button" class="btn-ghost" title="手动输入路径" aria-label="手动输入路径" disabled>✏️</button>
                   <button id="sftp-go" type="button" class="hidden" disabled>跳转</button>
+                  <button id="sftp-split-close" type="button" class="btn-tool-sm sftp-split-close hidden" title="关闭右侧分屏，返回全屏终端">✕ 关闭分屏</button>
                 </div>
-                <div class="sftp-ops">
-                  <button id="sftp-sync-term" type="button" class="btn-tool-sm hidden" title="在左侧终端执行 cd 跳转到当前目录">同步至终端</button>
-                  <button id="sftp-mkdir" type="button" disabled>新建目录</button>
-                  <button id="sftp-upload" type="button" disabled>上传文件</button>
-                  <button id="sftp-archive-current" type="button" title="打包下载当前目录为 .tar.gz" disabled>打包下载</button>
-                  <input id="sftp-file-input" type="file" multiple class="hidden" />
-                  <button id="sftp-refresh" type="button" disabled>刷新</button>
-                  <button id="sftp-split-close" type="button" class="btn-tool-sm sftp-split-close hidden" title="关闭右侧分屏，返回全屏终端">✕</button>
+                <!-- 第二行：文件操作工具条 -->
+                <div class="sftp-header-row sftp-row-actions">
+                  <div class="sftp-actions-group">
+                    <button id="sftp-up" type="button" class="btn-sftp-action" title="返回上一级目录" disabled>↑ 上级</button>
+                    <button id="sftp-mkdir" type="button" class="btn-sftp-action" disabled>+ 新建目录</button>
+                    <button id="sftp-upload" type="button" class="btn-sftp-action" disabled>↑ 上传文件</button>
+                    <button id="sftp-archive-current" type="button" class="btn-sftp-action" title="打包下载当前目录为 .tar.gz" disabled>📦 打包下载</button>
+                    <input id="sftp-file-input" type="file" multiple class="hidden" />
+                    <button id="sftp-refresh" type="button" class="btn-sftp-action" disabled>🔄 刷新</button>
+                  </div>
+                  <div class="sftp-sync-group">
+                    <button id="sftp-sync-term" type="button" class="btn-tool-sm btn-sync-term hidden" title="在左侧终端执行 cd 跳转到当前目录">⇥ 同步至终端</button>
+                  </div>
                 </div>
               </div>
               <div id="sftp-table-wrap" class="sftp-table-wrap">
