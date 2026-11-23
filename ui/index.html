@@ -76,6 +76,11 @@
               </div>
             </div>
           </div>
+          <!-- AI 协同实时感知指示胶囊 (AI Activity Pill) -->
+          <div id="ai-activity-pill" class="ai-activity-pill hidden" title="外部 AI 智能体 (TianCode / Cursor) 正在通过 MCP 执行操作">
+            <span class="ai-pill-dot"></span>
+            <span id="ai-activity-text" class="ai-activity-text">AI 操作中</span>
+          </div>
           <div class="split-controls term-only" id="split-controls">
             <button id="split-single" class="btn-split active" type="button" title="单屏展示">单屏</button>
             <button id="split-horizontal" class="btn-split" type="button" title="左右双终端同屏分屏">左右</button>
@@ -368,8 +373,8 @@
 
     <dialog id="mcp-dialog" class="wide-dialog">
       <header class="dialog-head">
-        <h2>把 TianShell 接到 Cursor / Claude Code</h2>
-        <p>工作台已经在本机提供 MCP。保持这个进程开着，把下面的配置贴进客户端。令牌只在这台电脑的界面里显示。</p>
+        <h2>把 TianShell 接到 TianCode / Cursor / Claude Code</h2>
+        <p>工作台已经在本机提供 MCP 服务。保持这个进程开着，智能体即可直接连接并无缝协同。令牌只在这台电脑的界面里显示。</p>
       </header>
       <label>Streamable HTTP<input id="mcp-url" class="mono" readonly /></label>
       <label>本机令牌
@@ -379,11 +384,11 @@
           <button type="button" id="mcp-token-copy">复制</button>
         </span>
       </label>
-      <p class="panel-note">编码工具应先看已打开的标签，再往这个终端里打字。文件读写另开一条 SSH，避免堵住正在输入的会话。命令历史记在本机数据目录里。写入 Cursor 时只改用户目录里的 <span class="mono">mcp.json</span>，并且只替换 <span class="mono">tianshell</span> 这一条。</p>
+      <p class="panel-note">编码工具应先看已打开的标签，再往这个终端里打字。文件读写另开一条 SSH，避免堵住正在输入的会话。命令历史记在本机数据目录里。一键同步时将自动更新 TianCode (~/.tiancode/mcp.json) 与 Cursor (~/.cursor/mcp.json) 中的配置。</p>
       <label>Cursor（<span class="mono">~/.cursor/mcp.json</span> 或项目 <span class="mono">.cursor/mcp.json</span>）<textarea id="mcp-cursor" class="mono mcp-config" readonly></textarea></label>
       <label>Claude Code（<span class="mono">.mcp.json</span>，必须带 type）<textarea id="mcp-claude" class="mono mcp-config" readonly></textarea></label>
       <div class="dialog-actions">
-        <button type="button" id="write-cursor-mcp" class="primary">写入 Cursor 配置</button>
+        <button type="button" id="write-cursor-mcp" class="primary">一键同步 AI 客户端 (TianCode / Cursor)</button>
         <button type="button" id="copy-cursor">复制 Cursor 配置</button>
         <button type="button" id="copy-claude">复制 Claude Code 配置</button>
         <button type="button" id="close-mcp">关闭</button>

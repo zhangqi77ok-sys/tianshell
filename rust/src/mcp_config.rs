@@ -28,6 +28,54 @@ pub fn cursor_user_mcp_path() -> Result<PathBuf, String> {
     Ok(home.join(".cursor").join("mcp.json"))
 }
 
+pub fn tiancode_user_mcp_path() -> Result<PathBuf, String> {
+    let home = dirs::home_dir().ok_or_else(|| "找不到用户主目录，没有写入 TianCode 配置".to_string())?;
+    Ok(home.join(".tiancode").join("mcp.json"))
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct McpClientSyncResult {
+    pub client: String,
+    pub path: String,
+    pub action: String,
+}
+
+pub fn sync_detected_mcp_clients(url: &str, token: &str) -> Vec<McpClientSyncResult> {
+    let mut results = Vec::new();
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return results,
+    };
+
+    // 1. TianCode: 检测 ~/.tiancode 目录
+    let tiancode_dir = home.join(".tiancode");
+    if tiancode_dir.exists() {
+        let path = tiancode_dir.join("mcp.json");
+        if let Ok(action) = write_cursor_mcp_file(&path, url, token) {
+            results.push(McpClientSyncResult {
+                client: "tiancode".into(),
+                path: path.display().to_string(),
+                action: action.as_str().into(),
+            });
+        }
+    }
+
+    // 2. Cursor: 检测 ~/.cursor 目录
+    let cursor_dir = home.join(".cursor");
+    if cursor_dir.exists() {
+        let path = cursor_dir.join("mcp.json");
+        if let Ok(action) = write_cursor_mcp_file(&path, url, token) {
+            results.push(McpClientSyncResult {
+                client: "cursor".into(),
+                path: path.display().to_string(),
+                action: action.as_str().into(),
+            });
+        }
+    }
+
+    results
+}
+
 pub fn write_cursor_mcp_file(path: &Path, url: &str, token: &str) -> Result<CursorMcpAction, String> {
     let existed = path.exists();
     let original = if existed {
@@ -164,5 +212,9 @@ mod tests {
         let err = write_cursor_mcp_file(&broken, URL, TOKEN).unwrap_err();
         assert!(!err.contains(TOKEN));
         assert_eq!(std::fs::read_to_string(&broken).unwrap(), "{not json");
+
+        let tc_path = tiancode_user_mcp_path().unwrap();
+        let s = tc_path.to_string_lossy();
+        assert!(s.ends_with(".tiancode/mcp.json") || s.ends_with(".tiancode\\mcp.json"));
     }
 }

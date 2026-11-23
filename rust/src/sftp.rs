@@ -39,10 +39,18 @@ pub enum SftpError {
     Rejected(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct RemoteText {
     pub content: String,
     pub truncated: bool,
+    #[serde(rename = "totalSize", skip_serializing_if = "Option::is_none")]
+    pub total_size: Option<u64>,
+    #[serde(rename = "offsetUsed", skip_serializing_if = "Option::is_none")]
+    pub offset_used: Option<u64>,
+    #[serde(rename = "bytesRead", skip_serializing_if = "Option::is_none")]
+    pub bytes_read: Option<usize>,
+    #[serde(rename = "hasMore", skip_serializing_if = "Option::is_none")]
+    pub has_more: Option<bool>,
 }
 
 fn format_unix_mode(mode: u32) -> String {
@@ -200,11 +208,39 @@ fn looks_like_private_key(buf: &[u8]) -> bool {
     text.contains("PRIVATE KEY") || text.contains("-----BEGIN")
 }
 
-pub fn read_text_limited(sess: &Session, file_path: &str, max_bytes: usize) -> Result<RemoteText, SftpError> {
-    let limit = max_bytes.min(262_144);
+pub fn read_text_range(
+    sess: &Session,
+    file_path: &str,
+    offset: Option<u64>,
+    tail: bool,
+    max_bytes: usize,
+) -> Result<RemoteText, SftpError> {
+    use std::io::Seek;
+    let limit = max_bytes.clamp(256, 262_144);
     let sftp = sess.sftp()?;
     ensure_regular_file(&sftp, file_path)?;
+
+    // 获取文件元数据得到实际大小，支持瞬间定位 tail
+    let stat = sftp.stat(Path::new(file_path))?;
+    let total_size = stat.size.unwrap_or(0);
+
     let mut file = sftp.open(Path::new(file_path))?;
+
+    // 计算实际偏移位置
+    let start_offset = if tail {
+        if total_size > limit as u64 {
+            total_size - (limit as u64)
+        } else {
+            0
+        }
+    } else {
+        offset.unwrap_or(0).min(total_size)
+    };
+
+    if start_offset > 0 {
+        let _ = file.seek(std::io::SeekFrom::Start(start_offset));
+    }
+
     let mut buf = Vec::new();
     let mut tmp = [0u8; 8192];
     while buf.len() <= limit {
@@ -217,7 +253,21 @@ pub fn read_text_limited(sess: &Session, file_path: &str, max_bytes: usize) -> R
             break;
         }
     }
-    remote_text_preview(&buf, limit)
+
+    let mut preview = remote_text_preview(&buf, limit)?;
+    let actual_read = preview.content.len();
+    let has_more = start_offset + (buf.len().min(limit) as u64) < total_size;
+
+    preview.total_size = Some(total_size);
+    preview.offset_used = Some(start_offset);
+    preview.bytes_read = Some(actual_read);
+    preview.has_more = Some(has_more);
+
+    Ok(preview)
+}
+
+pub fn read_text_limited(sess: &Session, file_path: &str, max_bytes: usize) -> Result<RemoteText, SftpError> {
+    read_text_range(sess, file_path, None, false, max_bytes)
 }
 
 /// 编辑器和 MCP 读文本只接受能原样写回的 UTF-8。
@@ -238,6 +288,10 @@ fn remote_text_preview(buf: &[u8], limit: usize) -> Result<RemoteText, SftpError
     Ok(RemoteText {
         content: text.to_string(),
         truncated,
+        total_size: None,
+        offset_used: None,
+        bytes_read: None,
+        has_more: None,
     })
 }
 

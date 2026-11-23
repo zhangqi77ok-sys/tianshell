@@ -21,7 +21,7 @@ use uuid::Uuid;
 use crate::auth::{authorize, host_is_local, origin_ok};
 use crate::bindings::BindingStore;
 use crate::download_grant::{archive_failure, archive_request, DownloadGrants, DownloadKind};
-use crate::mcp_config::{cursor_user_mcp_path, write_cursor_mcp_file};
+use crate::mcp_config::{cursor_user_mcp_path, sync_detected_mcp_clients, write_cursor_mcp_file};
 use crate::history::CommandHistory;
 use crate::hub::SessionHub;
 use crate::mcp::{tool_names, McpHandler, WorkbenchMcp};
@@ -162,6 +162,15 @@ pub fn start_workbench(options: ServerOptions) -> Result<RunningServer, String> 
                 }
                 let app = router(thread_state.clone());
                 let _ = ready_tx.send(Ok(actual));
+                // 启动时在后台静默同步已检测到的 AI 客户端 (TianCode, Cursor)
+                let sync_url = format!("http://127.0.0.1:{actual}/mcp");
+                let sync_token = thread_state.token.clone();
+                std::thread::Builder::new()
+                    .name("mcp-client-sync".into())
+                    .spawn(move || {
+                        let _ = sync_detected_mcp_clients(&sync_url, &sync_token);
+                    })
+                    .ok();
                 let data_dir = thread_state.data_dir.clone();
                 let hub = thread_state.hub.clone();
                 let tunnels = thread_state.tunnels.clone();
@@ -245,6 +254,7 @@ fn router(state: AppState) -> Router {
         .route("/api/sessions/:id/sftp/download-grant", post(issue_download_grant))
         .route("/api/downloads/:id", get(redeem_download))
         .route("/api/mcp/cursor", post(write_cursor_mcp))
+        .route("/api/mcp/sync-all", post(sync_all_mcp))
         .route("/api/sessions/:id/sftp/upload", post(sftp_upload))
         .route("/api/transfers/:id/cancel", post(cancel_transfer))
         .route("/api/mcp", get(mcp_info))
@@ -1182,21 +1192,30 @@ async fn redeem_download(State(state): State<AppState>, headers: HeaderMap, IdPa
 
 async fn write_cursor_mcp(_auth: Authed, State(state): State<AppState>, Json(body): Json<CursorWriteBody>) -> Response {
     if body.confirm != Some(true) {
-        return json_err(StatusCode::BAD_REQUEST, "需要确认后才会写入 Cursor 配置");
+        return json_err(StatusCode::BAD_REQUEST, "需要确认后才会写入 MCP 配置");
     }
+    let port = state.port.load(Ordering::Relaxed);
+    let url = format!("http://127.0.0.1:{port}/mcp");
+    let synced = sync_detected_mcp_clients(&url, &state.token);
     let path = match cursor_user_mcp_path() {
         Ok(path) => path,
         Err(message) => return json_err(StatusCode::BAD_REQUEST, message),
     };
-    let port = state.port.load(Ordering::Relaxed);
-    let url = format!("http://127.0.0.1:{port}/mcp");
     match write_cursor_mcp_file(&path, &url, &state.token) {
         Ok(action) => json_ok(json!({
             "action": action.as_str(),
-            "path": path.display().to_string()
+            "path": path.display().to_string(),
+            "synced": synced
         })),
         Err(message) => json_err(StatusCode::BAD_REQUEST, message),
     }
+}
+
+async fn sync_all_mcp(_auth: Authed, State(state): State<AppState>) -> Response {
+    let port = state.port.load(Ordering::Relaxed);
+    let url = format!("http://127.0.0.1:{port}/mcp");
+    let synced = sync_detected_mcp_clients(&url, &state.token);
+    json_ok(json!({ "synced": synced }))
 }
 
 fn render_index(token: &str) -> String {

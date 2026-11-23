@@ -294,6 +294,38 @@ function handleWsEvent(msg: Record<string, unknown>): void {
     void refreshLive(String(msg.kind || 'disk'));
   } else if (type === 'transfer:progress') {
     sftpCtrl.onTransferProgress(msg.task as TransferTask);
+  } else if (type === 'mcp:activity') {
+    handleMcpActivity(msg);
+  }
+}
+
+let aiPillTimer: number | null = null;
+function handleMcpActivity(msg: Record<string, unknown>): void {
+  const tool = String(msg.tool || 'command');
+  const host = String(msg.host || '');
+  const sessionId = String(msg.sessionId || '');
+  const pill = document.getElementById('ai-activity-pill');
+  const textSpan = document.getElementById('ai-activity-text');
+  if (pill && textSpan) {
+    const hostHint = host ? ` · ${host}` : '';
+    textSpan.textContent = `🤖 AI: [${tool}]${hostHint}`;
+    pill.classList.remove('hidden');
+    if (aiPillTimer !== null) {
+      window.clearTimeout(aiPillTimer);
+    }
+    aiPillTimer = window.setTimeout(() => {
+      pill.classList.add('hidden');
+      aiPillTimer = null;
+    }, 3500);
+  }
+  if (sessionId) {
+    const tabElem = document.querySelector(`.tab[data-id="${sessionId}"]`);
+    if (tabElem) {
+      tabElem.classList.add('ai-active');
+      window.setTimeout(() => {
+        tabElem.classList.remove('ai-active');
+      }, 3500);
+    }
   }
 }
 
@@ -1666,20 +1698,22 @@ async function copyText(text: string, ok: string): Promise<void> {
 async function writeCursorMcp(): Promise<void> {
   try {
     const ok = await confirmAction(
-      '写入 Cursor 用户配置？',
-      '只更新用户目录下 .cursor/mcp.json 里的 mcpServers.tianshell。其他 MCP 服务器保持原样。这一条会带上当前工作台的地址和本机访问令牌。项目里的配置不会改。写入后这个文件只有当前用户能读。',
-      '写入',
+      '一键同步 AI 客户端 MCP 配置？',
+      '将自动检测并同步更新用户目录下的 TianCode (~/.tiancode/mcp.json) 与 Cursor (~/.cursor/mcp.json) 配置。其他 MCP 服务保持原样，写入后仅当前用户可读。',
+      '立即同步',
     );
     if (!ok) return;
     const result = await webApi.writeCursorMcp();
-    if (result.action === 'unchanged') {
-      showToast('Cursor 里的 tianshell 已经是当前工作台');
+    const synced = (result as { synced?: Array<{ client: string; action: string }> }).synced;
+    if (synced && synced.length > 0) {
+      const summary = synced.map((s) => `${s.client}: ${s.action === 'unchanged' ? '最新' : '已同步'}`).join('，');
+      showToast(`已完成 AI 客户端同步 (${summary})`);
       return;
     }
-    const verb = result.action === 'created' ? '已创建' : '已更新';
+    const verb = result.action === 'created' ? '已创建' : result.action === 'updated' ? '已更新' : '已是最新';
     showToast(`${verb} ${result.path}`);
   } catch (err) {
-    showToast(err instanceof Error ? err.message : '写入 Cursor 配置失败', 'error');
+    showToast(err instanceof Error ? err.message : '写入 MCP 配置失败', 'error');
   }
 }
 

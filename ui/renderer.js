@@ -8234,6 +8234,37 @@ WARNING: This link could potentially be dangerous`)) {
       void refreshLive(String(msg.kind || "disk"));
     } else if (type === "transfer:progress") {
       sftpCtrl.onTransferProgress(msg.task);
+    } else if (type === "mcp:activity") {
+      handleMcpActivity(msg);
+    }
+  }
+  var aiPillTimer = null;
+  function handleMcpActivity(msg) {
+    const tool = String(msg.tool || "command");
+    const host = String(msg.host || "");
+    const sessionId = String(msg.sessionId || "");
+    const pill = document.getElementById("ai-activity-pill");
+    const textSpan = document.getElementById("ai-activity-text");
+    if (pill && textSpan) {
+      const hostHint = host ? ` \xB7 ${host}` : "";
+      textSpan.textContent = `\u{1F916} AI: [${tool}]${hostHint}`;
+      pill.classList.remove("hidden");
+      if (aiPillTimer !== null) {
+        window.clearTimeout(aiPillTimer);
+      }
+      aiPillTimer = window.setTimeout(() => {
+        pill.classList.add("hidden");
+        aiPillTimer = null;
+      }, 3500);
+    }
+    if (sessionId) {
+      const tabElem = document.querySelector(`.tab[data-id="${sessionId}"]`);
+      if (tabElem) {
+        tabElem.classList.add("ai-active");
+        window.setTimeout(() => {
+          tabElem.classList.remove("ai-active");
+        }, 3500);
+      }
     }
   }
   var BUILTIN_QUICK_OPS = [
@@ -9461,20 +9492,22 @@ ${op.command}`;
   async function writeCursorMcp() {
     try {
       const ok = await confirmAction(
-        "\u5199\u5165 Cursor \u7528\u6237\u914D\u7F6E\uFF1F",
-        "\u53EA\u66F4\u65B0\u7528\u6237\u76EE\u5F55\u4E0B .cursor/mcp.json \u91CC\u7684 mcpServers.tianshell\u3002\u5176\u4ED6 MCP \u670D\u52A1\u5668\u4FDD\u6301\u539F\u6837\u3002\u8FD9\u4E00\u6761\u4F1A\u5E26\u4E0A\u5F53\u524D\u5DE5\u4F5C\u53F0\u7684\u5730\u5740\u548C\u672C\u673A\u8BBF\u95EE\u4EE4\u724C\u3002\u9879\u76EE\u91CC\u7684\u914D\u7F6E\u4E0D\u4F1A\u6539\u3002\u5199\u5165\u540E\u8FD9\u4E2A\u6587\u4EF6\u53EA\u6709\u5F53\u524D\u7528\u6237\u80FD\u8BFB\u3002",
-        "\u5199\u5165"
+        "\u4E00\u952E\u540C\u6B65 AI \u5BA2\u6237\u7AEF MCP \u914D\u7F6E\uFF1F",
+        "\u5C06\u81EA\u52A8\u68C0\u6D4B\u5E76\u540C\u6B65\u66F4\u65B0\u7528\u6237\u76EE\u5F55\u4E0B\u7684 TianCode (~/.tiancode/mcp.json) \u4E0E Cursor (~/.cursor/mcp.json) \u914D\u7F6E\u3002\u5176\u4ED6 MCP \u670D\u52A1\u4FDD\u6301\u539F\u6837\uFF0C\u5199\u5165\u540E\u4EC5\u5F53\u524D\u7528\u6237\u53EF\u8BFB\u3002",
+        "\u7ACB\u5373\u540C\u6B65"
       );
       if (!ok) return;
       const result = await webApi.writeCursorMcp();
-      if (result.action === "unchanged") {
-        showToast("Cursor \u91CC\u7684 tianshell \u5DF2\u7ECF\u662F\u5F53\u524D\u5DE5\u4F5C\u53F0");
+      const synced = result.synced;
+      if (synced && synced.length > 0) {
+        const summary = synced.map((s) => `${s.client}: ${s.action === "unchanged" ? "\u6700\u65B0" : "\u5DF2\u540C\u6B65"}`).join("\uFF0C");
+        showToast(`\u5DF2\u5B8C\u6210 AI \u5BA2\u6237\u7AEF\u540C\u6B65 (${summary})`);
         return;
       }
-      const verb = result.action === "created" ? "\u5DF2\u521B\u5EFA" : "\u5DF2\u66F4\u65B0";
+      const verb = result.action === "created" ? "\u5DF2\u521B\u5EFA" : result.action === "updated" ? "\u5DF2\u66F4\u65B0" : "\u5DF2\u662F\u6700\u65B0";
       showToast(`${verb} ${result.path}`);
     } catch (err) {
-      showToast(err instanceof Error ? err.message : "\u5199\u5165 Cursor \u914D\u7F6E\u5931\u8D25", "error");
+      showToast(err instanceof Error ? err.message : "\u5199\u5165 MCP \u914D\u7F6E\u5931\u8D25", "error");
     }
   }
   async function showMcpDialog() {

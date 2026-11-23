@@ -10,7 +10,7 @@ use crate::monitor::sample_remote_metrics;
 use crate::paths::resolve_data_dir;
 use crate::redact::redact_secrets;
 use crate::runtime::MCP_PROTOCOL;
-use crate::sftp::{list_dir, mkdir, read_text_limited, write_text};
+use crate::sftp::{list_dir, mkdir, read_text_range, write_text};
 use crate::ssh::{connect_chain, resolve_targets};
 use crate::state::lock;
 use crate::store::{HostStore, SettingsStore, SnippetStore, TunnelStore};
@@ -268,12 +268,14 @@ impl McpHandler {
                     },
                     "required": ["host", "path"]
                 }), json!(["host", "path"])),
-                tool_def("sftp_read", "通过 SFTP 只读读取配置/日志等 UTF-8 文本文件（上限 256KB）。Read a remote UTF-8 text file.", json!({
+                tool_def("sftp_read", "通过 SFTP 只读读取配置/日志等 UTF-8 文本文件。支持 tail 模式查看大日志尾部最新内容，或 offset 模式分片读取。Read remote UTF-8 text file with tail/offset support.", json!({
                     "type": "object",
                     "properties": {
                         "host": {"type": "string", "description": "主机 id 或别名"},
                         "path": {"type": "string", "description": "远端文件路径"},
-                        "max_bytes": {"type": "integer", "description": "最大读取字节数，默认 131072，最大 262144"}
+                        "offset": {"type": "integer", "description": "可选起始字节偏移量 (从 0 开始)"},
+                        "tail": {"type": "boolean", "description": "可选。设为 true 时直接从文件末尾向前截取最新日志内容，无需耗费带宽传输全量大文件"},
+                        "max_bytes": {"type": "integer", "description": "单次读取字节数，默认 131072 (128KB)，最大 262144 (256KB)"}
                     },
                     "required": ["host", "path"]
                 }), json!(["host", "path"])),
@@ -300,6 +302,27 @@ impl McpHandler {
     fn handle_tools_call(&self, params: Value) -> Result<Value, String> {
         let name = params.get("name").and_then(|v| v.as_str()).ok_or("缺少工具名称")?;
         let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+
+        // 桌面端协同感知：向工作台前端广播外部 AI 智能体的 MCP 调用动作
+        if let Some(hub) = &self.terminals {
+            let host = args.get("host").and_then(|v| v.as_str()).unwrap_or("");
+            let session_id = args.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
+            let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            hub.broadcast(json!({
+                "type": "mcp:activity",
+                "tool": name,
+                "host": host,
+                "sessionId": session_id,
+                "detail": if !command.is_empty() { command } else { path },
+                "timestamp": ts,
+            }));
+        }
+
         match name {
             "list_hosts" => self.tool_list_hosts(),
             "list_groups" => self.tool_list_groups(),
@@ -443,10 +466,13 @@ impl McpHandler {
         let host = args.get("host").and_then(|v| v.as_str()).ok_or("缺少 host 参数")?;
         let path = args.get("path").and_then(|v| v.as_str()).ok_or("缺少 path 参数")?;
         let max_bytes = args.get("max_bytes").and_then(|v| v.as_u64()).unwrap_or(131_072).clamp(256, 262_144) as usize;
+        let offset = args.get("offset").and_then(|v| v.as_u64());
+        let tail = args.get("tail").and_then(|v| v.as_bool()).unwrap_or(false);
         let session = self.connect(host)?;
-        let text = read_text_limited(&session, path, max_bytes).map_err(|err| format!("SFTP 读文件错误: {err}"))?;
+        let text = read_text_range(&session, path, offset, tail, max_bytes)
+            .map_err(|err| format!("SFTP 读文件错误: {err}"))?;
         Ok(tool_text(
-            serde_json::to_string_pretty(&json!({"content": text.content, "truncated": text.truncated})).unwrap_or_default(),
+            serde_json::to_string_pretty(&text).unwrap_or_default(),
             false,
         ))
     }

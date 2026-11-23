@@ -595,6 +595,59 @@ button.danger:hover:not(:disabled) { background: rgba(244, 63, 94, 0.1); border-
 .bento-sub-card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; min-height: 160px; max-height: 280px; overflow-y: auto; }
 .bento-sub-card .section-head { margin-bottom: 8px; }
 
+/* AI Activity Pill in Global Navigation */
+.ai-activity-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 9999px;
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  color: #34d399;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.2);
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  user-select: none;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.ai-activity-pill.hidden {
+  display: none !important;
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+.ai-pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: #10b981;
+  box-shadow: 0 0 6px #10b981;
+  animation: ai-pulse 1.2s infinite ease-in-out;
+}
+
+@keyframes ai-pulse {
+  0%, 100% { transform: scale(0.9); opacity: 0.8; }
+  50% { transform: scale(1.3); opacity: 1; }
+}
+
+/* Tab indicator when AI interacts with a specific tab */
+.tab.ai-active {
+  border-color: rgba(16, 185, 129, 0.7) !important;
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.3) inset;
+}
+
+.tab.ai-active::after {
+  content: ' 🤖';
+  font-size: 10px;
+  margin-left: 2px;
+  animation: ai-pulse 1.2s infinite ease-in-out;
+}
+
 .split-controls { display: flex; gap: 2px; background: rgba(255, 255, 255, 0.03); padding: 2px; border-radius: 5px; border: 1px solid var(--line); }
 .btn-split { background: transparent; border: none; color: var(--muted); padding: 2px 7px; font-size: 11px; border-radius: 3px; cursor: pointer; transition: all 0.15s ease; }
 .btn-split:hover { color: var(--ink); background: rgba(255, 255, 255, 0.06); }
