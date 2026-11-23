@@ -6198,6 +6198,7 @@ WARNING: This link could potentially be dangerous`)) {
       body: JSON.stringify({ oldPath, newPath })
     }),
     sftpDelete: (sid, targetPath) => apiRequest(`/api/sessions/${encodeURIComponent(sid)}/sftp/delete`, { method: "POST", body: JSON.stringify({ path: targetPath }) }),
+    sftpStat: (sid, targetPath) => apiRequest(`/api/sessions/${encodeURIComponent(sid)}/sftp/stat?path=${encodeURIComponent(targetPath)}`),
     sftpChmod: (sid, targetPath, mode) => apiRequest(`/api/sessions/${encodeURIComponent(sid)}/sftp/chmod`, {
       method: "POST",
       body: JSON.stringify({ path: targetPath, mode })
@@ -7302,7 +7303,15 @@ WARNING: This link could potentially be dangerous`)) {
     async chmodItem(entry) {
       const sid = this.deps.getActiveSshId();
       if (!sid) return;
-      const raw = await this.deps.promptText(chmodPrompt(entry.kind), entry.mode.toString(8));
+      let initialMode = entry.mode;
+      if (entry.kind === "symlink") {
+        try {
+          const res = await webApi.sftpStat(sid, entry.path);
+          initialMode = res.mode;
+        } catch {
+        }
+      }
+      const raw = await this.deps.promptText(chmodPrompt(entry.kind), initialMode.toString(8));
       if (!raw) return;
       const mode = parseOctalMode(raw);
       if (mode === null) return this.deps.toast("\u6743\u9650\u683C\u5F0F\u65E0\u6548\uFF0C\u8BF7\u7528\u4E09\u4F4D\u6216\u56DB\u4F4D\u516B\u8FDB\u5236", "error");

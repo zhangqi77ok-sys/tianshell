@@ -268,6 +268,12 @@ pub fn rename(sess: &Session, old_path: &str, new_path: &str) -> Result<(), Sftp
     Ok(())
 }
 
+pub fn stat_target_mode(sess: &Session, file_path: &str) -> Result<u32, SftpError> {
+    let sftp = sess.sftp()?;
+    let stat = sftp.stat(Path::new(file_path))?;
+    Ok(stat.perm.unwrap_or(0) & 0o777)
+}
+
 pub fn chmod(sess: &Session, file_path: &str, mode: u32) -> Result<(), SftpError> {
     let sftp = sess.sftp()?;
     // `stat` 穿过符号链接。目标不存在就停下来，不会新建文件。

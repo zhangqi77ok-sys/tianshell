@@ -15,14 +15,33 @@ const MAX_LOG: usize = 180_000;
 pub enum ShellKind {
     Posix,
     PowerShell,
+    Fish,
 }
 
 impl ShellKind {
     pub fn local_default() -> Self {
         if cfg!(windows) {
             Self::PowerShell
+        } else if std::env::var("SHELL").map(|s| s.ends_with("fish")).unwrap_or(false) {
+            Self::Fish
         } else {
             Self::Posix
+        }
+    }
+
+    pub fn from_str_name(name: &str) -> Self {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "powershell" | "pwsh" => Self::PowerShell,
+            "fish" => Self::Fish,
+            _ => Self::Posix,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Posix => "posix",
+            Self::PowerShell => "powershell",
+            Self::Fish => "fish",
         }
     }
 
@@ -33,6 +52,9 @@ impl ShellKind {
             ),
             Self::PowerShell => format!(
                 "$global:__ts_ec = if ($null -ne $LASTEXITCODE) {{ $LASTEXITCODE }} elseif ($?) {{ 0 }} else {{ 1 }}; Write-Output \"__TS_END_{nonce}__ ec=$global:__ts_ec cwd=$((Get-Location).Path)\""
+            ),
+            Self::Fish => format!(
+                "printf '\\n__TS_END_{nonce}__ ec=%s cwd=%s\\n' \"$status\" \"$PWD\""
             ),
         }
     }
@@ -602,5 +624,11 @@ mod tests {
         assert_eq!(parse_exec_cwd(stderr).as_deref(), Some("/srv/app"));
         assert!(!strip_exec_cwd(stderr).contains("__TS_CWD__"));
         assert!(ShellKind::PowerShell.trailer("n").contains("LASTEXITCODE"));
+        assert!(ShellKind::Fish.trailer("n").contains("$status"));
+        let fish_trailer = ShellKind::Fish.trailer("f1");
+        let fish_out = format!("{fish_trailer}\n__TS_END_f1__ ec=0 cwd=/home/fish\n");
+        let (fcode, fcwd) = parse_end_marker(&fish_out, "f1").unwrap();
+        assert_eq!(fcode, 0);
+        assert_eq!(fcwd, "/home/fish");
     }
 }

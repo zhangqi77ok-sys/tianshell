@@ -234,6 +234,7 @@ fn router(state: AppState) -> Router {
         .route("/api/sessions/:id", delete(close_session))
         .route("/api/sessions/:id/metrics", get(session_metrics))
         .route("/api/sessions/:id/sftp/list", get(sftp_list))
+        .route("/api/sessions/:id/sftp/stat", get(sftp_stat))
         .route("/api/sessions/:id/sftp/text", get(sftp_read).put(sftp_write))
         .route("/api/sessions/:id/sftp/mkdir", post(sftp_mkdir))
         .route("/api/sessions/:id/sftp/rename", post(sftp_rename))
@@ -581,6 +582,14 @@ async fn sftp_list(_auth: Authed, State(state): State<AppState>, IdPath(id): IdP
     let path = query.path.unwrap_or_else(|| "/".into());
     match block(move || with_ssh(&state, &id, move |session| list_dir(session, &path).map_err(|err| err.to_string()))).await {
         Ok(entries) => json_ok(json!(entries)),
+        Err(err) => json_err(StatusCode::BAD_REQUEST, err),
+    }
+}
+
+async fn sftp_stat(_auth: Authed, State(state): State<AppState>, IdPath(id): IdPath<String>, Query(query): Query<PathQuery>) -> Response {
+    let path = query.path.unwrap_or_default();
+    match block(move || with_ssh(&state, &id, move |session| sftp::stat_target_mode(session, &path).map_err(|err| err.to_string()))).await {
+        Ok(mode) => json_ok(json!({"mode": mode})),
         Err(err) => json_err(StatusCode::BAD_REQUEST, err),
     }
 }

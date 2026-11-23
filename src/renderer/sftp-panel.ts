@@ -566,7 +566,16 @@ export class SftpController {
   private async chmodItem(entry: SftpEntry): Promise<void> {
     const sid = this.deps.getActiveSshId();
     if (!sid) return;
-    const raw = await this.deps.promptText(chmodPrompt(entry.kind), entry.mode.toString(8));
+    let initialMode = entry.mode;
+    if (entry.kind === 'symlink') {
+      try {
+        const res = await webApi.sftpStat(sid, entry.path);
+        initialMode = res.mode;
+      } catch {
+        // 若目标不存在（悬空链接）或读取失败，保留链接自身的 mode
+      }
+    }
+    const raw = await this.deps.promptText(chmodPrompt(entry.kind), initialMode.toString(8));
     if (!raw) return;
     const mode = parseOctalMode(raw);
     if (mode === null) return this.deps.toast('权限格式无效，请用三位或四位八进制', 'error');

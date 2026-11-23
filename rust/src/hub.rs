@@ -205,6 +205,7 @@ impl SessionHub {
             shell: match ShellKind::local_default() {
                 ShellKind::PowerShell => "powershell".into(),
                 ShellKind::Posix => "posix".into(),
+                ShellKind::Fish => "fish".into(),
             },
             host_id: None,
         };
@@ -250,7 +251,23 @@ impl SessionHub {
         let channel = open_shell(&pty_session, cols, rows)?;
 
         let id = Uuid::new_v4().to_string();
-        self.register_mind(&id, ShellKind::Posix, None, "ssh", &leaf.alias, Some(leaf.id.clone()));
+        let shell_kind = {
+            let guard = lock(hosts);
+            let rec = guard.list().iter().find(|h| h.id == leaf.id || h.id == host_id).cloned();
+            if let Some(r) = rec {
+                if r.tags.iter().any(|t| t.eq_ignore_ascii_case("fish"))
+                    || r.notes.as_deref().map(|n| n.contains("shell=fish") || n.contains("fish")).unwrap_or(false)
+                {
+                    ShellKind::Fish
+                } else {
+                    ShellKind::Posix
+                }
+            } else {
+                ShellKind::Posix
+            }
+        };
+        let shell_name = shell_kind.as_str().to_string();
+        self.register_mind(&id, shell_kind, None, "ssh", &leaf.alias, Some(leaf.id.clone()));
         let stop = Arc::new(AtomicBool::new(false));
         let pty = PtySsh::spawn(pty_session, channel, self.events.clone(), id.clone(), stop.clone());
         let side = SideSsh::spawn(side_session, id.clone());
@@ -270,7 +287,7 @@ impl SessionHub {
             host: leaf.host,
             port: leaf.port,
             kind: "ssh".into(),
-            shell: "posix".into(),
+            shell: shell_name,
             host_id: Some(leaf.id.clone()),
         };
         lock(&self.tabs).insert(

@@ -121,6 +121,8 @@ export const webApi = {
     }),
   sftpDelete: (sid: string, targetPath: string) =>
     apiRequest<boolean>(`/api/sessions/${encodeURIComponent(sid)}/sftp/delete`, { method: 'POST', body: JSON.stringify({ path: targetPath }) }),
+  sftpStat: (sid: string, targetPath: string) =>
+    apiRequest<{ mode: number }>(`/api/sessions/${encodeURIComponent(sid)}/sftp/stat?path=${encodeURIComponent(targetPath)}`),
   sftpChmod: (sid: string, targetPath: string, mode: number) =>
     apiRequest<boolean>(`/api/sessions/${encodeURIComponent(sid)}/sftp/chmod`, {
       method: 'POST',
