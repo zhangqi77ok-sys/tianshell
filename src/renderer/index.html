@@ -36,8 +36,15 @@
         <div class="nav-center">
           <div class="segmented-control" role="tablist" aria-label="工作区">
             <button id="nav-btn-terminal" class="seg-item active" type="button" role="tab" aria-selected="true" aria-controls="view-terminal" data-view="terminal" title="Terminal">终端</button>
-            <button id="nav-btn-sftp" class="seg-item" type="button" role="tab" aria-selected="false" aria-controls="view-sftp" data-view="sftp" title="SFTP">文件</button>
+            <button id="nav-btn-sftp" class="seg-item" type="button" role="tab" aria-selected="false" aria-controls="view-sftp" data-view="sftp" title="SFTP (右击可在右侧分屏打开)">文件</button>
             <button id="nav-btn-monitor" class="seg-item" type="button" role="tab" aria-selected="false" aria-controls="view-monitor" data-view="monitor" title="Monitor">监控</button>
+          </div>
+          <!-- 文件 Tab 右键分屏气泡菜单 -->
+          <div id="nav-sftp-menu" class="context-menu sftp-context-menu hidden" role="menu">
+            <button id="sftp-split-toggle-item" class="context-item" type="button" role="menuitem">
+              <span class="context-icon" id="sftp-split-icon">◫</span>
+              <span id="sftp-split-action-text">在右侧分屏打开文件</span>
+            </button>
           </div>
         </div>
 
@@ -147,6 +154,7 @@
             <div class="sftp-pane" id="sftp-pane">
               <div class="sftp-bar">
                 <div class="sftp-nav">
+                  <span id="sftp-host-badge" class="badge-host-link" title="当前联动的远程主机会话">未选中主机</span>
                   <button id="sftp-up" type="button" title="返回上一级目录" disabled>↑ 上级</button>
                   <div id="sftp-breadcrumbs" class="sftp-breadcrumbs" title="点击目录层级直达，双击编辑路径"></div>
                   <input id="sftp-path" type="text" value="/" spellcheck="false" class="hidden" disabled />
@@ -154,11 +162,13 @@
                   <button id="sftp-go" type="button" class="hidden" disabled>跳转</button>
                 </div>
                 <div class="sftp-ops">
+                  <button id="sftp-sync-term" type="button" class="btn-tool-sm hidden" title="在左侧终端执行 cd 跳转到当前目录">同步至终端</button>
                   <button id="sftp-mkdir" type="button" disabled>新建目录</button>
                   <button id="sftp-upload" type="button" disabled>上传文件</button>
                   <button id="sftp-archive-current" type="button" title="打包下载当前目录为 .tar.gz" disabled>打包下载</button>
                   <input id="sftp-file-input" type="file" multiple class="hidden" />
                   <button id="sftp-refresh" type="button" disabled>刷新</button>
+                  <button id="sftp-split-close" type="button" class="btn-tool-sm sftp-split-close hidden" title="关闭右侧分屏，返回全屏终端">✕</button>
                 </div>
               </div>
               <div id="sftp-table-wrap" class="sftp-table-wrap">

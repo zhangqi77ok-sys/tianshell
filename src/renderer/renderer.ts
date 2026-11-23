@@ -28,6 +28,7 @@ import {
   type SessionOpenIntent,
 } from './session-logic.js';
 import { SftpController } from './sftp-panel.js';
+import { resolveSplitVisibility } from './sftp-split-logic.js';
 
 interface TabState {
   info: ConnectInfo & { hostId?: string };
@@ -204,6 +205,32 @@ const sftpCtrl = new SftpController({
   getActiveSshId: () => {
     const tab = activeId ? tabs.get(activeId) : null;
     return tab && !tab.closed && tab.info.kind === 'ssh' ? tab.info.sessionId : null;
+  },
+  getActiveSessionInfo: () => {
+    const tab = activeId ? tabs.get(activeId) : null;
+    if (!tab) return null;
+    return {
+      sessionId: tab.info.sessionId,
+      kind: tab.info.kind,
+      alias: tab.info.alias,
+      username: tab.info.username,
+      host: tab.info.host,
+      port: tab.info.port,
+      closed: tab.closed,
+    };
+  },
+  onSyncTerminalPwd: (dir: string) => {
+    if (!activeId) {
+      showToast('请先打开或选中一个终端会话', 'error');
+      return;
+    }
+    const tab = tabs.get(activeId);
+    if (!tab || tab.closed) {
+      showToast('当前终端会话已断开', 'error');
+      return;
+    }
+    sendQuickCommand(`cd "${dir}"\n`);
+    showToast(`已在终端执行: cd "${dir}"`);
   },
   toast: showToast,
   promptText,
@@ -697,33 +724,71 @@ function setViewTab(id: string, selected: boolean): void {
   btn?.setAttribute('aria-selected', selected ? 'true' : 'false');
 }
 
-function switchView(view: ViewMode): void {
-  currentView = view;
-  document.querySelector('.app')?.setAttribute('data-view', view);
+let isSftpSideSplit = false;
+
+function toggleSftpSideSplit(force?: boolean): void {
+  isSftpSideSplit = force !== undefined ? force : !isSftpSideSplit;
+  if (isSftpSideSplit && currentView !== 'terminal') {
+    switchView('terminal');
+    return;
+  }
+  applySplitVisibility();
+}
+
+function applySplitVisibility(): void {
+  const vis = resolveSplitVisibility({
+    sftpSideSplit: isSftpSideSplit,
+    currentView,
+  });
+
+  const viewStack = document.querySelector('.view-stack');
   const viewTerm = document.getElementById('view-terminal');
   const viewSftp = document.getElementById('view-sftp');
   const viewMon = document.getElementById('view-monitor');
+  const actionText = document.getElementById('sftp-split-action-text');
+  const splitIcon = document.getElementById('sftp-split-icon');
 
-  setViewTab('nav-btn-terminal', view === 'terminal');
-  setViewTab('nav-btn-sftp', view === 'sftp');
-  setViewTab('nav-btn-monitor', view === 'monitor');
+  if (actionText) actionText.textContent = vis.menuActionText;
+  if (splitIcon) splitIcon.textContent = isSftpSideSplit ? '✕' : '◫';
 
-  viewTerm?.classList.toggle('active', view === 'terminal');
-  viewSftp?.classList.toggle('active', view === 'sftp');
-  viewMon?.classList.toggle('active', view === 'monitor');
+  const isSplitActiveInView = vis.isSplitActive && currentView === 'terminal';
+  viewStack?.classList.toggle('split-term-sftp', isSplitActiveInView);
 
-  if (view === 'terminal') {
-    requestAnimationFrame(() => {
-      fitVisibleTabs();
-      if (activeId) {
-        const tab = tabs.get(activeId);
-        if (tab && !tab.closed) {
-          tab.term.focus();
-          tab.term.refresh(0, tab.term.rows - 1);
-        }
+  if (isSplitActiveInView) {
+    viewTerm?.classList.add('active');
+    viewSftp?.classList.add('active');
+    viewMon?.classList.remove('active');
+    setViewTab('nav-btn-terminal', true);
+    setViewTab('nav-btn-sftp', true);
+    setViewTab('nav-btn-monitor', false);
+    sftpCtrl.syncSession();
+  } else {
+    viewTerm?.classList.toggle('active', vis.showTerminal);
+    viewSftp?.classList.toggle('active', vis.showSftp);
+    viewMon?.classList.toggle('active', vis.showMonitor);
+    setViewTab('nav-btn-terminal', currentView === 'terminal');
+    setViewTab('nav-btn-sftp', currentView === 'sftp');
+    setViewTab('nav-btn-monitor', currentView === 'monitor');
+  }
+
+  requestAnimationFrame(() => {
+    fitVisibleTabs();
+    if (activeId) {
+      const tab = tabs.get(activeId);
+      if (tab && !tab.closed) {
+        tab.term.focus();
+        tab.term.refresh(0, tab.term.rows - 1);
       }
-    });
-  } else if (view === 'sftp') {
+    }
+  });
+}
+
+function switchView(view: ViewMode): void {
+  currentView = view;
+  document.querySelector('.app')?.setAttribute('data-view', view);
+  applySplitVisibility();
+
+  if (view === 'sftp' || (view === 'terminal' && isSftpSideSplit)) {
     sftpCtrl.syncSession();
   } else if (view === 'monitor') {
     const tab = activeId ? tabs.get(activeId) : undefined;
@@ -1242,6 +1307,43 @@ function bindGlobalUi(): void {
   document.getElementById('nav-btn-terminal')?.addEventListener('click', () => switchView('terminal'));
   document.getElementById('nav-btn-sftp')?.addEventListener('click', () => switchView('sftp'));
   document.getElementById('nav-btn-monitor')?.addEventListener('click', () => switchView('monitor'));
+
+  // 文件 Tab 右键分屏联动与快捷菜单
+  const navBtnSftp = document.getElementById('nav-btn-sftp');
+  const navSftpMenu = document.getElementById('nav-sftp-menu');
+  const sftpSplitToggleItem = document.getElementById('sftp-split-toggle-item');
+  const sftpSplitClose = document.getElementById('sftp-split-close');
+
+  navBtnSftp?.addEventListener('contextmenu', (e: MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const actionText = document.getElementById('sftp-split-action-text');
+    const splitIcon = document.getElementById('sftp-split-icon');
+    if (actionText) actionText.textContent = isSftpSideSplit ? '关闭右侧文件分屏' : '在右侧分屏打开文件';
+    if (splitIcon) splitIcon.textContent = isSftpSideSplit ? '✕' : '◫';
+    navSftpMenu?.classList.toggle('hidden');
+  });
+
+  sftpSplitToggleItem?.addEventListener('click', () => {
+    navSftpMenu?.classList.add('hidden');
+    toggleSftpSideSplit();
+  });
+
+  sftpSplitClose?.addEventListener('click', () => {
+    toggleSftpSideSplit(false);
+  });
+
+  window.addEventListener('click', (e: MouseEvent) => {
+    if (!navSftpMenu?.contains(e.target as Node) && e.target !== navBtnSftp) {
+      navSftpMenu?.classList.add('hidden');
+    }
+  });
+
+  window.addEventListener('keydown', (e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      navSftpMenu?.classList.add('hidden');
+    }
+  });
 
   // 顶部导航：悬浮运维动作下拉及 Tab 切换
   const navOpsToggle = document.getElementById('nav-ops-toggle');

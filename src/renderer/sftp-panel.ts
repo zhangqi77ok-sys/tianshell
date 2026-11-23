@@ -2,9 +2,20 @@ import type { SftpEntry, TransferTask } from '../shared/types.js';
 import { webApi } from './api-client.js';
 import { editorWriteGuard } from './session-logic.js';
 import { chmodPrompt, deletePrompt, editorSaveBlock, failedLoadEffect, keepEditorOpen, parseOctalMode, planUploads } from './sftp-logic.js';
+import { resolveSftpHostState } from './sftp-split-logic.js';
 
 export interface SftpControllerDeps {
   getActiveSshId: () => string | null;
+  getActiveSessionInfo?: () => {
+    sessionId?: string;
+    alias?: string;
+    username?: string;
+    host?: string;
+    port?: number;
+    closed?: boolean;
+    kind?: string;
+  } | null;
+  onSyncTerminalPwd?: (dir: string) => void;
   toast: (msg: string, kind?: 'info' | 'error') => void;
   promptText: (title: string, defaultVal?: string) => Promise<string | null>;
   confirm: (title: string, body: string, okLabel?: string) => Promise<boolean>;
@@ -126,10 +137,19 @@ export class SftpController {
 
   syncSession(): void {
     const sid = this.deps.getActiveSshId();
+    const sessionInfo = this.deps.getActiveSessionInfo ? this.deps.getActiveSessionInfo() : null;
+    const hostState = resolveSftpHostState(sessionInfo as any);
+
+    const hostBadge = document.getElementById('sftp-host-badge');
+    if (hostBadge) {
+      hostBadge.textContent = hostState.badgeText;
+      hostBadge.className = `badge-host-link ${hostState.status === 'active' ? 'active' : hostState.status === 'closed' ? 'closed' : ''}`;
+    }
+
     const switched = sid !== this.boundSession;
     this.boundSession = sid;
     const active = Boolean(sid);
-    for (const id of ['sftp-up', 'sftp-path', 'sftp-edit-path', 'sftp-go', 'sftp-mkdir', 'sftp-upload', 'sftp-archive-current', 'sftp-refresh']) {
+    for (const id of ['sftp-up', 'sftp-path', 'sftp-edit-path', 'sftp-go', 'sftp-mkdir', 'sftp-upload', 'sftp-archive-current', 'sftp-refresh', 'sftp-sync-term']) {
       const el = document.getElementById(id) as HTMLButtonElement | HTMLInputElement | null;
       if (el) el.disabled = !active;
     }
@@ -137,7 +157,7 @@ export class SftpController {
       this.currentDir = '/';
       this.listedNames = [];
       this.haveListing = false;
-      this.showListingMessage('空闲。连上 SSH 会话后，这里显示该会话的当前目录。', true);
+      this.showListingMessage(hostState.emptyMessage || '空闲。连上 SSH 会话后，这里显示该会话的当前目录。', true);
       if (this.breadcrumbsEl) this.breadcrumbsEl.textContent = '';
       this.deps.onDirChange?.('/');
       return;
@@ -146,7 +166,7 @@ export class SftpController {
       this.currentDir = '/';
       this.listedNames = [];
       this.haveListing = false;
-      this.showListingMessage('正在读取 / …', true);
+      this.showListingMessage(`正在读取 ${hostState.badgeText} 的目录 / …`, true);
       this.deps.onDirChange?.('/');
     }
     void this.load(this.currentDir);
@@ -673,6 +693,9 @@ export class SftpController {
   }
 
   private bindEvents(): void {
+    document.getElementById('sftp-sync-term')?.addEventListener('click', () => {
+      this.deps.onSyncTerminalPwd?.(this.currentDir);
+    });
     document.getElementById('sftp-up')?.addEventListener('click', () => {
       const parts = this.currentDir.split('/').filter(Boolean);
       parts.pop();

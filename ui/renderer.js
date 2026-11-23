@@ -6751,6 +6751,80 @@ WARNING: This link could potentially be dangerous`)) {
     return Number.parseInt(text, 8);
   }
 
+  // src/renderer/sftp-split-logic.ts
+  function resolveSftpHostState(session) {
+    if (!session) {
+      return {
+        canSftp: false,
+        status: "no_session",
+        badgeText: "\u672A\u9009\u4E2D\u4E3B\u673A",
+        emptyMessage: "\u6CA1\u6709\u6253\u5F00\u7684\u4E3B\u673A\u4F1A\u8BDD\u3002\u53CC\u51FB\u5DE6\u4FA7\u4E3B\u673A\u8FDE\u63A5\u540E\uFF0C\u8FD9\u91CC\u5C06\u540C\u6B65\u5448\u73B0\u8FDC\u7A0B\u6587\u4EF6\u3002"
+      };
+    }
+    if (session.kind === "local") {
+      return {
+        canSftp: false,
+        status: "local_unsupported",
+        badgeText: "\u672C\u673A\u7EC8\u7AEF (\u4E0D\u652F\u6301 SFTP)",
+        emptyMessage: "\u5F53\u524D\u4E3A\u672C\u673A\u7EC8\u7AEF\u3002SFTP \u6587\u4EF6\u7BA1\u7406\u4EC5\u652F\u6301\u8FDC\u7A0B SSH \u4E3B\u673A\uFF0C\u8BF7\u5728\u4E0A\u65B9\u5207\u6362\u81F3 SSH \u4E3B\u673A\u6807\u7B7E\u3002"
+      };
+    }
+    if (session.closed) {
+      const name = session.alias || (session.host ? `${session.username ?? ""}@${session.host}` : "\u8FDC\u7A0B\u4E3B\u673A");
+      return {
+        canSftp: false,
+        status: "closed",
+        badgeText: `${name} (\u5DF2\u65AD\u5F00)`,
+        emptyMessage: `\u4E3B\u673A\u300C${name}\u300D\u8FDE\u63A5\u5DF2\u65AD\u5F00\u3002\u8BF7\u5728\u4E0A\u65B9\u6807\u7B7E\u70B9\u51FB\u91CD\u65B0\u8FDE\u63A5\u540E\u518D\u64CD\u4F5C\u6587\u4EF6\u3002`
+      };
+    }
+    const hostDetail = session.host ? ` (${session.username ? `${session.username}@` : ""}${session.host})` : "";
+    const label = `${session.alias || "\u8FDC\u7A0B\u4E3B\u673A"}${hostDetail}`;
+    return {
+      canSftp: true,
+      status: "active",
+      badgeText: label,
+      emptyMessage: ""
+    };
+  }
+  function resolveSplitVisibility(state) {
+    const { sftpSideSplit, currentView: currentView2 } = state;
+    if (currentView2 === "monitor") {
+      return {
+        isSplitActive: sftpSideSplit,
+        showTerminal: false,
+        showSftp: false,
+        showMonitor: true,
+        menuActionText: sftpSideSplit ? "\u5173\u95ED\u53F3\u4FA7\u6587\u4EF6\u5206\u5C4F" : "\u5728\u53F3\u4FA7\u5206\u5C4F\u6253\u5F00\u6587\u4EF6"
+      };
+    }
+    if (currentView2 === "sftp") {
+      return {
+        isSplitActive: sftpSideSplit,
+        showTerminal: false,
+        showSftp: true,
+        showMonitor: false,
+        menuActionText: sftpSideSplit ? "\u5173\u95ED\u53F3\u4FA7\u6587\u4EF6\u5206\u5C4F" : "\u5728\u53F3\u4FA7\u5206\u5C4F\u6253\u5F00\u6587\u4EF6"
+      };
+    }
+    if (sftpSideSplit) {
+      return {
+        isSplitActive: true,
+        showTerminal: true,
+        showSftp: true,
+        showMonitor: false,
+        menuActionText: "\u5173\u95ED\u53F3\u4FA7\u6587\u4EF6\u5206\u5C4F"
+      };
+    }
+    return {
+      isSplitActive: false,
+      showTerminal: true,
+      showSftp: false,
+      showMonitor: false,
+      menuActionText: "\u5728\u53F3\u4FA7\u5206\u5C4F\u6253\u5F00\u6587\u4EF6"
+    };
+  }
+
   // src/renderer/sftp-panel.ts
   function formatBytes(bytes) {
     if (bytes < 1024) return `${bytes} B`;
@@ -6895,10 +6969,17 @@ WARNING: This link could potentially be dangerous`)) {
     }
     syncSession() {
       const sid = this.deps.getActiveSshId();
+      const sessionInfo = this.deps.getActiveSessionInfo ? this.deps.getActiveSessionInfo() : null;
+      const hostState = resolveSftpHostState(sessionInfo);
+      const hostBadge = document.getElementById("sftp-host-badge");
+      if (hostBadge) {
+        hostBadge.textContent = hostState.badgeText;
+        hostBadge.className = `badge-host-link ${hostState.status === "active" ? "active" : hostState.status === "closed" ? "closed" : ""}`;
+      }
       const switched = sid !== this.boundSession;
       this.boundSession = sid;
       const active = Boolean(sid);
-      for (const id of ["sftp-up", "sftp-path", "sftp-edit-path", "sftp-go", "sftp-mkdir", "sftp-upload", "sftp-archive-current", "sftp-refresh"]) {
+      for (const id of ["sftp-up", "sftp-path", "sftp-edit-path", "sftp-go", "sftp-mkdir", "sftp-upload", "sftp-archive-current", "sftp-refresh", "sftp-sync-term"]) {
         const el = document.getElementById(id);
         if (el) el.disabled = !active;
       }
@@ -6906,7 +6987,7 @@ WARNING: This link could potentially be dangerous`)) {
         this.currentDir = "/";
         this.listedNames = [];
         this.haveListing = false;
-        this.showListingMessage("\u7A7A\u95F2\u3002\u8FDE\u4E0A SSH \u4F1A\u8BDD\u540E\uFF0C\u8FD9\u91CC\u663E\u793A\u8BE5\u4F1A\u8BDD\u7684\u5F53\u524D\u76EE\u5F55\u3002", true);
+        this.showListingMessage(hostState.emptyMessage || "\u7A7A\u95F2\u3002\u8FDE\u4E0A SSH \u4F1A\u8BDD\u540E\uFF0C\u8FD9\u91CC\u663E\u793A\u8BE5\u4F1A\u8BDD\u7684\u5F53\u524D\u76EE\u5F55\u3002", true);
         if (this.breadcrumbsEl) this.breadcrumbsEl.textContent = "";
         this.deps.onDirChange?.("/");
         return;
@@ -6915,7 +6996,7 @@ WARNING: This link could potentially be dangerous`)) {
         this.currentDir = "/";
         this.listedNames = [];
         this.haveListing = false;
-        this.showListingMessage("\u6B63\u5728\u8BFB\u53D6 / \u2026", true);
+        this.showListingMessage(`\u6B63\u5728\u8BFB\u53D6 ${hostState.badgeText} \u7684\u76EE\u5F55 / \u2026`, true);
         this.deps.onDirChange?.("/");
       }
       void this.load(this.currentDir);
@@ -7405,6 +7486,9 @@ WARNING: This link could potentially be dangerous`)) {
       }
     }
     bindEvents() {
+      document.getElementById("sftp-sync-term")?.addEventListener("click", () => {
+        this.deps.onSyncTerminalPwd?.(this.currentDir);
+      });
       document.getElementById("sftp-up")?.addEventListener("click", () => {
         const parts = this.currentDir.split("/").filter(Boolean);
         parts.pop();
@@ -8062,6 +8146,33 @@ WARNING: This link could potentially be dangerous`)) {
       const tab = activeId ? tabs.get(activeId) : null;
       return tab && !tab.closed && tab.info.kind === "ssh" ? tab.info.sessionId : null;
     },
+    getActiveSessionInfo: () => {
+      const tab = activeId ? tabs.get(activeId) : null;
+      if (!tab) return null;
+      return {
+        sessionId: tab.info.sessionId,
+        kind: tab.info.kind,
+        alias: tab.info.alias,
+        username: tab.info.username,
+        host: tab.info.host,
+        port: tab.info.port,
+        closed: tab.closed
+      };
+    },
+    onSyncTerminalPwd: (dir) => {
+      if (!activeId) {
+        showToast("\u8BF7\u5148\u6253\u5F00\u6216\u9009\u4E2D\u4E00\u4E2A\u7EC8\u7AEF\u4F1A\u8BDD", "error");
+        return;
+      }
+      const tab = tabs.get(activeId);
+      if (!tab || tab.closed) {
+        showToast("\u5F53\u524D\u7EC8\u7AEF\u4F1A\u8BDD\u5DF2\u65AD\u5F00", "error");
+        return;
+      }
+      sendQuickCommand(`cd "${dir}"
+`);
+      showToast(`\u5DF2\u5728\u7EC8\u7AEF\u6267\u884C: cd "${dir}"`);
+    },
     toast: showToast,
     promptText,
     confirm: confirmAction,
@@ -8499,30 +8610,62 @@ ${op.command}`;
     btn?.classList.toggle("active", selected);
     btn?.setAttribute("aria-selected", selected ? "true" : "false");
   }
-  function switchView(view) {
-    currentView = view;
-    document.querySelector(".app")?.setAttribute("data-view", view);
+  var isSftpSideSplit = false;
+  function toggleSftpSideSplit(force) {
+    isSftpSideSplit = force !== void 0 ? force : !isSftpSideSplit;
+    if (isSftpSideSplit && currentView !== "terminal") {
+      switchView("terminal");
+      return;
+    }
+    applySplitVisibility();
+  }
+  function applySplitVisibility() {
+    const vis = resolveSplitVisibility({
+      sftpSideSplit: isSftpSideSplit,
+      currentView
+    });
+    const viewStack = document.querySelector(".view-stack");
     const viewTerm = document.getElementById("view-terminal");
     const viewSftp = document.getElementById("view-sftp");
     const viewMon = document.getElementById("view-monitor");
-    setViewTab("nav-btn-terminal", view === "terminal");
-    setViewTab("nav-btn-sftp", view === "sftp");
-    setViewTab("nav-btn-monitor", view === "monitor");
-    viewTerm?.classList.toggle("active", view === "terminal");
-    viewSftp?.classList.toggle("active", view === "sftp");
-    viewMon?.classList.toggle("active", view === "monitor");
-    if (view === "terminal") {
-      requestAnimationFrame(() => {
-        fitVisibleTabs();
-        if (activeId) {
-          const tab = tabs.get(activeId);
-          if (tab && !tab.closed) {
-            tab.term.focus();
-            tab.term.refresh(0, tab.term.rows - 1);
-          }
+    const actionText = document.getElementById("sftp-split-action-text");
+    const splitIcon = document.getElementById("sftp-split-icon");
+    if (actionText) actionText.textContent = vis.menuActionText;
+    if (splitIcon) splitIcon.textContent = isSftpSideSplit ? "\u2715" : "\u25EB";
+    const isSplitActiveInView = vis.isSplitActive && currentView === "terminal";
+    viewStack?.classList.toggle("split-term-sftp", isSplitActiveInView);
+    if (isSplitActiveInView) {
+      viewTerm?.classList.add("active");
+      viewSftp?.classList.add("active");
+      viewMon?.classList.remove("active");
+      setViewTab("nav-btn-terminal", true);
+      setViewTab("nav-btn-sftp", true);
+      setViewTab("nav-btn-monitor", false);
+      sftpCtrl.syncSession();
+    } else {
+      viewTerm?.classList.toggle("active", vis.showTerminal);
+      viewSftp?.classList.toggle("active", vis.showSftp);
+      viewMon?.classList.toggle("active", vis.showMonitor);
+      setViewTab("nav-btn-terminal", currentView === "terminal");
+      setViewTab("nav-btn-sftp", currentView === "sftp");
+      setViewTab("nav-btn-monitor", currentView === "monitor");
+    }
+    requestAnimationFrame(() => {
+      fitVisibleTabs();
+      if (activeId) {
+        const tab = tabs.get(activeId);
+        if (tab && !tab.closed) {
+          tab.term.focus();
+          tab.term.refresh(0, tab.term.rows - 1);
         }
-      });
-    } else if (view === "sftp") {
+      }
+    });
+  }
+  function switchView(view) {
+    currentView = view;
+    document.querySelector(".app")?.setAttribute("data-view", view);
+    applySplitVisibility();
+    if (view === "sftp" || view === "terminal" && isSftpSideSplit) {
       sftpCtrl.syncSession();
     } else if (view === "monitor") {
       const tab = activeId ? tabs.get(activeId) : void 0;
@@ -8997,6 +9140,36 @@ ${op.command}`;
     document.getElementById("nav-btn-terminal")?.addEventListener("click", () => switchView("terminal"));
     document.getElementById("nav-btn-sftp")?.addEventListener("click", () => switchView("sftp"));
     document.getElementById("nav-btn-monitor")?.addEventListener("click", () => switchView("monitor"));
+    const navBtnSftp = document.getElementById("nav-btn-sftp");
+    const navSftpMenu = document.getElementById("nav-sftp-menu");
+    const sftpSplitToggleItem = document.getElementById("sftp-split-toggle-item");
+    const sftpSplitClose = document.getElementById("sftp-split-close");
+    navBtnSftp?.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const actionText = document.getElementById("sftp-split-action-text");
+      const splitIcon = document.getElementById("sftp-split-icon");
+      if (actionText) actionText.textContent = isSftpSideSplit ? "\u5173\u95ED\u53F3\u4FA7\u6587\u4EF6\u5206\u5C4F" : "\u5728\u53F3\u4FA7\u5206\u5C4F\u6253\u5F00\u6587\u4EF6";
+      if (splitIcon) splitIcon.textContent = isSftpSideSplit ? "\u2715" : "\u25EB";
+      navSftpMenu?.classList.toggle("hidden");
+    });
+    sftpSplitToggleItem?.addEventListener("click", () => {
+      navSftpMenu?.classList.add("hidden");
+      toggleSftpSideSplit();
+    });
+    sftpSplitClose?.addEventListener("click", () => {
+      toggleSftpSideSplit(false);
+    });
+    window.addEventListener("click", (e) => {
+      if (!navSftpMenu?.contains(e.target) && e.target !== navBtnSftp) {
+        navSftpMenu?.classList.add("hidden");
+      }
+    });
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        navSftpMenu?.classList.add("hidden");
+      }
+    });
     const navOpsToggle = document.getElementById("nav-ops-toggle");
     const navOpsMenu = document.getElementById("nav-ops-menu");
     const tabSnippets = document.getElementById("ops-tab-snippets");
