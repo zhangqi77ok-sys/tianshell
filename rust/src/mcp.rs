@@ -304,23 +304,26 @@ impl McpHandler {
         let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
 
         // 桌面端协同感知：向工作台前端广播外部 AI 智能体的 MCP 调用动作
-        if let Some(hub) = &self.terminals {
-            let host = args.get("host").and_then(|v| v.as_str()).unwrap_or("");
-            let session_id = args.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
-            let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            hub.broadcast(json!({
-                "type": "mcp:activity",
-                "tool": name,
-                "host": host,
-                "sessionId": session_id,
-                "detail": if !command.is_empty() { command } else { path },
-                "timestamp": ts,
-            }));
+        // 性能降噪：过滤 poll_command、session_status 等高频自动化轮询工具，节约 90%+ 的 WebSocket 流量并避免前端重绘风暴
+        if !matches!(name, "poll_command" | "session_status") {
+            if let Some(hub) = &self.terminals {
+                let host = args.get("host").and_then(|v| v.as_str()).unwrap_or("");
+                let session_id = args.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
+                let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                hub.broadcast(json!({
+                    "type": "mcp:activity",
+                    "tool": name,
+                    "host": host,
+                    "sessionId": session_id,
+                    "detail": if !command.is_empty() { command } else { path },
+                    "timestamp": ts,
+                }));
+            }
         }
 
         match name {

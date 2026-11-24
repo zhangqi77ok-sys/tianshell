@@ -300,6 +300,8 @@ function handleWsEvent(msg: Record<string, unknown>): void {
 }
 
 let aiPillTimer: number | null = null;
+const aiTabTimerMap = new Map<string, number>();
+
 function handleMcpActivity(msg: Record<string, unknown>): void {
   const tool = String(msg.tool || 'command');
   const host = String(msg.host || '');
@@ -322,9 +324,15 @@ function handleMcpActivity(msg: Record<string, unknown>): void {
     const tabElem = document.querySelector(`.tab[data-id="${sessionId}"]`);
     if (tabElem) {
       tabElem.classList.add('ai-active');
-      window.setTimeout(() => {
+      const existingTimer = aiTabTimerMap.get(sessionId);
+      if (existingTimer !== undefined) {
+        window.clearTimeout(existingTimer);
+      }
+      const timer = window.setTimeout(() => {
         tabElem.classList.remove('ai-active');
+        aiTabTimerMap.delete(sessionId);
       }, 3500);
+      aiTabTimerMap.set(sessionId, timer);
     }
   }
 }

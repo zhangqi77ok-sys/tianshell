@@ -208,6 +208,14 @@ fn looks_like_private_key(buf: &[u8]) -> bool {
     text.contains("PRIVATE KEY") || text.contains("-----BEGIN")
 }
 
+pub fn trim_leading_continuation_bytes(buf: &[u8]) -> usize {
+    let mut skip = 0;
+    while skip < buf.len().min(4) && (buf[skip] & 0b1100_0000) == 0b1000_0000 {
+        skip += 1;
+    }
+    skip
+}
+
 pub fn read_text_range(
     sess: &Session,
     file_path: &str,
@@ -241,8 +249,9 @@ pub fn read_text_range(
         let _ = file.seek(std::io::SeekFrom::Start(start_offset));
     }
 
-    let mut buf = Vec::new();
-    let mut tmp = [0u8; 8192];
+    // 预分配内存，减少逐块读取扩容次数；单次读取块扩至 32KB 降低往返延迟
+    let mut buf = Vec::with_capacity(limit.min(65_536));
+    let mut tmp = [0u8; 32_768];
     while buf.len() <= limit {
         let n = file.read(&mut tmp)?;
         if n == 0 {
@@ -254,12 +263,22 @@ pub fn read_text_range(
         }
     }
 
-    let mut preview = remote_text_preview(&buf, limit)?;
+    // 当非 0 偏移或 tail 读取时，可能切入多字节 UTF-8 字符（如中文/Emoji）的延续字节内部
+    // 自动跳过开头的延续字节（10xxxxxx），精准校准实际字符对齐偏移
+    let leading_skip = if start_offset > 0 {
+        trim_leading_continuation_bytes(&buf)
+    } else {
+        0
+    };
+    let aligned_buf = &buf[leading_skip..];
+    let actual_start_offset = start_offset + leading_skip as u64;
+
+    let mut preview = remote_text_preview(aligned_buf, limit)?;
     let actual_read = preview.content.len();
     let has_more = start_offset + (buf.len().min(limit) as u64) < total_size;
 
     preview.total_size = Some(total_size);
-    preview.offset_used = Some(start_offset);
+    preview.offset_used = Some(actual_start_offset);
     preview.bytes_read = Some(actual_read);
     preview.has_more = Some(has_more);
 
@@ -1508,5 +1527,26 @@ mod tests {
         assert!(!declared_length_too_big(Some(&MAX_UPLOAD_BYTES.to_string())));
         assert!(declared_length_too_big(Some(&(MAX_UPLOAD_BYTES as u64 + 1).to_string())));
         assert!(declared_length_too_big(Some(&u64::MAX.to_string())));
+    }
+
+    #[test]
+    fn trim_leading_continuation_bytes_skips_partial_utf8_prefix() {
+        let full = "中国智造，天壳终端".as_bytes();
+        // '中' 占 3 字节: [0xE4, 0xB8, 0xAD]
+        // 落在第 1 个延续字节 [0xB8, 0xAD, '国'...]
+        let slice1 = &full[1..];
+        let skip1 = trim_leading_continuation_bytes(slice1);
+        assert_eq!(skip1, 2);
+        assert_eq!(std::str::from_utf8(&slice1[skip1..]).unwrap(), "国智造，天壳终端");
+
+        // 落在第 2 个延续字节 [0xAD, '国'...]
+        let slice2 = &full[2..];
+        let skip2 = trim_leading_continuation_bytes(slice2);
+        assert_eq!(skip2, 1);
+        assert_eq!(std::str::from_utf8(&slice2[skip2..]).unwrap(), "国智造，天壳终端");
+
+        // 整字符边界起始，不跳过任何字节
+        assert_eq!(trim_leading_continuation_bytes(full), 0);
+        assert_eq!(trim_leading_continuation_bytes(&full[3..]), 0);
     }
 }

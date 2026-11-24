@@ -112,6 +112,39 @@ impl Screen {
     }
 
     pub fn text(&self, max_chars: usize) -> (String, bool) {
+        if max_chars == 0 {
+            let joined = self
+                .lines
+                .iter()
+                .map(|line| line.trim_end())
+                .collect::<Vec<_>>()
+                .join("\n");
+            return (joined, false);
+        }
+
+        // 逆序检查：从最后一行往前累加，在读取近期屏幕时避免将 400 行全部拼装后再丢弃
+        let mut needed_lines: Vec<&str> = Vec::new();
+        let mut char_count = 0;
+        let mut hit_limit = false;
+
+        for line in self.lines.iter().rev() {
+            let trimmed = line.trim_end();
+            let len = trimmed.chars().count();
+            let extra = if needed_lines.is_empty() { len } else { len + 1 };
+            if char_count + extra > max_chars {
+                hit_limit = true;
+                break;
+            }
+            char_count += extra;
+            needed_lines.push(trimmed);
+        }
+
+        if !hit_limit {
+            needed_lines.reverse();
+            return (needed_lines.join("\n"), false);
+        }
+
+        // 超过上限时，做精确到字符的尾部截取
         let joined = self
             .lines
             .iter()
@@ -119,7 +152,7 @@ impl Screen {
             .collect::<Vec<_>>()
             .join("\n");
         let count = joined.chars().count();
-        if max_chars == 0 || count <= max_chars {
+        if count <= max_chars {
             return (joined, false);
         }
         let tail: String = joined.chars().skip(count - max_chars).collect();
@@ -150,10 +183,12 @@ impl Screen {
             EscMode::Csi => {
                 self.esc.push(byte);
                 if (0x40..=0x7e).contains(&byte) {
-                    let seq = self.esc.clone();
-                    self.esc.clear();
+                    // 零堆分配优化：通过 std::mem::take 借出已分配的缓冲切片，避免每次 CSI 序列 clone
+                    let mut seq = std::mem::take(&mut self.esc);
                     self.mode = EscMode::Normal;
                     self.apply_csi(&seq);
+                    seq.clear();
+                    self.esc = seq;
                 } else if self.esc.len() > 32 {
                     self.esc.clear();
                     self.mode = EscMode::Normal;
@@ -630,5 +665,24 @@ mod tests {
         let (fcode, fcwd) = parse_end_marker(&fish_out, "f1").unwrap();
         assert_eq!(fcode, 0);
         assert_eq!(fcwd, "/home/fish");
+    }
+
+    #[test]
+    fn screen_text_truncation_and_reverse_slice() {
+        let mut screen = Screen::new();
+        screen.ingest(b"line 1\r\nline 2\r\nline 3\r\nline 4\r\nline 5");
+        let (all, trunc) = screen.text(100);
+        assert!(!trunc);
+        assert_eq!(all, "line 1\nline 2\nline 3\nline 4\nline 5");
+
+        // Requesting fewer chars triggers truncation
+        let (tail, trunc) = screen.text(13);
+        assert!(trunc);
+        assert_eq!(tail, "line 4\nline 5");
+
+        // Zero max_chars means return all
+        let (zero, trunc) = screen.text(0);
+        assert!(!trunc);
+        assert_eq!(zero, "line 1\nline 2\nline 3\nline 4\nline 5");
     }
 }

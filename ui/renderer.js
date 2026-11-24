@@ -8239,6 +8239,7 @@ WARNING: This link could potentially be dangerous`)) {
     }
   }
   var aiPillTimer = null;
+  var aiTabTimerMap = /* @__PURE__ */ new Map();
   function handleMcpActivity(msg) {
     const tool = String(msg.tool || "command");
     const host = String(msg.host || "");
@@ -8261,9 +8262,15 @@ WARNING: This link could potentially be dangerous`)) {
       const tabElem = document.querySelector(`.tab[data-id="${sessionId}"]`);
       if (tabElem) {
         tabElem.classList.add("ai-active");
-        window.setTimeout(() => {
+        const existingTimer = aiTabTimerMap.get(sessionId);
+        if (existingTimer !== void 0) {
+          window.clearTimeout(existingTimer);
+        }
+        const timer = window.setTimeout(() => {
           tabElem.classList.remove("ai-active");
+          aiTabTimerMap.delete(sessionId);
         }, 3500);
+        aiTabTimerMap.set(sessionId, timer);
       }
     }
   }
