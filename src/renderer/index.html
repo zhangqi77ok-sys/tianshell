@@ -39,6 +39,10 @@
             <button id="nav-btn-sftp" class="seg-item" type="button" role="tab" aria-selected="false" aria-controls="view-sftp" data-view="sftp" title="SFTP (右击可在右侧分屏打开)">文件</button>
             <button id="nav-btn-monitor" class="seg-item" type="button" role="tab" aria-selected="false" aria-controls="view-monitor" data-view="monitor" title="Monitor">监控</button>
           </div>
+          <button id="nav-btn-split-toggle" class="btn-split-toggle" type="button" title="一键并排分屏：在右侧同屏展示文件管理 (Ctrl+\)">
+            <span class="split-icon" id="nav-split-icon">◫</span>
+            <span class="split-label">并排分屏</span>
+          </button>
           <!-- 文件 Tab 右键分屏气泡菜单 -->
           <div id="nav-sftp-menu" class="context-menu sftp-context-menu hidden" role="menu">
             <button id="sftp-split-toggle-item" class="context-item" type="button" role="menuitem">
@@ -170,12 +174,15 @@
                 <!-- 第二行：文件操作工具条 -->
                 <div class="sftp-header-row sftp-row-actions">
                   <div class="sftp-actions-group">
-                    <button id="sftp-up" type="button" class="btn-sftp-action" title="返回上一级目录" disabled>↑ 上级</button>
+                    <button id="sftp-up" type="button" class="btn-sftp-action" title="返回上一级目录 (Backspace)" disabled>↑ 上级</button>
                     <button id="sftp-mkdir" type="button" class="btn-sftp-action" disabled>+ 新建目录</button>
                     <button id="sftp-upload" type="button" class="btn-sftp-action" disabled>↑ 上传文件</button>
                     <button id="sftp-archive-current" type="button" class="btn-sftp-action" title="打包下载当前目录为 .tar.gz" disabled>📦 打包下载</button>
                     <input id="sftp-file-input" type="file" multiple class="hidden" />
-                    <button id="sftp-refresh" type="button" class="btn-sftp-action" disabled>🔄 刷新</button>
+                    <button id="sftp-refresh" type="button" class="btn-sftp-action" title="刷新列表 (F5)" disabled>🔄 刷新</button>
+                  </div>
+                  <div class="sftp-filter-group">
+                    <input id="sftp-filter" class="sftp-filter-input" type="search" placeholder="🔍 筛选当前目录 (Ctrl+F)..." autocomplete="off" disabled />
                   </div>
                   <div class="sftp-sync-group">
                     <button id="sftp-sync-term" type="button" class="btn-tool-sm btn-sync-term hidden" title="在左侧终端执行 cd 跳转到当前目录">⇥ 同步至终端</button>
@@ -472,6 +479,62 @@
         </div>
       </form>
     </dialog>
+
+    <!-- SFTP 文件与空白区右键上下文菜单 -->
+    <div id="sftp-file-context-menu" class="context-menu sftp-file-context-menu hidden" role="menu">
+      <button class="context-item" id="ctx-file-open" type="button" role="menuitem">
+        <span class="context-icon" id="ctx-open-icon">📂</span>
+        <span class="context-label" id="ctx-open-label">打开 / 编辑</span>
+      </button>
+      <button class="context-item" id="ctx-file-download" type="button" role="menuitem">
+        <span class="context-icon" id="ctx-download-icon">📥</span>
+        <span class="context-label" id="ctx-download-label">下载</span>
+      </button>
+      <div class="context-divider"></div>
+      <button class="context-item" id="ctx-file-copy-path" type="button" role="menuitem">
+        <span class="context-icon">📋</span>
+        <span class="context-label">复制绝对路径</span>
+      </button>
+      <button class="context-item" id="ctx-file-copy-name" type="button" role="menuitem">
+        <span class="context-icon">📄</span>
+        <span class="context-label">复制文件名</span>
+      </button>
+      <div class="context-divider"></div>
+      <button class="context-item" id="ctx-file-rename" type="button" role="menuitem">
+        <span class="context-icon">✏️</span>
+        <span class="context-label">重命名</span>
+      </button>
+      <button class="context-item" id="ctx-file-chmod" type="button" role="menuitem">
+        <span class="context-icon">🔒</span>
+        <span class="context-label">修改权限</span>
+      </button>
+      <div class="context-divider"></div>
+      <button class="context-item danger" id="ctx-file-delete" type="button" role="menuitem">
+        <span class="context-icon">🗑️</span>
+        <span class="context-label">删除</span>
+      </button>
+    </div>
+
+    <!-- SFTP 目录空白处右键菜单 -->
+    <div id="sftp-blank-context-menu" class="context-menu sftp-file-context-menu hidden" role="menu">
+      <button class="context-item" id="ctx-blank-mkdir" type="button" role="menuitem">
+        <span class="context-icon">📁</span>
+        <span class="context-label">新建目录</span>
+      </button>
+      <button class="context-item" id="ctx-blank-upload" type="button" role="menuitem">
+        <span class="context-icon">📤</span>
+        <span class="context-label">上传文件...</span>
+      </button>
+      <button class="context-item" id="ctx-blank-refresh" type="button" role="menuitem">
+        <span class="context-icon">🔄</span>
+        <span class="context-label">刷新列表 (F5)</span>
+      </button>
+      <div class="context-divider"></div>
+      <button class="context-item" id="ctx-blank-copy-path" type="button" role="menuitem">
+        <span class="context-icon">📋</span>
+        <span class="context-label">复制当前目录路径</span>
+      </button>
+    </div>
 
     <script src="./renderer.js"></script>
   </body>

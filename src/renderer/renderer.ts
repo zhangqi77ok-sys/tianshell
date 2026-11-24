@@ -787,12 +787,20 @@ function applySplitVisibility(): void {
   const viewMon = document.getElementById('view-monitor');
   const actionText = document.getElementById('sftp-split-action-text');
   const splitIcon = document.getElementById('sftp-split-icon');
+  const navSplitBtn = document.getElementById('nav-btn-split-toggle');
 
   if (actionText) actionText.textContent = vis.menuActionText;
   if (splitIcon) splitIcon.textContent = isSftpSideSplit ? '✕' : '◫';
 
   const isSplitActiveInView = vis.isSplitActive && currentView === 'terminal';
   viewStack?.classList.toggle('split-term-sftp', isSplitActiveInView);
+
+  if (navSplitBtn) {
+    navSplitBtn.classList.toggle('active', isSplitActiveInView);
+    navSplitBtn.title = isSplitActiveInView
+      ? '关闭并排分屏，还原单屏终端 (Ctrl+\\)'
+      : '一键并排分屏：在右侧同屏展示文件管理 (Ctrl+\\)';
+  }
 
   if (isSplitActiveInView) {
     viewTerm?.classList.add('active');
@@ -1379,9 +1387,17 @@ function bindGlobalUi(): void {
     }
   });
 
+  const navBtnSplitToggle = document.getElementById('nav-btn-split-toggle');
+  navBtnSplitToggle?.addEventListener('click', () => {
+    toggleSftpSideSplit();
+  });
+
   window.addEventListener('keydown', (e: KeyboardEvent) => {
     if (e.key === 'Escape') {
       navSftpMenu?.classList.add('hidden');
+    } else if ((e.ctrlKey || e.metaKey) && e.key === '\\') {
+      e.preventDefault();
+      toggleSftpSideSplit();
     }
   });
 

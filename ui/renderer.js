@@ -6913,6 +6913,12 @@ WARNING: This link could potentially be dangerous`)) {
     dirCache = /* @__PURE__ */ new Map();
     static CACHE_TTL_MS = 3e4;
     static MAX_CACHE_ENTRIES = 100;
+    filterInput = document.getElementById("sftp-filter");
+    fileContextMenu = document.getElementById("sftp-file-context-menu");
+    blankContextMenu = document.getElementById("sftp-blank-context-menu");
+    activeContextEntry = null;
+    filterQuery = "";
+    currentEntries = [];
     pathInput = document.getElementById("sftp-path");
     breadcrumbsEl = document.getElementById("sftp-breadcrumbs");
     editPathBtn = document.getElementById("sftp-edit-path");
@@ -6979,13 +6985,16 @@ WARNING: This link could potentially be dangerous`)) {
       const switched = sid !== this.boundSession;
       this.boundSession = sid;
       const active = Boolean(sid);
-      for (const id of ["sftp-up", "sftp-path", "sftp-edit-path", "sftp-go", "sftp-mkdir", "sftp-upload", "sftp-archive-current", "sftp-refresh", "sftp-sync-term"]) {
+      for (const id of ["sftp-up", "sftp-path", "sftp-edit-path", "sftp-go", "sftp-mkdir", "sftp-upload", "sftp-archive-current", "sftp-refresh", "sftp-sync-term", "sftp-filter"]) {
         const el = document.getElementById(id);
         if (el) el.disabled = !active;
       }
       if (!sid) {
         this.currentDir = "/";
         this.listedNames = [];
+        this.currentEntries = [];
+        if (this.filterInput) this.filterInput.value = "";
+        this.filterQuery = "";
         this.haveListing = false;
         this.showListingMessage(hostState.emptyMessage || "\u7A7A\u95F2\u3002\u8FDE\u4E0A SSH \u4F1A\u8BDD\u540E\uFF0C\u8FD9\u91CC\u663E\u793A\u8BE5\u4F1A\u8BDD\u7684\u5F53\u524D\u76EE\u5F55\u3002", true);
         if (this.breadcrumbsEl) this.breadcrumbsEl.textContent = "";
@@ -7080,10 +7089,11 @@ WARNING: This link could potentially be dangerous`)) {
         this.deps.onDirChange?.(this.currentDir);
         this.listedNames = cached.list.map((entry) => entry.name);
         const visible = cached.list.filter((e) => this.showHidden || !e.name.startsWith("."));
+        this.currentEntries = visible;
         const sig = `${sid}|${this.currentDir}|${visible.map((e) => `${e.path}:${e.size}:${e.mtimeMs}:${e.mode}`).join("|")}`;
         if (sig !== this.lastSig) {
           this.lastSig = sig;
-          this.renderEntries(visible);
+          this.applyFilter();
         }
         return "shown";
       }
@@ -7105,10 +7115,11 @@ WARNING: This link could potentially be dangerous`)) {
         this.deps.onDirChange?.(this.currentDir);
         this.listedNames = list.map((entry) => entry.name);
         const visible = list.filter((e) => this.showHidden || !e.name.startsWith("."));
+        this.currentEntries = visible;
         const sig = `${sid}|${this.currentDir}|${visible.map((e) => `${e.path}:${e.size}:${e.mtimeMs}:${e.mode}`).join("|")}`;
         if (sig === this.lastSig) return "shown";
         this.lastSig = sig;
-        this.renderEntries(visible);
+        this.applyFilter();
         return "shown";
       } catch (err) {
         if (!this.listingCurrent(sid, ticket)) return "idle";
@@ -7138,12 +7149,21 @@ WARNING: This link could potentially be dangerous`)) {
         void this.load(this.currentDir, "notify", true);
       }
     }
+    applyFilter() {
+      if (!this.filterQuery) {
+        this.renderEntries(this.currentEntries);
+        return;
+      }
+      const q = this.filterQuery.toLowerCase();
+      const filtered = this.currentEntries.filter((e) => e.name.toLowerCase().includes(q));
+      this.renderEntries(filtered);
+    }
     renderEntries(entries) {
       this.bodyEl.textContent = "";
       if (!entries.length) {
         this.tableEl.classList.add("hidden");
         this.emptyEl.classList.remove("hidden");
-        this.emptyEl.textContent = "\u8FD9\u4E2A\u76EE\u5F55\u662F\u7A7A\u7684\u3002";
+        this.emptyEl.textContent = this.filterQuery ? "\u672A\u627E\u5230\u5339\u914D\u7684\u6587\u4EF6\u6216\u76EE\u5F55\u3002" : "\u8FD9\u4E2A\u76EE\u5F55\u662F\u7A7A\u7684\u3002";
         return;
       }
       this.tableEl.classList.remove("hidden");
@@ -7166,17 +7186,16 @@ WARNING: This link could potentially be dangerous`)) {
           tr.appendChild(td);
         }
         const opsTd = document.createElement("td");
-        opsTd.style.display = "flex";
-        opsTd.style.gap = "4px";
+        opsTd.className = "sftp-ops-cell";
         if (!isDir) {
-          this.addOpBtn(opsTd, "\u7F16\u8F91", () => void this.openEditor(entry.path));
-          this.addOpBtn(opsTd, "\u4E0B\u8F7D", () => this.triggerDownload(entry.path));
+          this.addOpBtn(opsTd, "\u7F16\u8F91", "\u5728\u7EBF\u7F16\u8F91", () => void this.openEditor(entry.path));
+          this.addOpBtn(opsTd, "\u4E0B\u8F7D", "\u4E0B\u8F7D\u5230\u672C\u5730", () => this.triggerDownload(entry.path));
         } else {
-          this.addOpBtn(opsTd, "\u6253\u5305", () => this.triggerArchiveDownload(entry.path));
+          this.addOpBtn(opsTd, "\u6253\u5305", "\u6253\u5305\u4E0B\u8F7D (.tar.gz)", () => this.triggerArchiveDownload(entry.path));
         }
-        this.addOpBtn(opsTd, "\u6539\u540D", () => void this.renameItem(entry));
-        this.addOpBtn(opsTd, "\u6743\u9650", () => void this.chmodItem(entry));
-        this.addOpBtn(opsTd, "\u5220", () => void this.deleteItem(entry));
+        this.addOpBtn(opsTd, "\u6539\u540D", "\u91CD\u547D\u540D", () => void this.renameItem(entry));
+        this.addOpBtn(opsTd, "\u6743\u9650", "\u4FEE\u6539\u6743\u9650\u4F4D (chmod)", () => void this.chmodItem(entry));
+        this.addOpBtn(opsTd, "\u5220\u9664", "\u5220\u9664\u6587\u4EF6\u6216\u76EE\u5F55", () => void this.deleteItem(entry), true);
         tr.appendChild(opsTd);
         const handleOpen = () => {
           if (isDir) {
@@ -7195,20 +7214,57 @@ WARNING: This link could potentially be dangerous`)) {
           e.stopPropagation();
           handleOpen();
         });
+        tr.addEventListener("contextmenu", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          this.openFileContextMenu(e.clientX, e.clientY, entry);
+        });
         this.bodyEl.appendChild(tr);
       }
     }
-    addOpBtn(parent, label, onClick) {
+    addOpBtn(parent, label, title, onClick, isDanger = false) {
       const b = document.createElement("button");
       b.type = "button";
+      b.className = `btn-op${isDanger ? " btn-op-danger" : ""}`;
+      b.title = title;
       b.textContent = label;
-      b.style.padding = "2px 6px";
-      b.style.fontSize = "11px";
       b.addEventListener("click", (e) => {
         e.stopPropagation();
         onClick();
       });
       parent.appendChild(b);
+    }
+    openFileContextMenu(x, y, entry) {
+      this.closeContextMenus();
+      if (!this.fileContextMenu) return;
+      this.activeContextEntry = entry;
+      const isDir = entry.kind === "dir";
+      const openLabel = document.getElementById("ctx-open-label");
+      const openIcon = document.getElementById("ctx-open-icon");
+      const downloadLabel = document.getElementById("ctx-download-label");
+      if (openLabel) openLabel.textContent = isDir ? "\u6253\u5F00\u76EE\u5F55" : "\u5728\u7EBF\u7F16\u8F91";
+      if (openIcon) openIcon.textContent = isDir ? "\u{1F4C2}" : "\u{1F4C4}";
+      if (downloadLabel) downloadLabel.textContent = isDir ? "\u6253\u5305\u4E0B\u8F7D (.tar.gz)" : "\u4E0B\u8F7D\u6587\u4EF6";
+      this.positionMenu(this.fileContextMenu, x, y);
+      this.fileContextMenu.classList.remove("hidden");
+    }
+    openBlankContextMenu(x, y) {
+      this.closeContextMenus();
+      if (!this.blankContextMenu) return;
+      this.positionMenu(this.blankContextMenu, x, y);
+      this.blankContextMenu.classList.remove("hidden");
+    }
+    closeContextMenus() {
+      this.fileContextMenu?.classList.add("hidden");
+      this.blankContextMenu?.classList.add("hidden");
+      this.activeContextEntry = null;
+    }
+    positionMenu(menu, x, y) {
+      const pad = 10;
+      const maxX = window.innerWidth - 180;
+      const maxY = window.innerHeight - 260;
+      menu.style.left = `${Math.min(x, maxX - pad)}px`;
+      menu.style.top = `${Math.min(y, maxY - pad)}px`;
     }
     /** 先列目录。列开了就是指向目录的链接。列不开再按文件打开，当前列表留着。 */
     async openSymlink(path) {
@@ -7643,6 +7699,126 @@ WARNING: This link could potentially be dangerous`)) {
         const ok = await this.saveEditorContent();
         if (ok) this.finishEditor();
       });
+      this.filterInput?.addEventListener("input", () => {
+        this.filterQuery = this.filterInput?.value.trim() ?? "";
+        this.applyFilter();
+      });
+      this.filterInput?.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          if (this.filterInput) this.filterInput.value = "";
+          this.filterQuery = "";
+          this.applyFilter();
+          this.filterInput?.blur();
+        }
+      });
+      this.wrapEl.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        this.openBlankContextMenu(e.clientX, e.clientY);
+      });
+      document.getElementById("ctx-file-open")?.addEventListener("click", () => {
+        const entry = this.activeContextEntry;
+        this.closeContextMenus();
+        if (!entry) return;
+        if (entry.kind === "dir") {
+          void this.load(entry.path);
+        } else if (entry.kind === "file") {
+          void this.openEditor(entry.path);
+        } else {
+          void this.openSymlink(entry.path);
+        }
+      });
+      document.getElementById("ctx-file-download")?.addEventListener("click", () => {
+        const entry = this.activeContextEntry;
+        this.closeContextMenus();
+        if (!entry) return;
+        if (entry.kind === "dir") {
+          void this.triggerArchiveDownload(entry.path);
+        } else {
+          void this.triggerDownload(entry.path);
+        }
+      });
+      document.getElementById("ctx-file-copy-path")?.addEventListener("click", () => {
+        const entry = this.activeContextEntry;
+        this.closeContextMenus();
+        if (!entry) return;
+        void navigator.clipboard.writeText(entry.path);
+        this.deps.toast(`\u5DF2\u590D\u5236\u8DEF\u5F84: ${entry.path}`);
+      });
+      document.getElementById("ctx-file-copy-name")?.addEventListener("click", () => {
+        const entry = this.activeContextEntry;
+        this.closeContextMenus();
+        if (!entry) return;
+        void navigator.clipboard.writeText(entry.name);
+        this.deps.toast(`\u5DF2\u590D\u5236\u6587\u4EF6\u540D: ${entry.name}`);
+      });
+      document.getElementById("ctx-file-rename")?.addEventListener("click", () => {
+        const entry = this.activeContextEntry;
+        this.closeContextMenus();
+        if (entry) void this.renameItem(entry);
+      });
+      document.getElementById("ctx-file-chmod")?.addEventListener("click", () => {
+        const entry = this.activeContextEntry;
+        this.closeContextMenus();
+        if (entry) void this.chmodItem(entry);
+      });
+      document.getElementById("ctx-file-delete")?.addEventListener("click", () => {
+        const entry = this.activeContextEntry;
+        this.closeContextMenus();
+        if (entry) void this.deleteItem(entry);
+      });
+      document.getElementById("ctx-blank-mkdir")?.addEventListener("click", () => {
+        this.closeContextMenus();
+        document.getElementById("sftp-mkdir")?.click();
+      });
+      document.getElementById("ctx-blank-upload")?.addEventListener("click", () => {
+        this.closeContextMenus();
+        fileInput.click();
+      });
+      document.getElementById("ctx-blank-refresh")?.addEventListener("click", () => {
+        this.closeContextMenus();
+        this.invalidateCache(this.currentDir);
+        void this.load(this.currentDir, "notify", true);
+      });
+      document.getElementById("ctx-blank-copy-path")?.addEventListener("click", () => {
+        this.closeContextMenus();
+        void navigator.clipboard.writeText(this.currentDir);
+        this.deps.toast(`\u5DF2\u590D\u5236\u5F53\u524D\u8DEF\u5F84: ${this.currentDir}`);
+      });
+      if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+        document.addEventListener("click", () => this.closeContextMenus());
+        document.addEventListener("keydown", (e) => {
+          if (e.key === "Escape") {
+            this.closeContextMenus();
+            return;
+          }
+          const sftpPanel = document.getElementById("sftp-panel");
+          const isSftpVisible = sftpPanel && !sftpPanel.classList.contains("hidden");
+          if (!isSftpVisible) return;
+          const activeEl = document.activeElement;
+          const isInputActive = activeEl && (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA" || Boolean(activeEl.closest("dialog[open]")));
+          if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+            if (!activeEl?.closest("dialog[open]") && this.filterInput && !this.filterInput.disabled) {
+              e.preventDefault();
+              this.filterInput.focus();
+              this.filterInput.select();
+            }
+            return;
+          }
+          if (!isInputActive) {
+            if (e.key === "Backspace" || e.altKey && e.key === "ArrowUp") {
+              e.preventDefault();
+              const parts = this.currentDir.split("/").filter(Boolean);
+              parts.pop();
+              void this.load(`/${parts.join("/")}`);
+            } else if (e.key === "F5" || e.ctrlKey && e.key.toLowerCase() === "r") {
+              e.preventDefault();
+              this.invalidateCache(this.currentDir);
+              void this.load(this.currentDir, "notify", true);
+            }
+          }
+        });
+      }
     }
   };
 
@@ -8668,10 +8844,15 @@ ${op.command}`;
     const viewMon = document.getElementById("view-monitor");
     const actionText = document.getElementById("sftp-split-action-text");
     const splitIcon = document.getElementById("sftp-split-icon");
+    const navSplitBtn = document.getElementById("nav-btn-split-toggle");
     if (actionText) actionText.textContent = vis.menuActionText;
     if (splitIcon) splitIcon.textContent = isSftpSideSplit ? "\u2715" : "\u25EB";
     const isSplitActiveInView = vis.isSplitActive && currentView === "terminal";
     viewStack?.classList.toggle("split-term-sftp", isSplitActiveInView);
+    if (navSplitBtn) {
+      navSplitBtn.classList.toggle("active", isSplitActiveInView);
+      navSplitBtn.title = isSplitActiveInView ? "\u5173\u95ED\u5E76\u6392\u5206\u5C4F\uFF0C\u8FD8\u539F\u5355\u5C4F\u7EC8\u7AEF (Ctrl+\\)" : "\u4E00\u952E\u5E76\u6392\u5206\u5C4F\uFF1A\u5728\u53F3\u4FA7\u540C\u5C4F\u5C55\u793A\u6587\u4EF6\u7BA1\u7406 (Ctrl+\\)";
+    }
     if (isSplitActiveInView) {
       viewTerm?.classList.add("active");
       viewSftp?.classList.add("active");
@@ -9203,9 +9384,16 @@ ${op.command}`;
         navSftpMenu?.classList.add("hidden");
       }
     });
+    const navBtnSplitToggle = document.getElementById("nav-btn-split-toggle");
+    navBtnSplitToggle?.addEventListener("click", () => {
+      toggleSftpSideSplit();
+    });
     window.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         navSftpMenu?.classList.add("hidden");
+      } else if ((e.ctrlKey || e.metaKey) && e.key === "\\") {
+        e.preventDefault();
+        toggleSftpSideSplit();
       }
     });
     const navOpsToggle = document.getElementById("nav-ops-toggle");

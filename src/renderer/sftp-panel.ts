@@ -75,6 +75,13 @@ export class SftpController {
   private static readonly CACHE_TTL_MS = 30_000;
   private static readonly MAX_CACHE_ENTRIES = 100;
 
+  private readonly filterInput = document.getElementById('sftp-filter') as HTMLInputElement | null;
+  private readonly fileContextMenu = document.getElementById('sftp-file-context-menu') as HTMLDivElement | null;
+  private readonly blankContextMenu = document.getElementById('sftp-blank-context-menu') as HTMLDivElement | null;
+  private activeContextEntry: SftpEntry | null = null;
+  private filterQuery = '';
+  private currentEntries: SftpEntry[] = [];
+
   private readonly pathInput = document.getElementById('sftp-path') as HTMLInputElement;
   private readonly breadcrumbsEl = document.getElementById('sftp-breadcrumbs') as HTMLDivElement;
   private readonly editPathBtn = document.getElementById('sftp-edit-path') as HTMLButtonElement;
@@ -149,13 +156,16 @@ export class SftpController {
     const switched = sid !== this.boundSession;
     this.boundSession = sid;
     const active = Boolean(sid);
-    for (const id of ['sftp-up', 'sftp-path', 'sftp-edit-path', 'sftp-go', 'sftp-mkdir', 'sftp-upload', 'sftp-archive-current', 'sftp-refresh', 'sftp-sync-term']) {
+    for (const id of ['sftp-up', 'sftp-path', 'sftp-edit-path', 'sftp-go', 'sftp-mkdir', 'sftp-upload', 'sftp-archive-current', 'sftp-refresh', 'sftp-sync-term', 'sftp-filter']) {
       const el = document.getElementById(id) as HTMLButtonElement | HTMLInputElement | null;
       if (el) el.disabled = !active;
     }
     if (!sid) {
       this.currentDir = '/';
       this.listedNames = [];
+      this.currentEntries = [];
+      if (this.filterInput) this.filterInput.value = '';
+      this.filterQuery = '';
       this.haveListing = false;
       this.showListingMessage(hostState.emptyMessage || '空闲。连上 SSH 会话后，这里显示该会话的当前目录。', true);
       if (this.breadcrumbsEl) this.breadcrumbsEl.textContent = '';
@@ -259,10 +269,11 @@ export class SftpController {
       this.deps.onDirChange?.(this.currentDir);
       this.listedNames = cached.list.map((entry) => entry.name);
       const visible = cached.list.filter((e) => this.showHidden || !e.name.startsWith('.'));
+      this.currentEntries = visible;
       const sig = `${sid}|${this.currentDir}|${visible.map((e) => `${e.path}:${e.size}:${e.mtimeMs}:${e.mode}`).join('|')}`;
       if (sig !== this.lastSig) {
         this.lastSig = sig;
-        this.renderEntries(visible);
+        this.applyFilter();
       }
       return 'shown';
     }
@@ -285,10 +296,11 @@ export class SftpController {
       this.deps.onDirChange?.(this.currentDir);
       this.listedNames = list.map((entry) => entry.name);
       const visible = list.filter((e) => this.showHidden || !e.name.startsWith('.'));
+      this.currentEntries = visible;
       const sig = `${sid}|${this.currentDir}|${visible.map((e) => `${e.path}:${e.size}:${e.mtimeMs}:${e.mode}`).join('|')}`;
       if (sig === this.lastSig) return 'shown';
       this.lastSig = sig;
-      this.renderEntries(visible);
+      this.applyFilter();
       return 'shown';
     } catch (err) {
       if (!this.listingCurrent(sid, ticket)) return 'idle';
@@ -321,12 +333,22 @@ export class SftpController {
     }
   }
 
+  private applyFilter(): void {
+    if (!this.filterQuery) {
+      this.renderEntries(this.currentEntries);
+      return;
+    }
+    const q = this.filterQuery.toLowerCase();
+    const filtered = this.currentEntries.filter((e) => e.name.toLowerCase().includes(q));
+    this.renderEntries(filtered);
+  }
+
   private renderEntries(entries: SftpEntry[]): void {
     this.bodyEl.textContent = '';
     if (!entries.length) {
       this.tableEl.classList.add('hidden');
       this.emptyEl.classList.remove('hidden');
-      this.emptyEl.textContent = '这个目录是空的。';
+      this.emptyEl.textContent = this.filterQuery ? '未找到匹配的文件或目录。' : '这个目录是空的。';
       return;
     }
     this.tableEl.classList.remove('hidden');
@@ -351,17 +373,16 @@ export class SftpController {
       }
 
       const opsTd = document.createElement('td');
-      opsTd.style.display = 'flex';
-      opsTd.style.gap = '4px';
+      opsTd.className = 'sftp-ops-cell';
       if (!isDir) {
-        this.addOpBtn(opsTd, '编辑', () => void this.openEditor(entry.path));
-        this.addOpBtn(opsTd, '下载', () => this.triggerDownload(entry.path));
+        this.addOpBtn(opsTd, '编辑', '在线编辑', () => void this.openEditor(entry.path));
+        this.addOpBtn(opsTd, '下载', '下载到本地', () => this.triggerDownload(entry.path));
       } else {
-        this.addOpBtn(opsTd, '打包', () => this.triggerArchiveDownload(entry.path));
+        this.addOpBtn(opsTd, '打包', '打包下载 (.tar.gz)', () => this.triggerArchiveDownload(entry.path));
       }
-      this.addOpBtn(opsTd, '改名', () => void this.renameItem(entry));
-      this.addOpBtn(opsTd, '权限', () => void this.chmodItem(entry));
-      this.addOpBtn(opsTd, '删', () => void this.deleteItem(entry));
+      this.addOpBtn(opsTd, '改名', '重命名', () => void this.renameItem(entry));
+      this.addOpBtn(opsTd, '权限', '修改权限位 (chmod)', () => void this.chmodItem(entry));
+      this.addOpBtn(opsTd, '删除', '删除文件或目录', () => void this.deleteItem(entry), true);
       tr.appendChild(opsTd);
 
       const handleOpen = () => {
@@ -382,21 +403,64 @@ export class SftpController {
         e.stopPropagation();
         handleOpen();
       });
+      tr.addEventListener('contextmenu', (e: MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.openFileContextMenu(e.clientX, e.clientY, entry);
+      });
       this.bodyEl.appendChild(tr);
     }
   }
 
-  private addOpBtn(parent: HTMLElement, label: string, onClick: () => void): void {
+  private addOpBtn(parent: HTMLElement, label: string, title: string, onClick: () => void, isDanger = false): void {
     const b = document.createElement('button');
     b.type = 'button';
+    b.className = `btn-op${isDanger ? ' btn-op-danger' : ''}`;
+    b.title = title;
     b.textContent = label;
-    b.style.padding = '2px 6px';
-    b.style.fontSize = '11px';
     b.addEventListener('click', (e) => {
       e.stopPropagation();
       onClick();
     });
     parent.appendChild(b);
+  }
+
+  private openFileContextMenu(x: number, y: number, entry: SftpEntry): void {
+    this.closeContextMenus();
+    if (!this.fileContextMenu) return;
+    this.activeContextEntry = entry;
+    const isDir = entry.kind === 'dir';
+
+    const openLabel = document.getElementById('ctx-open-label');
+    const openIcon = document.getElementById('ctx-open-icon');
+    const downloadLabel = document.getElementById('ctx-download-label');
+    if (openLabel) openLabel.textContent = isDir ? '打开目录' : '在线编辑';
+    if (openIcon) openIcon.textContent = isDir ? '📂' : '📄';
+    if (downloadLabel) downloadLabel.textContent = isDir ? '打包下载 (.tar.gz)' : '下载文件';
+
+    this.positionMenu(this.fileContextMenu, x, y);
+    this.fileContextMenu.classList.remove('hidden');
+  }
+
+  private openBlankContextMenu(x: number, y: number): void {
+    this.closeContextMenus();
+    if (!this.blankContextMenu) return;
+    this.positionMenu(this.blankContextMenu, x, y);
+    this.blankContextMenu.classList.remove('hidden');
+  }
+
+  private closeContextMenus(): void {
+    this.fileContextMenu?.classList.add('hidden');
+    this.blankContextMenu?.classList.add('hidden');
+    this.activeContextEntry = null;
+  }
+
+  private positionMenu(menu: HTMLElement, x: number, y: number): void {
+    const pad = 10;
+    const maxX = window.innerWidth - 180;
+    const maxY = window.innerHeight - 260;
+    menu.style.left = `${Math.min(x, maxX - pad)}px`;
+    menu.style.top = `${Math.min(y, maxY - pad)}px`;
   }
 
   /** 先列目录。列开了就是指向目录的链接。列不开再按文件打开，当前列表留着。 */
@@ -853,5 +917,151 @@ export class SftpController {
       const ok = await this.saveEditorContent();
       if (ok) this.finishEditor();
     });
+
+    // 内存极速过滤搜索（0 网络开销）
+    this.filterInput?.addEventListener('input', () => {
+      this.filterQuery = this.filterInput?.value.trim() ?? '';
+      this.applyFilter();
+    });
+    this.filterInput?.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        if (this.filterInput) this.filterInput.value = '';
+        this.filterQuery = '';
+        this.applyFilter();
+        this.filterInput?.blur();
+      }
+    });
+
+    // 右键上下文菜单与空白处菜单
+    this.wrapEl.addEventListener('contextmenu', (e: MouseEvent) => {
+      e.preventDefault();
+      this.openBlankContextMenu(e.clientX, e.clientY);
+    });
+
+    document.getElementById('ctx-file-open')?.addEventListener('click', () => {
+      const entry = this.activeContextEntry;
+      this.closeContextMenus();
+      if (!entry) return;
+      if (entry.kind === 'dir') {
+        void this.load(entry.path);
+      } else if (entry.kind === 'file') {
+        void this.openEditor(entry.path);
+      } else {
+        void this.openSymlink(entry.path);
+      }
+    });
+
+    document.getElementById('ctx-file-download')?.addEventListener('click', () => {
+      const entry = this.activeContextEntry;
+      this.closeContextMenus();
+      if (!entry) return;
+      if (entry.kind === 'dir') {
+        void this.triggerArchiveDownload(entry.path);
+      } else {
+        void this.triggerDownload(entry.path);
+      }
+    });
+
+    document.getElementById('ctx-file-copy-path')?.addEventListener('click', () => {
+      const entry = this.activeContextEntry;
+      this.closeContextMenus();
+      if (!entry) return;
+      void navigator.clipboard.writeText(entry.path);
+      this.deps.toast(`已复制路径: ${entry.path}`);
+    });
+
+    document.getElementById('ctx-file-copy-name')?.addEventListener('click', () => {
+      const entry = this.activeContextEntry;
+      this.closeContextMenus();
+      if (!entry) return;
+      void navigator.clipboard.writeText(entry.name);
+      this.deps.toast(`已复制文件名: ${entry.name}`);
+    });
+
+    document.getElementById('ctx-file-rename')?.addEventListener('click', () => {
+      const entry = this.activeContextEntry;
+      this.closeContextMenus();
+      if (entry) void this.renameItem(entry);
+    });
+
+    document.getElementById('ctx-file-chmod')?.addEventListener('click', () => {
+      const entry = this.activeContextEntry;
+      this.closeContextMenus();
+      if (entry) void this.chmodItem(entry);
+    });
+
+    document.getElementById('ctx-file-delete')?.addEventListener('click', () => {
+      const entry = this.activeContextEntry;
+      this.closeContextMenus();
+      if (entry) void this.deleteItem(entry);
+    });
+
+    document.getElementById('ctx-blank-mkdir')?.addEventListener('click', () => {
+      this.closeContextMenus();
+      document.getElementById('sftp-mkdir')?.click();
+    });
+
+    document.getElementById('ctx-blank-upload')?.addEventListener('click', () => {
+      this.closeContextMenus();
+      fileInput.click();
+    });
+
+    document.getElementById('ctx-blank-refresh')?.addEventListener('click', () => {
+      this.closeContextMenus();
+      this.invalidateCache(this.currentDir);
+      void this.load(this.currentDir, 'notify', true);
+    });
+
+    document.getElementById('ctx-blank-copy-path')?.addEventListener('click', () => {
+      this.closeContextMenus();
+      void navigator.clipboard.writeText(this.currentDir);
+      this.deps.toast(`已复制当前路径: ${this.currentDir}`);
+    });
+
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      document.addEventListener('click', () => this.closeContextMenus());
+
+      // SFTP 快捷键支持 (Backspace 返回上一级, F5 刷新, Ctrl+F 搜索过滤)
+      document.addEventListener('keydown', (e: KeyboardEvent) => {
+        if (e.key === 'Escape') {
+          this.closeContextMenus();
+          return;
+        }
+
+        const sftpPanel = document.getElementById('sftp-panel');
+        const isSftpVisible = sftpPanel && !sftpPanel.classList.contains('hidden');
+        if (!isSftpVisible) return;
+
+        const activeEl = document.activeElement;
+        const isInputActive = activeEl && (
+          activeEl.tagName === 'INPUT' ||
+          activeEl.tagName === 'TEXTAREA' ||
+          Boolean(activeEl.closest('dialog[open]'))
+        );
+
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+          if (!activeEl?.closest('dialog[open]') && this.filterInput && !this.filterInput.disabled) {
+            e.preventDefault();
+            this.filterInput.focus();
+            this.filterInput.select();
+          }
+          return;
+        }
+
+        if (!isInputActive) {
+          if (e.key === 'Backspace' || (e.altKey && e.key === 'ArrowUp')) {
+            e.preventDefault();
+            const parts = this.currentDir.split('/').filter(Boolean);
+            parts.pop();
+            void this.load(`/${parts.join('/')}`);
+          } else if (e.key === 'F5' || (e.ctrlKey && e.key.toLowerCase() === 'r')) {
+            e.preventDefault();
+            this.invalidateCache(this.currentDir);
+            void this.load(this.currentDir, 'notify', true);
+          }
+        }
+      });
+    }
   }
 }

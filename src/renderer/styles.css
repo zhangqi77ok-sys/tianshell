@@ -37,12 +37,12 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); 
 .mono { font-family: "JetBrains Mono", "SF Mono", "Cascadia Code", Consolas, monospace; font-variant-numeric: tabular-nums; font-variant-ligatures: none; }
 .hidden { display: none !important; }
 
-button, input, select, textarea { font: inherit; color: inherit; border-radius: 4px; transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease; }
+button, input, select, textarea { font: inherit; color: inherit; border-radius: 4px; transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease, transform 0.06s ease; }
 input, select, textarea { background: var(--elevated); border: 1px solid var(--line); padding: 5px 8px; font-size: 12px; }
 input:focus, select:focus, textarea:focus { border-color: rgba(255, 255, 255, 0.25); outline: none; }
 button { border: 1px solid var(--line); background: var(--elevated); color: var(--muted); padding: 3px 8px; min-height: 26px; cursor: pointer; font-size: 11.5px; display: inline-flex; align-items: center; justify-content: center; gap: 4px; }
 button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.05); border-color: rgba(255, 255, 255, 0.12); color: var(--ink); }
-button:active:not(:disabled) { background: rgba(255, 255, 255, 0.08); }
+button:active:not(:disabled) { background: rgba(255, 255, 255, 0.08); transform: scale(0.97); }
 button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
 button:disabled { opacity: 0.4; cursor: not-allowed; }
 button.primary { background: var(--amber); color: var(--amber-ink); border-color: var(--amber); font-weight: 500; }
@@ -1390,5 +1390,142 @@ dialog.editor-dialog.maximized {
   color: #f87171;
   border-color: rgba(248, 113, 113, 0.25);
   background: rgba(248, 113, 113, 0.08);
+}
+
+/* 顶栏一键并排分屏按钮 */
+.btn-split-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  font-size: 11.5px;
+  font-weight: 500;
+  border-radius: 6px;
+  background: var(--elevated);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+  user-select: none;
+}
+.btn-split-toggle:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: var(--ink);
+}
+.btn-split-toggle.active {
+  background: rgba(56, 189, 248, 0.16);
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.25);
+}
+.btn-split-toggle .split-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* SFTP 目录文件即时筛选框 */
+.sftp-filter-group {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+}
+.sftp-filter-input {
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--ink);
+  width: 175px;
+  transition: all 0.15s ease;
+}
+.sftp-filter-input:focus {
+  width: 220px;
+  border-color: var(--accent);
+  background: var(--surface);
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.25);
+}
+
+/* SFTP 操作列精美药丸按钮组 */
+.sftp-ops-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+.btn-op {
+  padding: 1px 6px;
+  font-size: 10.5px;
+  min-height: 20px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+.btn-op:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: var(--ink);
+}
+.btn-op-danger {
+  color: #fb7185;
+  border-color: rgba(244, 63, 94, 0.25);
+}
+.btn-op-danger:hover {
+  background: rgba(244, 63, 94, 0.15);
+  border-color: rgba(244, 63, 94, 0.5);
+  color: #f43f5e;
+}
+
+/* SFTP 现代磨砂右键上下文菜单 */
+.sftp-file-context-menu {
+  position: fixed;
+  z-index: 9999;
+  min-width: 165px;
+  background: rgba(21, 25, 34, 0.96);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.35);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.context-divider {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+  margin: 3px 0;
+}
+.sftp-file-context-menu .context-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  font-size: 11.5px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.1s ease;
+}
+.sftp-file-context-menu .context-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+.sftp-file-context-menu .context-item.danger {
+  color: #fb7185;
+}
+.sftp-file-context-menu .context-item.danger:hover {
+  background: rgba(244, 63, 94, 0.15);
+  color: #f43f5e;
 }
 
