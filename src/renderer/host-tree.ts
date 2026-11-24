@@ -199,6 +199,7 @@ export class HostTreeController {
     item.append(left, ops);
     item.addEventListener('click', () => this.deps.onSelectHost?.(h.id));
     item.addEventListener('dblclick', (event) => {
+      if ((event.target as HTMLElement | null)?.closest('.host-actions')) return;
       if (event.shiftKey) this.deps.onOpenAnother(h.id);
       else this.deps.onOpenHost(h.id);
     });

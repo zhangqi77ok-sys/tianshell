@@ -81,6 +81,8 @@ export class SftpController {
   private activeContextEntry: SftpEntry | null = null;
   private filterQuery = '';
   private currentEntries: SftpEntry[] = [];
+  private sortField: 'name' | 'size' | 'mtime' = 'name';
+  private sortOrder: 'asc' | 'desc' = 'asc';
 
   private readonly pathInput = document.getElementById('sftp-path') as HTMLInputElement;
   private readonly breadcrumbsEl = document.getElementById('sftp-breadcrumbs') as HTMLDivElement;
@@ -333,14 +335,60 @@ export class SftpController {
     }
   }
 
-  private applyFilter(): void {
-    if (!this.filterQuery) {
-      this.renderEntries(this.currentEntries);
-      return;
+  private sortEntries(entries: SftpEntry[]): SftpEntry[] {
+    const isAsc = this.sortOrder === 'asc';
+    return [...entries].sort((a, b) => {
+      // 目录项始终优先置顶展示
+      const aIsDir = a.kind === 'dir';
+      const bIsDir = b.kind === 'dir';
+      if (aIsDir && !bIsDir) return -1;
+      if (!aIsDir && bIsDir) return 1;
+
+      let cmp = 0;
+      if (this.sortField === 'name') {
+        cmp = a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true });
+      } else if (this.sortField === 'size') {
+        cmp = a.size - b.size;
+      } else if (this.sortField === 'mtime') {
+        cmp = (a.mtimeMs || 0) - (b.mtimeMs || 0);
+      }
+      return isAsc ? cmp : -cmp;
+    });
+  }
+
+  private updateSortIndicators(): void {
+    for (const field of ['name', 'size', 'mtime'] as const) {
+      const th = document.getElementById(`th-sort-${field}`);
+      const indicator = th?.querySelector('.sort-indicator');
+      if (indicator) {
+        if (this.sortField === field) {
+          indicator.textContent = this.sortOrder === 'asc' ? ' ▲' : ' ▼';
+        } else {
+          indicator.textContent = '';
+        }
+      }
     }
-    const q = this.filterQuery.toLowerCase();
-    const filtered = this.currentEntries.filter((e) => e.name.toLowerCase().includes(q));
-    this.renderEntries(filtered);
+  }
+
+  private setSort(field: 'name' | 'size' | 'mtime'): void {
+    if (this.sortField === field) {
+      this.sortOrder = this.sortOrder === 'asc' ? 'desc' : 'asc';
+    } else {
+      this.sortField = field;
+      this.sortOrder = field === 'mtime' || field === 'size' ? 'desc' : 'asc';
+    }
+    this.applyFilter();
+  }
+
+  private applyFilter(): void {
+    let list = this.currentEntries;
+    if (this.filterQuery) {
+      const q = this.filterQuery.toLowerCase();
+      list = list.filter((e) => e.name.toLowerCase().includes(q));
+    }
+    const sorted = this.sortEntries(list);
+    this.updateSortIndicators();
+    this.renderEntries(sorted);
   }
 
   private renderEntries(entries: SftpEntry[]): void {
@@ -427,7 +475,7 @@ export class SftpController {
 
   private openFileContextMenu(x: number, y: number, entry: SftpEntry): void {
     this.closeContextMenus();
-    if (!this.fileContextMenu) return;
+    if (!this.fileContextMenu || !this.deps.getActiveSshId()) return;
     this.activeContextEntry = entry;
     const isDir = entry.kind === 'dir';
 
@@ -444,7 +492,7 @@ export class SftpController {
 
   private openBlankContextMenu(x: number, y: number): void {
     this.closeContextMenus();
-    if (!this.blankContextMenu) return;
+    if (!this.blankContextMenu || !this.deps.getActiveSshId()) return;
     this.positionMenu(this.blankContextMenu, x, y);
     this.blankContextMenu.classList.remove('hidden');
   }
@@ -933,8 +981,15 @@ export class SftpController {
       }
     });
 
+    // 表头多维排序（名称、大小、时间）
+    document.getElementById('th-sort-name')?.addEventListener('click', () => this.setSort('name'));
+    document.getElementById('th-sort-size')?.addEventListener('click', () => this.setSort('size'));
+    document.getElementById('th-sort-mtime')?.addEventListener('click', () => this.setSort('mtime'));
+
     // 右键上下文菜单与空白处菜单
     this.wrapEl.addEventListener('contextmenu', (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest('thead')) return;
       e.preventDefault();
       this.openBlankContextMenu(e.clientX, e.clientY);
     });

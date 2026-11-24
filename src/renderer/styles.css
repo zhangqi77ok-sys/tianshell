@@ -1529,3 +1529,21 @@ dialog.editor-dialog.maximized {
   color: #f43f5e;
 }
 
+/* SFTP 表头排序交互 */
+.sftp-table th.sortable {
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.12s ease;
+}
+.sftp-table th.sortable:hover {
+  color: var(--accent);
+}
+.sftp-table th.sortable .sort-indicator {
+  display: inline-block;
+  margin-left: 3px;
+  font-size: 9px;
+  color: var(--accent);
+  vertical-align: baseline;
+}
+
+

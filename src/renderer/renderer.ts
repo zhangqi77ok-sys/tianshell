@@ -664,6 +664,14 @@ function createTermInstance(info: ConnectInfo): void {
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
+  term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+    if (event.ctrlKey || event.metaKey) {
+      if (event.key === 'PageUp' || event.key === 'PageDown' || event.key === '\\') {
+        return false;
+      }
+    }
+    return true;
+  });
   term.open(slot);
   const sourceId = info.sessionId;
   const dataSub = term.onData((data) => {
@@ -995,6 +1003,19 @@ function selectTab(sessionId: string | null): void {
   updateSessionContext();
 }
 
+function cycleTab(direction: 'next' | 'prev'): void {
+  const tabIds = Array.from(tabs.keys());
+  if (tabIds.length <= 1) return;
+  const currentIdx = activeId ? tabIds.indexOf(activeId) : -1;
+  let targetIdx: number;
+  if (direction === 'next') {
+    targetIdx = currentIdx >= 0 ? (currentIdx + 1) % tabIds.length : 0;
+  } else {
+    targetIdx = currentIdx >= 0 ? (currentIdx - 1 + tabIds.length) % tabIds.length : tabIds.length - 1;
+  }
+  selectTab(tabIds[targetIdx]);
+}
+
 function broadcastOn(): boolean {
   return (document.getElementById('broadcast-toggle') as HTMLInputElement | null)?.checked ?? false;
 }
@@ -1098,6 +1119,11 @@ function renderTabs(): void {
 async function disposeTab(sessionId: string, selectFallback: boolean): Promise<void> {
   const tab = tabs.get(sessionId);
   if (!tab) return;
+  const existingAiTimer = aiTabTimerMap.get(sessionId);
+  if (existingAiTimer) {
+    clearTimeout(existingAiTimer);
+    aiTabTimerMap.delete(sessionId);
+  }
   try {
     await webApi.closeSession(sessionId);
   } catch {
@@ -1398,6 +1424,9 @@ function bindGlobalUi(): void {
     } else if ((e.ctrlKey || e.metaKey) && e.key === '\\') {
       e.preventDefault();
       toggleSftpSideSplit();
+    } else if ((e.ctrlKey || e.metaKey) && (e.key === 'PageUp' || e.key === 'PageDown')) {
+      e.preventDefault();
+      cycleTab(e.key === 'PageDown' ? 'next' : 'prev');
     }
   });
 

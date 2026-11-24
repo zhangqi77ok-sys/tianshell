@@ -200,7 +200,13 @@
                 <div id="sftp-empty" class="empty-muted">空闲。连上 SSH 会话后，这里显示该会话的当前目录。</div>
                 <table id="sftp-table" class="sftp-table hidden">
                   <thead>
-                    <tr><th>名称</th><th>权限</th><th>大小</th><th>修改时间</th><th>操作</th></tr>
+                    <tr>
+                      <th id="th-sort-name" class="sortable" title="按名称排序">名称<span class="sort-indicator"></span></th>
+                      <th>权限</th>
+                      <th id="th-sort-size" class="sortable" title="按文件大小排序">大小<span class="sort-indicator"></span></th>
+                      <th id="th-sort-mtime" class="sortable" title="按修改时间排序">修改时间<span class="sort-indicator"></span></th>
+                      <th>操作</th>
+                    </tr>
                   </thead>
                   <tbody id="sftp-body"></tbody>
                 </table>

@@ -6430,6 +6430,7 @@ WARNING: This link could potentially be dangerous`)) {
       item.append(left, ops);
       item.addEventListener("click", () => this.deps.onSelectHost?.(h.id));
       item.addEventListener("dblclick", (event) => {
+        if (event.target?.closest(".host-actions")) return;
         if (event.shiftKey) this.deps.onOpenAnother(h.id);
         else this.deps.onOpenHost(h.id);
       });
@@ -6919,6 +6920,8 @@ WARNING: This link could potentially be dangerous`)) {
     activeContextEntry = null;
     filterQuery = "";
     currentEntries = [];
+    sortField = "name";
+    sortOrder = "asc";
     pathInput = document.getElementById("sftp-path");
     breadcrumbsEl = document.getElementById("sftp-breadcrumbs");
     editPathBtn = document.getElementById("sftp-edit-path");
@@ -7149,14 +7152,55 @@ WARNING: This link could potentially be dangerous`)) {
         void this.load(this.currentDir, "notify", true);
       }
     }
-    applyFilter() {
-      if (!this.filterQuery) {
-        this.renderEntries(this.currentEntries);
-        return;
+    sortEntries(entries) {
+      const isAsc = this.sortOrder === "asc";
+      return [...entries].sort((a, b) => {
+        const aIsDir = a.kind === "dir";
+        const bIsDir = b.kind === "dir";
+        if (aIsDir && !bIsDir) return -1;
+        if (!aIsDir && bIsDir) return 1;
+        let cmp = 0;
+        if (this.sortField === "name") {
+          cmp = a.name.localeCompare(b.name, void 0, { sensitivity: "base", numeric: true });
+        } else if (this.sortField === "size") {
+          cmp = a.size - b.size;
+        } else if (this.sortField === "mtime") {
+          cmp = (a.mtimeMs || 0) - (b.mtimeMs || 0);
+        }
+        return isAsc ? cmp : -cmp;
+      });
+    }
+    updateSortIndicators() {
+      for (const field of ["name", "size", "mtime"]) {
+        const th = document.getElementById(`th-sort-${field}`);
+        const indicator = th?.querySelector(".sort-indicator");
+        if (indicator) {
+          if (this.sortField === field) {
+            indicator.textContent = this.sortOrder === "asc" ? " \u25B2" : " \u25BC";
+          } else {
+            indicator.textContent = "";
+          }
+        }
       }
-      const q = this.filterQuery.toLowerCase();
-      const filtered = this.currentEntries.filter((e) => e.name.toLowerCase().includes(q));
-      this.renderEntries(filtered);
+    }
+    setSort(field) {
+      if (this.sortField === field) {
+        this.sortOrder = this.sortOrder === "asc" ? "desc" : "asc";
+      } else {
+        this.sortField = field;
+        this.sortOrder = field === "mtime" || field === "size" ? "desc" : "asc";
+      }
+      this.applyFilter();
+    }
+    applyFilter() {
+      let list = this.currentEntries;
+      if (this.filterQuery) {
+        const q = this.filterQuery.toLowerCase();
+        list = list.filter((e) => e.name.toLowerCase().includes(q));
+      }
+      const sorted = this.sortEntries(list);
+      this.updateSortIndicators();
+      this.renderEntries(sorted);
     }
     renderEntries(entries) {
       this.bodyEl.textContent = "";
@@ -7236,7 +7280,7 @@ WARNING: This link could potentially be dangerous`)) {
     }
     openFileContextMenu(x, y, entry) {
       this.closeContextMenus();
-      if (!this.fileContextMenu) return;
+      if (!this.fileContextMenu || !this.deps.getActiveSshId()) return;
       this.activeContextEntry = entry;
       const isDir = entry.kind === "dir";
       const openLabel = document.getElementById("ctx-open-label");
@@ -7250,7 +7294,7 @@ WARNING: This link could potentially be dangerous`)) {
     }
     openBlankContextMenu(x, y) {
       this.closeContextMenus();
-      if (!this.blankContextMenu) return;
+      if (!this.blankContextMenu || !this.deps.getActiveSshId()) return;
       this.positionMenu(this.blankContextMenu, x, y);
       this.blankContextMenu.classList.remove("hidden");
     }
@@ -7712,7 +7756,12 @@ WARNING: This link could potentially be dangerous`)) {
           this.filterInput?.blur();
         }
       });
+      document.getElementById("th-sort-name")?.addEventListener("click", () => this.setSort("name"));
+      document.getElementById("th-sort-size")?.addEventListener("click", () => this.setSort("size"));
+      document.getElementById("th-sort-mtime")?.addEventListener("click", () => this.setSort("mtime"));
       this.wrapEl.addEventListener("contextmenu", (e) => {
+        const target = e.target;
+        if (target?.closest("thead")) return;
         e.preventDefault();
         this.openBlankContextMenu(e.clientX, e.clientY);
       });
@@ -8740,6 +8789,14 @@ ${op.command}`;
     });
     const fit = new import_addon_fit.FitAddon();
     term.loadAddon(fit);
+    term.attachCustomKeyEventHandler((event) => {
+      if (event.ctrlKey || event.metaKey) {
+        if (event.key === "PageUp" || event.key === "PageDown" || event.key === "\\") {
+          return false;
+        }
+      }
+      return true;
+    });
     term.open(slot);
     const sourceId = info.sessionId;
     const dataSub = term.onData((data) => {
@@ -9024,6 +9081,18 @@ ${op.command}`;
     }
     updateSessionContext();
   }
+  function cycleTab(direction) {
+    const tabIds = Array.from(tabs.keys());
+    if (tabIds.length <= 1) return;
+    const currentIdx = activeId ? tabIds.indexOf(activeId) : -1;
+    let targetIdx;
+    if (direction === "next") {
+      targetIdx = currentIdx >= 0 ? (currentIdx + 1) % tabIds.length : 0;
+    } else {
+      targetIdx = currentIdx >= 0 ? (currentIdx - 1 + tabIds.length) % tabIds.length : tabIds.length - 1;
+    }
+    selectTab(tabIds[targetIdx]);
+  }
   function broadcastOn() {
     return document.getElementById("broadcast-toggle")?.checked ?? false;
   }
@@ -9121,6 +9190,11 @@ ${op.command}`;
   async function disposeTab(sessionId, selectFallback) {
     const tab = tabs.get(sessionId);
     if (!tab) return;
+    const existingAiTimer = aiTabTimerMap.get(sessionId);
+    if (existingAiTimer) {
+      clearTimeout(existingAiTimer);
+      aiTabTimerMap.delete(sessionId);
+    }
     try {
       await webApi.closeSession(sessionId);
     } catch {
@@ -9394,6 +9468,9 @@ ${op.command}`;
       } else if ((e.ctrlKey || e.metaKey) && e.key === "\\") {
         e.preventDefault();
         toggleSftpSideSplit();
+      } else if ((e.ctrlKey || e.metaKey) && (e.key === "PageUp" || e.key === "PageDown")) {
+        e.preventDefault();
+        cycleTab(e.key === "PageDown" ? "next" : "prev");
       }
     });
     const navOpsToggle = document.getElementById("nav-ops-toggle");

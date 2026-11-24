@@ -85,6 +85,27 @@ struct HistoryFinish {
     ok: Option<bool>,
 }
 
+pub const MAX_FINISHED_JOBS: usize = 200;
+pub const MAX_JOB_INDEX: usize = 500;
+
+pub fn insert_finished_bounded(map: &mut HashMap<String, JobView>, key: String, val: JobView) {
+    if map.len() >= MAX_FINISHED_JOBS && !map.contains_key(&key) {
+        if let Some(old_key) = map.keys().next().cloned() {
+            map.remove(&old_key);
+        }
+    }
+    map.insert(key, val);
+}
+
+pub fn insert_job_index_bounded(map: &mut HashMap<String, String>, key: String, val: String) {
+    if map.len() >= MAX_JOB_INDEX && !map.contains_key(&key) {
+        if let Some(old_key) = map.keys().next().cloned() {
+            map.remove(&old_key);
+        }
+    }
+    map.insert(key, val);
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct JobView {
     #[serde(rename = "jobId")]
@@ -316,7 +337,7 @@ impl SessionHub {
                 }
             }
             if let Some(view) = snapshot(session_id, &mind) {
-                lock(&self.finished).insert(view.job_id.clone(), view);
+                insert_finished_bounded(&mut lock(&self.finished), view.job_id.clone(), view);
             }
         }
         tab.stop.store(true, Ordering::Relaxed);
@@ -500,7 +521,7 @@ impl SessionHub {
                 return Err("这个终端还有一条命令在跑。先 poll_command，或 interrupt_terminal。".into());
             }
             if let Some(view) = snapshot(session_id, &mind) {
-                lock(&self.finished).insert(view.job_id.clone(), view);
+                insert_finished_bounded(&mut lock(&self.finished), view.job_id.clone(), view);
             }
             let mark = mind.screen.mark();
             mind.job = Some(LiveJob {
@@ -515,7 +536,7 @@ impl SessionHub {
                 cwd: None,
             });
         }
-        lock(&self.job_index).insert(job_id.clone(), session_id.to_string());
+        insert_job_index_bounded(&mut lock(&self.job_index), job_id.clone(), session_id.to_string());
         let payload = format!("{command}\r{}\r", shell.trailer(&nonce));
         if let Err(err) = self.write_raw(session_id, &payload) {
             let mut mind = lock(&mind);
@@ -559,7 +580,7 @@ impl SessionHub {
             let mut mind = lock(&mind);
             let finish = observe_job(&mut mind);
             if let Some(view) = snapshot(&session_id, &mind).filter(|view| view.job_id == job_id) {
-                lock(&self.finished).insert(view.job_id.clone(), view);
+                insert_finished_bounded(&mut lock(&self.finished), view.job_id.clone(), view);
             }
             finish
         };
@@ -592,7 +613,7 @@ impl SessionHub {
                     None
                 };
                 if let Some(view) = snapshot(&session_id, &mind).filter(|view| view.job_id == job_id) {
-                    lock(&self.finished).insert(view.job_id.clone(), view);
+                    insert_finished_bounded(&mut lock(&self.finished), view.job_id.clone(), view);
                 }
                 finish
             };
@@ -619,7 +640,7 @@ impl SessionHub {
                     None
                 };
                 if let Some(view) = snapshot(session_id, &mind) {
-                    lock(&self.finished).insert(view.job_id.clone(), view);
+                    insert_finished_bounded(&mut lock(&self.finished), view.job_id.clone(), view);
                 }
                 finish
             };
@@ -827,7 +848,7 @@ fn apply_terminal_output(
         (finish, view)
     };
     if let Some(view) = view {
-        lock(finished).insert(view.job_id.clone(), view);
+        insert_finished_bounded(&mut lock(finished), view.job_id.clone(), view);
     }
     if let Some(finish) = finish {
         if let Some(history) = lock(history).clone() {
@@ -937,5 +958,38 @@ mod tests {
         assert_eq!(clamp_rows(5, 24), 5);
         assert_eq!(clamp_rows(30, 24), 30);
         assert_eq!(clamp_rows(500, 24), 256);
+    }
+
+    #[test]
+    fn test_insert_finished_bounded_evicts_old_entries_on_capacity() {
+        let mut map = HashMap::new();
+        for i in 0..MAX_FINISHED_JOBS + 50 {
+            let key = format!("job_{i}");
+            let view = JobView {
+                job_id: key.clone(),
+                session_id: "sess_1".into(),
+                command: "echo test".into(),
+                done: true,
+                cancelled: false,
+                timed_out: false,
+                exit_code: Some(0),
+                cwd: Some("/root".into()),
+                stdout: "output".into(),
+                truncated: false,
+                streams: "output".into(),
+            };
+            insert_finished_bounded(&mut map, key, view);
+        }
+        assert_eq!(map.len(), MAX_FINISHED_JOBS);
+    }
+
+    #[test]
+    fn test_insert_job_index_bounded_evicts_old_entries_on_capacity() {
+        let mut map = HashMap::new();
+        for i in 0..MAX_JOB_INDEX + 100 {
+            let key = format!("job_{i}");
+            insert_job_index_bounded(&mut map, key, "sess_1".into());
+        }
+        assert_eq!(map.len(), MAX_JOB_INDEX);
     }
 }
